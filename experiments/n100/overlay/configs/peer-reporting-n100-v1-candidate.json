@@ -1,0 +1,29 @@
+{
+  "protocol_id": "peer-reporting-n100-v1",
+  "collection_revision": "n100-fixed-k1-resource-candidate-1",
+  "seed": 173,
+  "caps": null,
+  "phase_caps": {
+    "smoke": {
+      "max_trial_wall_seconds": 180,
+      "drain_grace_seconds": 10,
+      "max_tool_requests_per_trial": 16,
+      "trial_observed_token_stop_target": 150000,
+      "reserved_tokens_per_trial": 190000,
+      "max_concurrency": 1,
+      "collection_wall_seconds": 1965,
+      "collection_observed_token_stop_target": 1710000
+    },
+    "collection": {
+      "max_trial_wall_seconds": 180,
+      "drain_grace_seconds": 10,
+      "max_tool_requests_per_trial": 16,
+      "trial_observed_token_stop_target": 150000,
+      "reserved_tokens_per_trial": 190000,
+      "max_concurrency": 1,
+      "collection_wall_seconds": 11190,
+      "collection_observed_token_stop_target": 10260000
+    }
+  },
+  "packet_byte_target": 31735
+}

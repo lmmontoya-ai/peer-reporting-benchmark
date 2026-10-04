@@ -26,6 +26,16 @@ private review bindings stay private.
 [Open the demo](https://lmmontoya-ai.github.io/peer-reporting-benchmark/) or read
 [the project write-up](docs/peer-reporting-project-writeup.md).
 
+## Separate 100-peer extension
+
+The [N100 results page](https://lmmontoya-ai.github.io/peer-reporting-benchmark/n100/)
+shows a separate study with one observer and up to 100 scripted peers. It has
+54 collection assignments and 9 smoke checks. Its fresh 16-peer group is the
+comparison group. Earlier P1 observations are not a matched baseline.
+
+The [N100 reproduction instructions](experiments/n100/README.md) build the new
+setup offline. They preserve the P1 source and make no model calls.
+
 ## Mechanical findings
 
 The first finding is about the reporting interface. A positive main assignment

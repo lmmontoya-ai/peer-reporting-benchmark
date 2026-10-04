@@ -184,5 +184,53 @@
     },
     "independent_model_meaning_review": "passed; no factual meaning blockers",
     "meaning_review_sha256": "e210d2e3092bb580b990a6fa0d7f53736acc0de35f378b7205e197e25dc6d57b"
+  },
+  "n100_extension_release_v1": {
+    "kind": "public_n100_release_validation_v1",
+    "created_utc": "2026-10-04T19:50:14.226969+00:00",
+    "base_commit": "1abc8a477417b54373556ae274217d508bcf0c98",
+    "payload_files": 156,
+    "payload_bytes": 7675227,
+    "manifest_sha256": "f177a881ff68fcb64fe7f986c7149e8d735e2297d93da6d9fe5665c9683fd30c",
+    "independent_public_audit_sha256": "c24b7ed890ea8fa5d7f4c59ef800d1bfd722f082a41efe40137c5859a4822b7d",
+    "privacy_audit": "pass; no original private review/provider identifiers or credentials found",
+    "new_model_calls": 0,
+    "frozen_p1_source_and_evidence_changed": false,
+    "n100_archived_rows": 63,
+    "collection": 54,
+    "smoke": 9,
+    "human_output_labels": 0,
+    "source_overlay_exact_plan_reproduced": true,
+    "reproduced_plan_hash": "0887b38e5a6a53ebaac071ca93e38c606c0e6d4151abd9d37d70f1dba83dab02",
+    "parent_prepare_used_no_site_packages": true,
+    "tests": {
+      "exporter": 21,
+      "source_overlay_focused": 57,
+      "combined_p1_demo_packaging": 4,
+      "combined_p1_demo_seconds": 10.42
+    },
+    "source_helper_mutation_checks": "existing/inside-repository destinations and tampered overlay rejected",
+    "javascript_syntax": "passed",
+    "links_checked": 216,
+    "broken_links": 0,
+    "browser": {
+      "viewport_width": 390,
+      "horizontal_page_overflow": false,
+      "initial_collection_rows": 54,
+      "negative_luna_none_rows": 2,
+      "negative_attempts": 0,
+      "positive_astra_active_block2_rows": 1,
+      "smoke_rows": 9,
+      "smoke_pending_outputs": 27,
+      "checks": "DOM and data; no screenshot verification"
+    },
+    "limits": [
+      "Mechanical acceptance is not semantic accuracy.",
+      "Human independent review is pending.",
+      "N changes identity repetition and record context; only two authored blocks.",
+      "P1 is not a matched baseline for N100.",
+      "ASD-STE100 writing principles, no full dictionary compliance certification.",
+      "Source preparation tested on Windows only."
+    ]
   }
 }

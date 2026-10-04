@@ -1,0 +1,83 @@
+{
+  "kind": "n100_source_overlay_v1",
+  "base_commit": "5df9b95d5212f551a1e56c182d02bc3374ed0f10",
+  "files": [
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/__init__.py",
+      "sha256": "0ab2b888b09e5adcfc964835fe7f249ed67273b8c115e77097f85ed0e269842c",
+      "base_sha256": "11e6f3576adaa2fff15e52fefee5dde077cb90c6dbf4255f0dbe10616c32a677"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/collection.py",
+      "sha256": "3fb6fd394b5bc560559ca855d77c8794cf192482bd98c18c0870aa3b4580e7b7",
+      "base_sha256": "638fb1a7c4bbb4cb0336ce4258f3fb5e27f94230f7e2bf2e7caf06e3e397a5ce"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/config.py",
+      "sha256": "2e533f87898db677ed5d79c9aa6e394acc9e7fce0ee99ac31cd7deae826d5d29",
+      "base_sha256": "73f57e4711c2e87d18cd5f193c841758cd652e1fadaf88074c47b53fd8e0cfb8"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/export.py",
+      "sha256": "83b1573e41559cae17738f849bd9e6dc9adee159894a6071499f59b83d05241e",
+      "base_sha256": "3beb9586bcae1f6f58919a03d9c41a6e8b461584a870f23add31c7b2f5e3e92d"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/fixtures.py",
+      "sha256": "167c8f27cd217cc676f6f0db582f76efff3896d3822482960fe2665b03061506",
+      "base_sha256": "80c3320f3d0e4ebbeb9c2e2d044e3d11e4a0933d44b4bbd33433b944ff0f908a"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/prompts.py",
+      "sha256": "47c102640e9dd273506ee240bf4b7ab099f67a734330fafaf5c942f5d6140aa7",
+      "base_sha256": "3bf72e88b8f9eac0027273c345719bc9eb839d7e91705a6ea8eb5f866cf04f8c"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/protocol.json",
+      "sha256": "03bbbace5ecb9285c18bedad7bbc597895b83361226126dcfda6149778a89f4f",
+      "base_sha256": "1793deffccabc835c210b80a16ed2eb6d3c0b35362a17042a60d1fa644b84402"
+    },
+    {
+      "path": "configs/peer-reporting-n100-v1-candidate.json",
+      "sha256": "2aba63ccb0a16224efa7f95cd7d230d22385a0dcdd92204f5aa791f259c06e09",
+      "base_sha256": null
+    },
+    {
+      "path": "docs/peer-reporting-n100-spec.md",
+      "sha256": "4602b6707379f874206b1d11f991f76a64d798b9bb0287c50b388d51f68be1e1",
+      "base_sha256": null
+    },
+    {
+      "path": "docs/peer-reporting-n100-human-review-plan-v1.json",
+      "sha256": "5576f22bb80ba23df66070c81de24149b95935953831ab7ebf90e437a0fd9658",
+      "base_sha256": null
+    },
+    {
+      "path": "scripts/prepare_n100_review_plan.py",
+      "sha256": "41970fea8c3a5506a19566171d92574b42af466cc270f8eaeba17cf2ea827837",
+      "base_sha256": null
+    },
+    {
+      "path": "scripts/summarize_peer_collection.py",
+      "sha256": "e7f083ecc3c70a39d8c1db1eda99b3fdf6450e3b3c67bb193f41326ca120b112",
+      "base_sha256": "99f00a343a5e00e90eb98ddd712e3e09b8b1b58b5776f79b0d1e98a007dce10e"
+    },
+    {
+      "path": "tests/test_peer_reporting_n100_fixtures.py",
+      "sha256": "a3b0d4de1c3982109496ff22c349da24c2d141dc3e6695a17b9c3b56785cb25d",
+      "base_sha256": null
+    },
+    {
+      "path": "tests/test_peer_reporting_n100_plan.py",
+      "sha256": "768a7f1bfa5f28df2e4b5b673f7877a76260cb532bc51e921fa1c517b3eff159",
+      "base_sha256": null
+    },
+    {
+      "path": "tests/test_peer_reporting_n100_runtime.py",
+      "sha256": "c7fc62477863a0d0dd9462548eaeb2d1e4a932289ee73c9a7ae1377db5cec714",
+      "base_sha256": null
+    }
+  ],
+  "package_change_count": 7,
+  "evidence": "Offline authored source and review selection only; no collected model evidence."
+}
