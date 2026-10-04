@@ -114,5 +114,38 @@
     "mobile_width_css_pixels": 390,
     "horizontal_page_overflow": false,
     "screenshot_capture": "T3 snapshot tool failed; no screenshot-based visual approval claimed"
+  },
+  "public_prose_update_v1": {
+    "kind": "peer_reporting_public_prose_update_validation_v1",
+    "created_utc": "2026-10-04T18:25:41.338859+00:00",
+    "base_commit": "b62797da0197df89cb09fc5c407c0ce013bee586",
+    "files_changed": 7,
+    "payload_manifest_sha256": "9a898fbf30e2b979a491a389d6b04faa40a82c2b79ec6491df1f40366ac402ab",
+    "quantitative_results_changed": false,
+    "frozen_inputs_changed": false,
+    "evidence_changed": false,
+    "provider_calls": 0,
+    "strict_ste_vocabulary_compliance_verified": false,
+    "secret_or_private_endpoint_pattern_candidates": 0,
+    "unchanged_other_tracked_files_before_metadata": 600,
+    "html_local_links_missing": 0,
+    "javascript_syntax": "passed node --check",
+    "tests": {
+      "passed": 4,
+      "failed": 0,
+      "selection": "tests/test_stage_peer_demo.py",
+      "duration_seconds": 5.84,
+      "uses_public_checkout": true
+    },
+    "browser": {
+      "css_viewport_width": 390,
+      "counts_correct": true,
+      "expected_filtered_assignment": true,
+      "first_trace_by_planned_order": true,
+      "horizontal_page_overflow": false,
+      "screenshot_capture": "T3 preview snapshot failed; DOM checks only"
+    },
+    "independent_model_meaning_review": "passed; no factual meaning blockers",
+    "meaning_review_sha256": "ed715a9e85a90c2d5c9780a3ddec4ac1691608e3a3f79d0e83349e4f9d32c826"
   }
 }

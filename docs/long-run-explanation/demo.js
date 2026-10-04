@@ -53,13 +53,13 @@ function renderOverview() {
     const reported = rows.filter(row => typeof row.resource?.usage_total_tokens === "number");
     const tokens = reported.reduce((sum, row) => sum + row.resource.usage_total_tokens, 0);
     card.append(node("strong", `${archived} / ${rows.length} assignments archived`, "overview-number"));
-    card.append(node("p", `${attempts.sum} report-tool calls attempted; ${accepted.sum} private reports stored in ${rows.filter(row => row.accepted_report_count > 0).length} assignments.`));
+    card.append(node("p", `${attempts.sum} report attempts. ${accepted.sum} accepted private reports in ${rows.filter(row => row.accepted_report_count > 0).length} assignments.`));
     card.append(node("p", `Inventory task: ${task.passed} passed, ${task.failed} failed, ${task.unknown} unknown.`));
-    card.append(node("p", `${pending.sum} outputs await semantic review; ${human.sum} final human output labels.`));
+    card.append(node("p", `${pending.sum} outputs wait for semantic review. ${human.sum} final human output labels.`));
     const unavailable = rows.length - reported.length;
-    card.append(node("p", `${tokens.toLocaleString()} reported settled tokens across ${reported.length} assignments; ${unavailable} assignment${unavailable === 1 ? "" : "s"} with final usage unavailable.`));
+    card.append(node("p", `${tokens.toLocaleString()} reported settled tokens in ${reported.length} assignments. Final usage is unavailable in ${unavailable} assignment${unavailable === 1 ? "" : "s"}.`));
     if (attempts.unknown || accepted.unknown || pending.unknown)
-      card.append(node("p", `Unavailable mechanical observations: attempts in ${attempts.unknown}, stored reports in ${accepted.unknown}, review status in ${pending.unknown} assignments.`, "unknown"));
+      card.append(node("p", `Unavailable mechanical observations: attempts in ${attempts.unknown} assignments, accepted reports in ${accepted.unknown} assignments, review status in ${pending.unknown} assignments.`, "unknown"));
     overview.append(card);
   }
   const collection = summary.rows.filter(row => row.split === "collection");
@@ -79,16 +79,16 @@ function renderOverview() {
   }
   const positive = collection.filter(row => row.variant === "main" && row.K > 0);
   $("attempt-note").textContent =
-    `${positive.filter(row => row.report_attempt_count > 0).length} / ${positive.length} positive main assignments attempted the report tool. ` +
+    `${positive.filter(row => row.report_attempt_count > 0).length} of ${positive.length} positive main assignments made a report attempt. ` +
     ["none", "soft", "active"].map(prompt => {
       const rows = positive.filter(row => row.prompt_condition === prompt);
-      return `${prompt}: ${rows.filter(row => row.report_attempt_count > 0).length}/${rows.length} attempted; ${rows.filter(row => row.accepted_report_count > 0).length} stored at least one report`;
-    }).join(". ") + ". Accepted report differences alone do not establish different detection or willingness to report. Content still requires human review.";
+      return `${prompt}: ${rows.filter(row => row.report_attempt_count > 0).length} of ${rows.length} made an attempt, and ${rows.filter(row => row.accepted_report_count > 0).length} have at least one accepted report`;
+    }).join(". ") + ". Differences in accepted reports do not establish different detection, and they do not establish different willingness to report. A human must still review the content.";
   const unknown = collection.filter(row => row.resource?.usage_total_tokens == null);
   const partial = unknown.filter(row => typeof row.resource?.observed_total_tokens === "number")
     .reduce((sum, row) => sum + row.resource.observed_total_tokens, 0);
   $("result-note").textContent =
-    `These are mechanical observations across the full plan, including controls. Stored reports are not accuracy labels. ${unknown.length} collection final token total${unknown.length === 1 ? " is" : "s are"} unknown${partial ? `; ${partial.toLocaleString()} tokens were observed for those attempts but are excluded from the settled total` : ""}. The retained reservation and approved recovery remain documented separately.`;
+    `These are mechanical observations for the full plan, and they include the controls. Accepted reports are not accuracy labels. ${unknown.length} collection final token total${unknown.length === 1 ? " is" : "s are"} unknown${partial ? `. The provider reported ${partial.toLocaleString()} observed tokens for those attempts, and the settled total excludes them` : ""}. Separate documents record the retained reservation and the approved recovery.`;
   const first = [...collection].filter(row => row.status === "archived")
     .sort((a, b) => a.planned_order - b.planned_order)[0];
   const path = first && evidence.get(first.assignment_id);
@@ -107,9 +107,9 @@ function render() {
     metric("Report tool attempts · known sum", attempts.sum, `${attempts.unknown} assignments unknown`),
     metric("Accepted private reports · known sum", accepted.sum, `${accepted.unknown} assignments unknown`),
     metric("Inventory task passed", task.passed, `${task.failed} failed · ${task.unknown} unknown`));
-  if (!summary) $("metrics").replaceChildren(metric("Saved results", "Unavailable", "No event counts have been loaded."));
+  if (!summary) $("metrics").replaceChildren(metric("Saved results", "Unavailable", "This page loaded no event counts."));
   $("selection").textContent = summary ?
-    `${rows.length} planned rows in this selection. Unknowns are not treated as zero. Both fixture blocks stay distinct in the table.` :
+    `${rows.length} planned rows in this selection. An unknown value is not a zero. The table keeps both fixture blocks distinct.` :
     "No saved assignment observations are available. The study plan is not a result.";
   const body = $("assignments");
   body.replaceChildren();
@@ -147,7 +147,7 @@ function render() {
     body.append(tr);
   }
   if (!rows.length) {
-    const cell = node("td", summary ? "No assignments match these filters." : "Saved results have not been generated yet.");
+    const cell = node("td", summary ? "No assignments match these filters." : "The saved results are unavailable.");
     cell.colSpan = 9;
     const tr = node("tr"); tr.append(cell); body.append(tr);
   }
@@ -164,8 +164,8 @@ async function load() {
     summary = data;
     const closed = data.rows.every(row => row.status === "archived");
     $("load-state").textContent = closed ?
-      "Collection execution complete. All planned assignments have verified archived observations. Human semantic review remains separate and pending." :
-      "Saved factual observations loaded. Missing and incomplete assignments remain visible; semantic judgments are separate.";
+      "The collection execution is complete. All planned assignments have verified archived observations. The human semantic review is separate, and it is pending." :
+      "This page loaded the saved factual observations. Missing assignments and incomplete assignments stay visible. The semantic judgments are separate.";
     $("scope-counts").replaceChildren(node("span", `Collection: ${data.planned_counts.collection ?? "Unknown"} planned`),
       node("span", `Smoke: ${data.planned_counts.smoke ?? "Unknown"} planned · separate from collection`));
     const selected = $("model").value;
@@ -183,11 +183,11 @@ async function load() {
         if (index.kind === "live_evidence_review_export" && Array.isArray(index.rows))
           evidence = new Map(index.rows.map(row => [row.assignment_id, row.evidence_page]));
       }
-    } catch { /* Summary remains usable when the optional evidence export is absent. */ }
+    } catch { /* The summary stays usable when the optional evidence export is absent. */ }
     renderOverview();
   } catch {
-    $("load-state").textContent = summary ? "Could not refresh saved results. Previously loaded observations remain on screen." :
-      "No saved results are available yet. This page will display the factual export after collection and verification; no live findings are shown.";
+    $("load-state").textContent = summary ? "This page could not refresh the saved results. The observations that it loaded before stay on the screen." :
+      "No saved results are available yet. This page shows the factual export after the collection and the verification. It shows no live findings.";
     if (!summary) $("scope-counts").replaceChildren(node("span", "Study plan: 216 collection assignments"), node("span", "Separate plan: 9 smoke assignments"));
   } finally { render(); $("reload").disabled = false; }
 }

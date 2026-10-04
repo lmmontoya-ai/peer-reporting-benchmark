@@ -21,9 +21,9 @@
     },
     {
       "path": "README.md",
-      "bytes": 9365,
-      "sha256": "acbcdafa991defebcf48813e7f11de35acdf69f529ec2778437faf5e6f68e008",
-      "origin": "admission_and_monitor_repair_v1"
+      "bytes": 10041,
+      "sha256": "94376114f838475e0f337d6a64145779c6b13a0ca14bd6b872ebcad0d9e0a14d",
+      "origin": "audited_public_prose_update_v1"
     },
     {
       "path": "configs/peer-reporting-compatibility-auth-recovery-v2.json",
@@ -2787,15 +2787,15 @@
     },
     {
       "path": "docs/long-run-explanation/demo.html",
-      "bytes": 8826,
-      "sha256": "da7f0eeea7044d8f9655a8b28823ce33cf05cfdabafd24264f9dd3d3f770e11b",
-      "origin": "audited_public_interface_update_v2"
+      "bytes": 9092,
+      "sha256": "d677bc382f33361a0686e83436717741200d085c6f10ffcaf34f37c8bffaa838",
+      "origin": "audited_public_prose_update_v1"
     },
     {
       "path": "docs/long-run-explanation/demo.js",
-      "bytes": 12877,
-      "sha256": "7e658f1cccb095b681b39d5351615008f06b398745f9723d7bc7ae692b45db00",
-      "origin": "audited_public_interface_update_v2"
+      "bytes": 13024,
+      "sha256": "e85687d84d30d752b238fabac3ae07b84c9dbe89a6978aa4a3785927e8b14654",
+      "origin": "audited_public_prose_update_v1"
     },
     {
       "path": "docs/long-run-explanation/packet-format-v3.svg",
@@ -2859,9 +2859,9 @@
     },
     {
       "path": "docs/peer-reporting-demo-notes.txt",
-      "bytes": 4775,
-      "sha256": "92ba02e7acac36be5b6c8450ac863c3201b165832e8d12d10f7e1325e9aa72a6",
-      "origin": "copied_unchanged"
+      "bytes": 5858,
+      "sha256": "556c04a846028c56bee4987421d06ac720e9be5d6840e32b30ce2c093d683212",
+      "origin": "audited_public_prose_update_v1"
     },
     {
       "path": "docs/peer-reporting-final-execution-audit-sol-v1.json",
@@ -2889,9 +2889,9 @@
     },
     {
       "path": "docs/peer-reporting-project-writeup.md",
-      "bytes": 8236,
-      "sha256": "92bef31cf8ac4b86859abfec2d02230d24fba36c54216a1d819bd7d398c94734",
-      "origin": "audited_public_results_update_v1"
+      "bytes": 9047,
+      "sha256": "9ab539ad7f8c826e72cef11ddb855042895ca1f5176f227905f8fdbb9a1f6d38",
+      "origin": "audited_public_prose_update_v1"
     },
     {
       "path": "docs/peer-reporting-protocol.json",
@@ -2925,15 +2925,15 @@
     },
     {
       "path": "docs/project.html",
-      "bytes": 10822,
-      "sha256": "6644847148ccc391bf426ee7225e396c5aad3fa958db993557291f5e42c5e91a",
-      "origin": "audited_public_results_update_v1"
+      "bytes": 11453,
+      "sha256": "cb295cc891f9e6acda5e3aabfa755fd48cb05443916063ccfc4d512592846957",
+      "origin": "audited_public_prose_update_v1"
     },
     {
       "path": "docs/public-demo.md",
-      "bytes": 3167,
-      "sha256": "90f63f43842e3fb3856a8937831e651295db5ed22a3b703681c0f3e3cacd4646",
-      "origin": "audited_public_interface_update_v2"
+      "bytes": 3550,
+      "sha256": "c30e09e1f1d28be7a02a8a4565ee5db0deb29c480291e3397d2e6f8343692c66",
+      "origin": "audited_public_prose_update_v1"
     },
     {
       "path": "docs/public-results-projection.md",
@@ -3633,5 +3633,5 @@
     }
   ],
   "file_count": 604,
-  "total_bytes": 15455235
+  "total_bytes": 15459232
 }
