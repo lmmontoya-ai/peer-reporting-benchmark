@@ -25,7 +25,8 @@ for split, planned in [('smoke',9),('collection',216)]:
     ledger_path=directory/'budget-ledger.json'
     row={'planned':planned,'status':'unstarted','counts':{},'starts':0,'archived':0,
          'current':[],'known_reported_tokens':0,'unknown_usage_attempts':0,'halt_reason':None,
-         'latest_evidence_utc':None}
+         'latest_evidence_utc':None,'execution_checks_passed':0,'execution_checks_failed':0,
+         'failed_execution_checks':[],'mean_completed_trial_seconds':None}
     try:
         if index_path.exists():
             index=json.loads(index_path.read_text())
@@ -33,6 +34,15 @@ for split, planned in [('smoke',9),('collection',216)]:
             row['counts']=dict(Counter(e.get('status','unknown') for e in entries))
             row['starts']=sum(e.get('attempt') is not None for e in entries)
             row['archived']=row['counts'].get('archived',0)
+            completed=[e for e in entries if e.get('status')=='archived']
+            row['execution_checks_passed']=sum((e.get('attempt') or {}).get('check_passed') is True for e in completed)
+            failed=[e for e in completed if (e.get('attempt') or {}).get('check_passed') is False]
+            row['execution_checks_failed']=len(failed)
+            row['failed_execution_checks']=[{'model':e.get('model'),'attempt_id':e.get('attempt_id'),
+                'reasons':(e.get('attempt') or {}).get('failure_reasons')} for e in failed]
+            durations=[e['attempt']['elapsed_seconds'] for e in completed
+                if isinstance((e.get('attempt') or {}).get('elapsed_seconds'),(int,float))]
+            row['mean_completed_trial_seconds']=sum(durations)/len(durations) if durations else None
             row['current']=[{'model':e.get('model'),'attempt_id':e.get('attempt_id')}
                             for e in entries if e.get('status')=='started']
             halt=(index.get('last_run') or {}).get('halted')

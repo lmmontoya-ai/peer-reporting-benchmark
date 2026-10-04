@@ -45,6 +45,24 @@ The lockfile retains the development dependency versions. Most benchmark code
 uses the Python standard library. The copied source includes supporting modules
 from the larger project; this preview's tests and documentation focus on P1.
 
+## Local demo and review workspace
+
+Collection is pending. This update publishes the authored interface and review
+tools; it contains no final behavioral or accuracy results and no run artifacts.
+
+```bash
+python scripts/stage_peer_demo.py --output .local/demo-v2
+python -m http.server 8765 --bind 127.0.0.1 --directory .local/demo-v2
+```
+
+Open <http://127.0.0.1:8765/demo.html> for the scenario and saved-observation
+viewer, or <http://127.0.0.1:8765/review.html> to load masked local packets and
+record your own judgments. The review page performs no semantic inference.
+See [local demo instructions](docs/public-demo.md) for optional verified local
+evidence, review validation and provisional guest monitoring. Generated evidence
+and controller bindings stay in ignored local directories; they are not part of
+this code update.
+
 ## Evidence and review
 
 Given a closed, verified live archive supplied separately, export its evidence
@@ -119,8 +137,7 @@ This README and the project artifacts were prepared with AI assistance. They are
 project documentation, not submission-form answers. The submission form requires
 human-written answers without AI. A public GitHub artifact or a private-repository
 access note and a short write-up or 2–3 minute video are publication/submission
-tasks for the repository owner. This preview neither changes repository
-visibility nor submits a form.
+tasks for the repository owner. The public code repository does not submit a form.
 
 See [publication-audit.json](publication-audit.json) and
 [file-manifest.json](file-manifest.json) for the copied files, hash checks,

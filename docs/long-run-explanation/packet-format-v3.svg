@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="760" viewBox="0 0 1120 760" role="img" aria-labelledby="title desc">
+  <title id="title">Peer reporting: compact packet and collection gate</title>
+  <desc id="desc">The observer receives a room history, inventory, and linked trusted records. Shared artifact details appear once. Packets still fail the five percent length limit.</desc>
+  <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#527088" stroke-width="1.4"/></marker></defs>
+  <rect width="1120" height="760" fill="#f5f8fc"/>
+  <g font-family="Inter,Segoe UI,sans-serif" fill="#173044">
+    <text x="40" y="48" font-size="16" letter-spacing="2" fill="#50718b">PEER REPORTING · FIXTURE v3</text>
+    <text x="40" y="91" font-size="32" font-weight="700">Store common facts once. Keep each operation clear.</text>
+    <text x="40" y="126" font-size="17">One observer · 4 or 16 scripted peers · 32 initial posts · at most two fixed replies</text>
+    <rect x="40" y="158" width="1040" height="352" rx="16" fill="white" stroke="#c3d1dd"/>
+    <text x="64" y="192" font-size="19" font-weight="700">The initial packet</text>
+    <rect x="64" y="214" width="240" height="116" rx="10" fill="#edf4fb"/>
+    <text x="82" y="243" font-size="18" font-weight="700">release-room</text>
+    <text x="82" y="271" font-size="15">Roster and scripted posts</text>
+    <text x="82" y="297" font-size="15">Each post retains its author</text>
+    <rect x="64" y="348" width="240" height="128" rx="10" fill="#edf4fb"/>
+    <text x="82" y="379" font-size="18" font-weight="700">Ordinary task</text>
+    <text x="82" y="408" font-size="15">Six inventory rows</text>
+    <text x="82" y="434" font-size="15">Select ready rows; sum sizes</text>
+    <text x="82" y="459" font-size="15">Send through submit_task</text>
+    <rect x="348" y="214" width="316" height="116" rx="10" fill="#eaf5f1"/>
+    <text x="366" y="243" font-size="18" font-weight="700">Participant ledger</text>
+    <text x="366" y="270" font-size="15">ID · actor · action · stage · time</text>
+    <text x="366" y="296" font-size="15">Each row refers to the request record</text>
+    <rect x="348" y="348" width="316" height="128" rx="10" fill="#eaf5f1"/>
+    <text x="366" y="379" font-size="18" font-weight="700">Focal action reference</text>
+    <text x="366" y="408" font-size="15">Selects one ledger operation</text>
+    <text x="366" y="435" font-size="15">The same focal action is scored</text>
+    <path d="M505 348V333" stroke="#527088" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="708" y="214" width="348" height="116" rx="10" fill="#eaf5f1"/>
+    <text x="726" y="243" font-size="18" font-weight="700">One shared request record</text>
+    <text x="726" y="270" font-size="15">Artifact ID · version · digest</text>
+    <text x="726" y="296" font-size="15">External effect: attempted and blocked</text>
+    <path d="M664 268H702" stroke="#527088" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="708" y="348" width="348" height="128" rx="10" fill="#eaf5f1"/>
+    <text x="726" y="379" font-size="18" font-weight="700">Complete approval lookup</text>
+    <text x="726" y="408" font-size="15">Actors · actions · times · matching grants</text>
+    <text x="726" y="435" font-size="15">Uses the shared artifact binding</text>
+    <path d="M881 348V333" stroke="#527088" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="40" y="536" width="508" height="158" rx="14" fill="#e7f2ed" stroke="#b0cfc0"/>
+    <text x="64" y="573" font-size="21" font-weight="700">Compaction result</text>
+    <text x="64" y="608" font-size="18">Largest packet: 23,918 → 14,767 bytes</text>
+    <text x="64" y="639" font-size="18">38.26% smaller; all operation facts retained</text>
+    <text x="64" y="670" font-size="15">No filler. More participants still mean more evidence.</text>
+    <rect x="572" y="536" width="508" height="158" rx="14" fill="#fff3df" stroke="#d6b078"/>
+    <text x="596" y="573" font-size="21" font-weight="700">Approved length check passes</text>
+    <text x="596" y="608" font-size="18">Best common-size deviation: 9.70%</text>
+    <text x="596" y="639" font-size="18">Pilot limit: 10%; common target: 13,461 bytes</text>
+    <text x="596" y="670" font-size="15">Revision 3. Other collection checks remain required.</text>
+    <text x="40" y="731" font-size="14" fill="#577184">Synthetic scenario. AI Village supplies related setting context only; no Village incident is replayed.</text>
+  </g>
+</svg>

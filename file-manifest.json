@@ -21,9 +21,9 @@
     },
     {
       "path": "README.md",
-      "bytes": 6800,
-      "sha256": "b09cb429fae6c02fb9a1d3e3c387f7901b8b7e7ce3d1493ca8bff03865c581a9",
-      "origin": "publication_packaging_update"
+      "bytes": 7755,
+      "sha256": "6eaf3ae02e0eec0cbadfc55735ca194a914a6fbdc563276af3eaba4f12f14150",
+      "origin": "audited_public_interface_update_v2"
     },
     {
       "path": "configs/peer-reporting-compatibility-auth-recovery-v2.json",
@@ -48,6 +48,48 @@
       "bytes": 708,
       "sha256": "66c3290bae9140705bd6dd04a866a9c757b482fb8d1b0c45709837e40a5545e3",
       "origin": "copied_unchanged"
+    },
+    {
+      "path": "docs/long-run-explanation/demo.css",
+      "bytes": 3587,
+      "sha256": "0617b16cea8e5376e5c423ddc5ea38c9cd17e2f0d1d6b8b4cd6de0de4f023f79",
+      "origin": "audited_public_interface_update_v2"
+    },
+    {
+      "path": "docs/long-run-explanation/demo.html",
+      "bytes": 6027,
+      "sha256": "28746e73d0f3dc55452a31e51c81a326878b8c78a33625e05b9b72ada77cd93f",
+      "origin": "audited_public_interface_update_v2"
+    },
+    {
+      "path": "docs/long-run-explanation/demo.js",
+      "bytes": 7114,
+      "sha256": "f0e9fc1d9099be801bf5ba64a50a9e6d95d60de3f9f34f08ce566f1cba590d29",
+      "origin": "audited_public_interface_update_v2"
+    },
+    {
+      "path": "docs/long-run-explanation/packet-format-v3.svg",
+      "bytes": 4594,
+      "sha256": "76da8434662b2d988ba45cb40ca2accfc7b9895d772b7875dd8438db7ee25f8c",
+      "origin": "audited_public_interface_update_v2"
+    },
+    {
+      "path": "docs/long-run-explanation/review.css",
+      "bytes": 1176,
+      "sha256": "56deccc7dcf6ef082a66d8e1f00348446b6a6807b2ce91e5caa7e8b505b48d65",
+      "origin": "audited_public_interface_update_v2"
+    },
+    {
+      "path": "docs/long-run-explanation/review.html",
+      "bytes": 3016,
+      "sha256": "2d10abe4b7ab32a0de88c27a664098599ba2f64c6c74ae3f50fa32e92b041ebf",
+      "origin": "audited_public_interface_update_v2"
+    },
+    {
+      "path": "docs/long-run-explanation/review.js",
+      "bytes": 7472,
+      "sha256": "558739791e2adf6926b2fcb8475bec13377c426b79b04109f41b31293d2c5170",
+      "origin": "audited_public_interface_update_v2"
     },
     {
       "path": "docs/peer-reporting-auth-recovery-proposal.json",
@@ -104,6 +146,12 @@
       "origin": "copied_unchanged"
     },
     {
+      "path": "docs/public-demo.md",
+      "bytes": 3509,
+      "sha256": "170baf8360bed2581cec998f0da28d365dcdfb1f26d082df3a14b69bcd39d90a",
+      "origin": "audited_public_interface_update_v2"
+    },
+    {
       "path": "docs/runtime.md",
       "bytes": 14049,
       "sha256": "ab736ddc134043587518b84dd8672771eca34437a4758d6ec18b0e98b458660a",
@@ -141,9 +189,9 @@
     },
     {
       "path": "scripts/monitor_peer_collection.py",
-      "bytes": 5492,
-      "sha256": "b54ef2be2a4de0e53fa032bbf972372107d7115bd6de8fbc93c9117c4213f8b9",
-      "origin": "copied_unchanged"
+      "bytes": 6432,
+      "sha256": "188f3d45b32ddc46e759fdc827b12562d3be8daae58d939daa0f4b8254f00fc5",
+      "origin": "audited_public_interface_update_v2"
     },
     {
       "path": "scripts/peer_reporting_preflight.py",
@@ -158,6 +206,12 @@
       "origin": "copied_unchanged"
     },
     {
+      "path": "scripts/stage_peer_demo.py",
+      "bytes": 1770,
+      "sha256": "e9b369f6d2ea5a725d6c82cf080b35c8fa6eb96514550eefb6536ce0fcde490e",
+      "origin": "audited_public_interface_update_v2"
+    },
+    {
       "path": "scripts/summarize_peer_collection.py",
       "bytes": 13084,
       "sha256": "99f00a343a5e00e90eb98ddd712e3e09b8b1b58b5776f79b0d1e98a007dce10e",
@@ -168,6 +222,12 @@
       "bytes": 2327,
       "sha256": "9e5fd7ef2d2dc6923f5e9c8e16b69aa9750bac518afd9fe47cf409c0414cc727",
       "origin": "copied_unchanged_publication_dependency_fix"
+    },
+    {
+      "path": "scripts/validate_peer_review_upload.py",
+      "bytes": 3456,
+      "sha256": "7f6244df7cd2d5fbf181e841b636d82995889f6183ed2791a4b7a9a5fe06a2c4",
+      "origin": "audited_public_interface_update_v2"
     },
     {
       "path": "src/swarm_auth_bench/__init__.py",
@@ -674,6 +734,12 @@
       "origin": "copied_unchanged"
     },
     {
+      "path": "tests/test_peer_collection_monitor.py",
+      "bytes": 1784,
+      "sha256": "8068d2dd9d910da0f825dba85329e718c357be2e60c1401ae274cf0c1d132662",
+      "origin": "audited_public_interface_update_v2"
+    },
+    {
       "path": "tests/test_peer_reporting_budget.py",
       "bytes": 9068,
       "sha256": "5d8313599ef88896e2424b93f08deccd012ecb152fcf292ff9db161928de3b22",
@@ -746,12 +812,24 @@
       "origin": "copied_unchanged"
     },
     {
+      "path": "tests/test_peer_review_upload.py",
+      "bytes": 3173,
+      "sha256": "8dbd5c2bdb6508c4c6caa4dcb9b5f4101fc3799fa5ec723711186d4e6a5a3d0c",
+      "origin": "audited_public_interface_update_v2"
+    },
+    {
+      "path": "tests/test_stage_peer_demo.py",
+      "bytes": 1121,
+      "sha256": "ab76f9f967c957ed3b5a234402a487f530cccf84d830ec30177117999c8cc5d8",
+      "origin": "audited_public_interface_update_v2"
+    },
+    {
       "path": "uv.lock",
       "bytes": 206834,
       "sha256": "0c00d8872951166df55945dc7a969532acc38306080686798a2b6d0d2196b620",
       "origin": "copied_unchanged"
     }
   ],
-  "file_count": 122,
-  "total_bytes": 2027995
+  "file_count": 137,
+  "total_bytes": 2085383
 }

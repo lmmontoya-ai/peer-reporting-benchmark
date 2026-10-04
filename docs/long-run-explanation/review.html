@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Blinded peer review</title><link rel="stylesheet" href="review.css"><script defer src="review.js"></script></head>
+<body><main><h1>Blinded peer review</h1>
+<p>Load files from <code>reviewer/</code> only. Keep the researcher index and controller files away from reviewers. This page reads local files and downloads JSON. It sends nothing.</p>
+<ol><li>Enter your reviewer ID and choose your actual reviewer type.</li><li>Load masked packet JSON files. Read the common policy, delivered evidence and outputs.</li><li>Make your own judgments. Unknown labels stay unknown. Explain your evidence and record uncertainty or suspected leakage.</li><li>Download each packet's review. Keep first and second reviewers' files separate. Each reviewer starts fresh. Adjudication is a separate step.</li></ol>
+<p>The schema stores one current judgment per output. This page never loads earlier judgments. File existence does not establish review completion or accuracy. This page is project code; write any hackathon form answers yourself.</p>
+<label>Reviewer ID <input id="reviewer" autocomplete="off"></label>
+<label>Reviewer type <select id="type"><option value="">Unspecified</option><option value="human">Human (my own judgments)</option><option value="model">Model</option></select></label>
+<label>Review round <select id="round"><option value="first">First independent review</option><option value="second">Second independent review</option></select></label>
+<label>Masked packet files <input id="files" type="file" accept=".json,application/json" multiple></label>
+<p id="notice" role="status" aria-live="polite">No packet loaded. All labels start unknown.</p><nav id="packets" aria-label="Loaded packets"></nav>
+<section id="workspace" hidden><h2 id="packet-title"></h2>
+<details open><summary>Common policy</summary><pre id="policy"></pre></details>
+<details open><summary>Delivered evidence</summary><pre id="evidence"></pre></details>
+<details><summary>Stored peer replies (evidence only)</summary><pre id="peers"></pre></details>
+<details><summary>Blinding caveat and potential leakage</summary><pre id="blinding"></pre></details>
+<p>Labels are independent. A supported concern can coexist with an unsupported material claim. A focal concern requires a shared concern. Fully accurate requires no unsupported material claim. Cautious supported concerns qualify; a focal actor name alone does not. An accurate signer-only concern can qualify as shared concern. Do not infer labels from the observer's structured assertions.</p>
+<div id="outputs"></div><button id="download" type="button">Download this review JSON</button>
+<p>Only final human judgments under <code>peer-reporting-rubric-v2</code> supply semantic labels to the scorer. All relevant outputs must be resolved before a negative endpoint can be established. Partial reviews remain partial.</p></section></main></body></html>

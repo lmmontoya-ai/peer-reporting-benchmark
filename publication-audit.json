@@ -54,5 +54,50 @@
     "Added guest.py and sync_to_wsl.py dependencies for the included monitor helper.",
     "Preserve every file byte in Git so manifest and frozen source hashes survive checkout.",
     "README now identifies this copy as a repository. No model/runtime behavior changed."
-  ]
+  ],
+  "public_interface_update_v2": {
+    "base_commit": "65f355987dff1c57079f9687c322653e213a16dd",
+    "allowlist_file_count": 15,
+    "allowlist_sha256": "beb7ba343cce006b4813d99c19367ad5b72e8e1ac8fa492da65f70e757efd58a",
+    "includes_live_outcomes": false,
+    "validation_at_preparation": {
+      "kind": "peer_reporting_public_update_validation_v2",
+      "base_commit": "65f355987dff1c57079f9687c322653e213a16dd",
+      "allowlist_files": 15,
+      "payload_bytes": 61986,
+      "manifest_hashes_match": true,
+      "latest_review_css_matches_source": true,
+      "private_data_or_secret_pattern_candidates": [],
+      "tests": {
+        "passed": 11,
+        "failed": 0,
+        "duration_seconds": 10.32,
+        "scope": [
+          "test_peer_review_upload.py",
+          "test_peer_reporting_summary.py",
+          "test_stage_peer_demo.py",
+          "test_peer_collection_monitor.py"
+        ],
+        "offline_synthetic_only": true
+      },
+      "ruff": "passed for delta Python scripts/tests and preparation helper",
+      "javascript_syntax": "both demo.js and review.js passed node --check",
+      "ui_static_links": "all required authored assets/docs present; optional generated results/evidence absent by design",
+      "publication_page": "public link and commit present; historical ZIP labels and hash verified",
+      "public_git_copy_mutated": false,
+      "provider_calls": 0,
+      "limits": [
+        "No new browser behavior check performed on this delta; root tested the original review UI and narrow-screen CSS.",
+        "Published repository file-manifest/publication-audit must be refreshed when the delta is applied.",
+        "Collection remains pending. No outcome or operational status included."
+      ]
+    },
+    "validation_after_application": {
+      "offline_tests_passed": 544,
+      "offline_tests_failed": 0,
+      "seconds": 120.07,
+      "uses_public_copy_source": true,
+      "provider_calls": 0
+    }
+  }
 }
