@@ -88,7 +88,7 @@ function renderOverview() {
   const partial = unknown.filter(row => typeof row.resource?.observed_total_tokens === "number")
     .reduce((sum, row) => sum + row.resource.observed_total_tokens, 0);
   $("result-note").textContent =
-    `These are mechanical observations for the full plan, and they include the controls. Accepted reports are not accuracy labels. ${unknown.length} collection final token total${unknown.length === 1 ? " is" : "s are"} unknown${partial ? `. The provider reported ${partial.toLocaleString()} observed tokens for those attempts, and the settled total excludes them` : ""}. Separate documents record the retained reservation and the approved recovery.`;
+    `These are mechanical observations for the full plan, and they include the controls. Accepted reports are not accuracy labels. ${unknown.length} collection final token total${unknown.length === 1 ? " is" : "s are"} unknown${partial ? `. The provider reported ${partial.toLocaleString()} observed tokens for ${unknown.length === 1 ? "that assignment" : "those assignments"}, and the settled total excludes them` : ""}. Separate documents record the retained reservation and the approved recovery.`;
   const first = [...collection].filter(row => row.status === "archived")
     .sort((a, b) => a.planned_order - b.planned_order)[0];
   const path = first && evidence.get(first.assignment_id);
@@ -104,7 +104,7 @@ function render() {
   $("metrics").replaceChildren(
     metric("Planned assignments in this selection", rows.length,
       `${rows.filter(row => row.verified_model_observation === true).length} verified model observations`),
-    metric("Report tool attempts · known sum", attempts.sum, `${attempts.unknown} assignments unknown`),
+    metric("Report attempts · known sum", attempts.sum, `${attempts.unknown} assignments unknown`),
     metric("Accepted private reports · known sum", accepted.sum, `${accepted.unknown} assignments unknown`),
     metric("Inventory task passed", task.passed, `${task.failed} failed · ${task.unknown} unknown`));
   if (!summary) $("metrics").replaceChildren(metric("Saved results", "Unavailable", "This page loaded no event counts."));
@@ -187,7 +187,7 @@ async function load() {
     renderOverview();
   } catch {
     $("load-state").textContent = summary ? "This page could not refresh the saved results. The observations that it loaded before stay on the screen." :
-      "No saved results are available yet. This page shows the factual export after the collection and the verification. It shows no live findings.";
+      "The saved results did not load. This page can show only the verified factual export. It shows no live findings.";
     if (!summary) $("scope-counts").replaceChildren(node("span", "Study plan: 216 collection assignments"), node("span", "Separate plan: 9 smoke assignments"));
   } finally { render(); $("reload").disabled = false; }
 }

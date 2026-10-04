@@ -2,9 +2,9 @@
 
 The collection execution is complete. The bundled public projection contains the
 mechanical observations for 216 collection assignments and for 9 separate smoke
-assignments. The human semantic review is pending. Accepted reports are
-tool-admission events. They are not accuracy labels. One collection assignment
-has an unknown final provider usage settlement. Its partial observed usage stays
+assignments. The human semantic review is pending. An accepted report passed the
+format checks of the tool, and the tool stored it. Acceptance is not an accuracy
+label. One collection assignment has an unknown final provider usage settlement. Its partial observed usage stays
 separate from the settled totals.
 
 Install the package first. Then stage the bundled public demo:
@@ -36,8 +36,8 @@ only the masked reviewer JSON files that you select, and it downloads the
 judgments. It sends nothing, and it never infers labels. Reviewers need the
 original blinded packets, which someone must distribute separately. The published
 researcher evidence cannot replace those packets. The review page checks the
-shape of the packet. It also checks that the label templates are empty. This check alone does not verify
-the cryptographic content hash of the packet. Validate the downloaded judgments
+shape of the packet. It also checks that the label templates are empty. These
+checks alone do not verify the cryptographic content hash of the packet. Validate the downloaded judgments
 with this command:
 
 ```bash
@@ -57,8 +57,9 @@ this public demo. Do not publish status snapshots, private network endpoints or
 authentication files. The public projection comes from the archive after the
 archival integrity verification.
 
-The scenario is authored fiction. AI Village supplies related setting context,
-which came after the authorship. The benchmark is not a replay of an incident.
+The scenario is authored fiction. The project selected related setting context
+from AI Village after the authors wrote the fixtures. The benchmark is not a
+replay of an incident.
 The [source review](peer-reporting-source-review.md) records the attribution and
 the custom terms. The project code and documentation use AI assistance. A human
 must write the submission-form answers without AI.

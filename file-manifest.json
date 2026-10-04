@@ -21,9 +21,9 @@
     },
     {
       "path": "README.md",
-      "bytes": 10041,
-      "sha256": "94376114f838475e0f337d6a64145779c6b13a0ca14bd6b872ebcad0d9e0a14d",
-      "origin": "audited_public_prose_update_v1"
+      "bytes": 11497,
+      "sha256": "24049cbce17f547d98bb70c719c58d9ae127fb19ac2d09847f5150ca87b586e6",
+      "origin": "audited_asd_ste100_principles_prose_update_v2"
     },
     {
       "path": "configs/peer-reporting-compatibility-auth-recovery-v2.json",
@@ -2787,15 +2787,15 @@
     },
     {
       "path": "docs/long-run-explanation/demo.html",
-      "bytes": 9092,
-      "sha256": "d677bc382f33361a0686e83436717741200d085c6f10ffcaf34f37c8bffaa838",
-      "origin": "audited_public_prose_update_v1"
+      "bytes": 9321,
+      "sha256": "2b81bc626daf700453c2a500d14aeea2bc8e284e240507c4e20897942a10b3ea",
+      "origin": "audited_asd_ste100_principles_prose_update_v2"
     },
     {
       "path": "docs/long-run-explanation/demo.js",
-      "bytes": 13024,
-      "sha256": "e85687d84d30d752b238fabac3ae07b84c9dbe89a6978aa4a3785927e8b14654",
-      "origin": "audited_public_prose_update_v1"
+      "bytes": 13041,
+      "sha256": "1f098af9e0898259d04b249d7ca99ac7ae714ca8051d13fc4ddeeb21d959de5c",
+      "origin": "audited_asd_ste100_principles_prose_update_v2"
     },
     {
       "path": "docs/long-run-explanation/packet-format-v3.svg",
@@ -2859,9 +2859,9 @@
     },
     {
       "path": "docs/peer-reporting-demo-notes.txt",
-      "bytes": 5858,
-      "sha256": "556c04a846028c56bee4987421d06ac720e9be5d6840e32b30ce2c093d683212",
-      "origin": "audited_public_prose_update_v1"
+      "bytes": 6557,
+      "sha256": "64fa63bfc39c2a2f1986e65bde75f4f5ea44b4acbdef1096319f8bf5843ee26d",
+      "origin": "audited_asd_ste100_principles_prose_update_v2"
     },
     {
       "path": "docs/peer-reporting-final-execution-audit-sol-v1.json",
@@ -2889,9 +2889,9 @@
     },
     {
       "path": "docs/peer-reporting-project-writeup.md",
-      "bytes": 9047,
-      "sha256": "9ab539ad7f8c826e72cef11ddb855042895ca1f5176f227905f8fdbb9a1f6d38",
-      "origin": "audited_public_prose_update_v1"
+      "bytes": 10116,
+      "sha256": "2016c2e080086e1ba889e8ec5de4fee658c9b50864b7e2bc223d5bf75a6286a9",
+      "origin": "audited_asd_ste100_principles_prose_update_v2"
     },
     {
       "path": "docs/peer-reporting-protocol.json",
@@ -2925,15 +2925,15 @@
     },
     {
       "path": "docs/project.html",
-      "bytes": 11453,
-      "sha256": "cb295cc891f9e6acda5e3aabfa755fd48cb05443916063ccfc4d512592846957",
-      "origin": "audited_public_prose_update_v1"
+      "bytes": 12771,
+      "sha256": "6bae2519ae1ec2786e786caa828485f59f3d8b07a2672b18734c8ca912a8f7c2",
+      "origin": "audited_asd_ste100_principles_prose_update_v2"
     },
     {
       "path": "docs/public-demo.md",
-      "bytes": 3550,
-      "sha256": "c30e09e1f1d28be7a02a8a4565ee5db0deb29c480291e3397d2e6f8343692c66",
-      "origin": "audited_public_prose_update_v1"
+      "bytes": 3615,
+      "sha256": "a8ab5af2c833153722306f4c541fafc9398454981ba904c77c730806cdb3fd32",
+      "origin": "audited_asd_ste100_principles_prose_update_v2"
     },
     {
       "path": "docs/public-results-projection.md",
