@@ -1,0 +1,27 @@
+{
+  "kind": "peer_reporting_compatibility_plan",
+  "revision": "compatibility-auth-recovery-v2",
+  "models": [
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-6-astra"
+  ],
+  "reasoning_effort": "xhigh",
+  "maximum_live_calls": 3,
+  "calls_per_model": 1,
+  "caps": {
+    "max_trial_wall_seconds": 360,
+    "drain_grace_seconds": 10,
+    "max_tool_requests_per_trial": 16,
+    "trial_observed_token_stop_target": 240000,
+    "reserved_tokens_per_trial": 300000,
+    "collection_wall_seconds": 1200,
+    "collection_observed_token_stop_target": 900000,
+    "max_concurrency": 1
+  },
+  "unknown_usage_policy": "stop_admission_until_reconciled",
+  "outcome_based_retries": false,
+  "behavioral_collection_assignments_consumed": 0,
+  "count_in_smoke_or_collection_denominator": false,
+  "hard_provider_output_cap_verified": false
+}

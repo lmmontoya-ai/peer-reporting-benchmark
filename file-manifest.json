@@ -1,0 +1,757 @@
+{
+  "kind": "peer_reporting_publication_file_manifest_v1",
+  "hash_algorithm": "sha256",
+  "metadata_excluded_from_self_hash": [
+    "file-manifest.json",
+    "publication-audit.json",
+    "validation.json"
+  ],
+  "files": [
+    {
+      "path": ".gitattributes",
+      "bytes": 1461,
+      "sha256": "31985eb200192e9b4ec38ef3fd96865a77184b42fcb793fa28b6318775424512",
+      "origin": "publication_packaging_update"
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 147,
+      "sha256": "609461673f5e3a741c3117361c76a6aae7a419f19185ad4f1f007ae2507a1f13",
+      "origin": "preview_authored"
+    },
+    {
+      "path": "README.md",
+      "bytes": 6800,
+      "sha256": "b09cb429fae6c02fb9a1d3e3c387f7901b8b7e7ce3d1493ca8bff03865c581a9",
+      "origin": "publication_packaging_update"
+    },
+    {
+      "path": "configs/peer-reporting-compatibility-auth-recovery-v2.json",
+      "bytes": 823,
+      "sha256": "dee3ffd6f20e4fa56dd43b321e376bc9c59293c6177bab59f69c2ff5ea2f19ec",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "configs/peer-reporting-compatibility-v1.json",
+      "bytes": 790,
+      "sha256": "a24f2c19be4e67bfa31d20ccf334d9eff84a1a0e81ed861df974313ef6cc5d79",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "configs/peer-reporting-p1-v3-candidate.json",
+      "bytes": 134,
+      "sha256": "f31987374d1c8fcbfd52d1a46c27aeb2aa122e1849a1a37a2b069ad0704f7d90",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "configs/peer-reporting-p1-v3-resource-candidate-1.json",
+      "bytes": 708,
+      "sha256": "66c3290bae9140705bd6dd04a866a9c757b482fb8d1b0c45709837e40a5545e3",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "docs/peer-reporting-auth-recovery-proposal.json",
+      "bytes": 1994,
+      "sha256": "6f77878f5222def3248ce5508b5a479e3452213d0843a620f523d760ce7683c6",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "docs/peer-reporting-demo-notes.txt",
+      "bytes": 4775,
+      "sha256": "92ba02e7acac36be5b6c8450ac863c3201b165832e8d12d10f7e1325e9aa72a6",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "docs/peer-reporting-fixture-review.json",
+      "bytes": 2216,
+      "sha256": "68ac633eae64254e8412eea30664a841d98608270145925eea25820def234131",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "docs/peer-reporting-human-review-plan-v1.json",
+      "bytes": 6528,
+      "sha256": "f9a2901c5825640958eb5a31fa10d327f79cfd385bf1a2e914ee67f85eec8acc",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "docs/peer-reporting-protocol.json",
+      "bytes": 34092,
+      "sha256": "1793deffccabc835c210b80a16ed2eb6d3c0b35362a17042a60d1fa644b84402",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "docs/peer-reporting-resource-proposal.json",
+      "bytes": 8370,
+      "sha256": "8c887912df6248391f9ff716080b979570fb634b1839508c9feaf510bee13d4d",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "docs/peer-reporting-source-review.json",
+      "bytes": 28265,
+      "sha256": "0dd6468ed9ab3aee6cba895515759025552e3b124c892ef42a604befb9050aa2",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "docs/peer-reporting-source-review.md",
+      "bytes": 18127,
+      "sha256": "560fa461b0c9c5e44b8b5382c042265d969f1acae513c3c152b2ca739c622351",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "docs/peer-reporting-spec.md",
+      "bytes": 74259,
+      "sha256": "d1ab8f642156a95a750591107c6196a84d90f026ea0754c8fdc03017f9ef3483",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "docs/runtime.md",
+      "bytes": 14049,
+      "sha256": "ab736ddc134043587518b84dd8672771eca34437a4758d6ec18b0e98b458660a",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "isolation/probe.py",
+      "bytes": 1100,
+      "sha256": "06828924f5ab7bd5fb760d9fea4ee22885908d820037e78bf72f07fa53f348ad",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "prepare_preview.py",
+      "bytes": 7081,
+      "sha256": "819fbe15b8678be30dd9f792e1f69fbd98432ba37afd15e86590f35135746285",
+      "origin": "preview_authored"
+    },
+    {
+      "path": "pyproject.toml",
+      "bytes": 896,
+      "sha256": "6d4885cb2b7c19508664ff325e8ee782804c342f67abdea9d1215884ab469912",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "scripts/export_peer_compatibility.py",
+      "bytes": 6317,
+      "sha256": "0d7ab01e2cd2f165eaab39e306ecf781c2d1572ab4ae5670b12e1c3b6f25b754",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "scripts/guest.py",
+      "bytes": 4971,
+      "sha256": "21b76d402e2bfe71cfe7128abed02789cd73bb49c6f2cfd6f87e46fa6312fe97",
+      "origin": "copied_unchanged_publication_dependency_fix"
+    },
+    {
+      "path": "scripts/monitor_peer_collection.py",
+      "bytes": 5492,
+      "sha256": "b54ef2be2a4de0e53fa032bbf972372107d7115bd6de8fbc93c9117c4213f8b9",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "scripts/peer_reporting_preflight.py",
+      "bytes": 3325,
+      "sha256": "45f684f298ce53604448cde1ac916b2d2a02e90ee08c9341d34c4ba03d406cfb",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "scripts/propose_peer_caps.py",
+      "bytes": 5655,
+      "sha256": "96b29413da0deab0070c39a82d9a47e9c1bf3fb08e750d8e7ea557a7d0593cf2",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "scripts/summarize_peer_collection.py",
+      "bytes": 13084,
+      "sha256": "99f00a343a5e00e90eb98ddd712e3e09b8b1b58b5776f79b0d1e98a007dce10e",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "scripts/sync_to_wsl.py",
+      "bytes": 2327,
+      "sha256": "9e5fd7ef2d2dc6923f5e9c8e16b69aa9750bac518afd9fe47cf409c0414cc727",
+      "origin": "copied_unchanged_publication_dependency_fix"
+    },
+    {
+      "path": "src/swarm_auth_bench/__init__.py",
+      "bytes": 101,
+      "sha256": "766bf4bec5a0167c318b6c28ecca6a5c406b7891871585806bc8dd853fd9af76",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/__main__.py",
+      "bytes": 31,
+      "sha256": "11cf323249f4ba4e79c9fb7660c0979fc91a3822bc5362286376b69808b41195",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/calibration.py",
+      "bytes": 43811,
+      "sha256": "d347b11e798ff9a5b73238c347a269e973d3fc386849dd83115e22a90d0c658b",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/channel_use.py",
+      "bytes": 8379,
+      "sha256": "113542d4bb98e6bd8e0cb2b65d914bbcb1d4c643f952edfc14246fa02fcaf115",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/cli.py",
+      "bytes": 6162,
+      "sha256": "f496506b2c8224919ee0df2cda8d5ab6c1cad1be61554f9ac96dc079480db130",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/config.py",
+      "bytes": 6303,
+      "sha256": "18fc0960227bb970e85f0a58e18efa3283072c408c8fa89a1efaf42334347f50",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/cooperation.py",
+      "bytes": 30980,
+      "sha256": "ac79e56e8def236ed0fd2e03f4d519fdf530b27d09e5abb4ab3390d0674d72a1",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/data/LICENSE.codex",
+      "bytes": 11127,
+      "sha256": "aa5e89edcbbd01fc3fb188a527d8bdc0da5812305cab220c84348c14ea427288",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/data/NOTICE.md",
+      "bytes": 796,
+      "sha256": "a7235bdf008da68c31e87c59c765f0fa1d463e166a7c3b6d3acd79288501543b",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/data/luna-direct-catalog.json",
+      "bytes": 63018,
+      "sha256": "9a3bd7b0899b2bfcbe3b9f0749241e29f63c67fee2f6275c71d28d37b268f193",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/evaluation.py",
+      "bytes": 6246,
+      "sha256": "a0e6738b0a1bffeb58ba0db99446fc64d93daaac56031d61dfc292c4ad6081b1",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/events.py",
+      "bytes": 2596,
+      "sha256": "e70ba22da031e94beb98054c1eea58cf5fc7843b794c9ecf19615339587b37e1",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/findings.py",
+      "bytes": 37261,
+      "sha256": "1138dc125a79966fd350dca2cd1474f8adf4e1d0e377cc745811392aa0c89fe8",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/harness.py",
+      "bytes": 38246,
+      "sha256": "4341e8ecff91eb00942b1aba08d2c52d6e99f715755b439d6d6618d53ab59f48",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/isolation.py",
+      "bytes": 54724,
+      "sha256": "029e9411171c6c8be5148a3a1a2eeecb7863349127bc9aaa0304ac824bc71c10",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/local_trials.py",
+      "bytes": 26344,
+      "sha256": "658f006b7583a490e3e3558f7e50ec3ddea9b4801543542b2337f89569194840",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/long_config.py",
+      "bytes": 6327,
+      "sha256": "2a92b3af23d44e58f15b3cacc923b3089ca22f443c65897b95b4f1c0f895bc24",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/long_events.py",
+      "bytes": 6886,
+      "sha256": "d985aa606688cb45244d91c77a5134de7e4aec9470bd9349c56d703d486ab014",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/long_harness.py",
+      "bytes": 67939,
+      "sha256": "441a7dc7f0acb123891139add841af69f404e6159489d9267be441344d1640f3",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/long_integration.py",
+      "bytes": 16495,
+      "sha256": "7e2861c555ed31ac55bc22e15b1fc09e861c761baed71c8820f520dc92bb4253",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/long_runtime.py",
+      "bytes": 64176,
+      "sha256": "6c7c0af03a50917ce44e1e97fe3d01bf762f70528413c7639bd546f1f1a6ec20",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/long_tasks.py",
+      "bytes": 53645,
+      "sha256": "0eb699f4fd98f60db7c295b2535a2a4bb0b43ec76d60645b8732f0388682e617",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/long_world.py",
+      "bytes": 8958,
+      "sha256": "8da281a3e5e9d6fc777bd827bc862d9b6e46e7abbf97aa4cd83054f370619aa6",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/measurement.py",
+      "bytes": 9884,
+      "sha256": "5bbe4c4fce2be73c3781b8add9c50314949ad28d03cc11fabf1fb46f550fa132",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/model_catalog.py",
+      "bytes": 1172,
+      "sha256": "3adcda64a0e50257ea5a76516ec878227fae4ae6c8345fbfedde7b29efe8274b",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/__init__.py",
+      "bytes": 187,
+      "sha256": "11e6f3576adaa2fff15e52fefee5dde077cb90c6dbf4255f0dbe10616c32a677",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/__main__.py",
+      "bytes": 48,
+      "sha256": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/budget.py",
+      "bytes": 12944,
+      "sha256": "cd08ec3c1fdeaf33541681db0116897b56bdd1f44183e7b4695919eafbbe8144",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/catalog.py",
+      "bytes": 3566,
+      "sha256": "e860dc5364e0dedb74a2926ca4a148d64d14d8b5a28ae1ee96362495976aacc6",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/cli.py",
+      "bytes": 8198,
+      "sha256": "97d4d0dc7d3dc3f9bcc3242567125bcd55236be5b37a226e79eb4e473dddcf57",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/collection.py",
+      "bytes": 14015,
+      "sha256": "638fb1a7c4bbb4cb0336ce4258f3fb5e27f94230f7e2bf2e7caf06e3e397a5ce",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/config.py",
+      "bytes": 7507,
+      "sha256": "73f57e4711c2e87d18cd5f193c841758cd652e1fadaf88074c47b53fd8e0cfb8",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/data/NOTICE.md",
+      "bytes": 899,
+      "sha256": "67eb13c1619b1506cf8d484830e66517be0f9a1448f38d5b175bc48641d535d9",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/data/gpt-6-astra-direct.json",
+      "bytes": 66344,
+      "sha256": "d44e2c0896abafa01ca5f862c934b392aef238b547e79e649fe53d4f90fbf589",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/data/gpt-6-sol-direct.json",
+      "bytes": 63809,
+      "sha256": "76f3d97946113579fb919821c1ef738cc75d658069c289f248ac809bbb697b34",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/export.py",
+      "bytes": 9093,
+      "sha256": "3beb9586bcae1f6f58919a03d9c41a6e8b461584a870f23add31c7b2f5e3e92d",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/fixtures.py",
+      "bytes": 50938,
+      "sha256": "80c3320f3d0e4ebbeb9c2e2d044e3d11e4a0933d44b4bbd33433b944ff0f908a",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/live.py",
+      "bytes": 85016,
+      "sha256": "6962462003735ea1fb0d21437ca280299447fa56cd302366f028063881ce38d9",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/live_archive.py",
+      "bytes": 2852,
+      "sha256": "f27005a6ce9678537309087ea31bedbcf4d267cd4345bf9dc5ab622a3e26dbc8",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/live_integrity.py",
+      "bytes": 8856,
+      "sha256": "86b52430b1b9a372b2c740b135cee5386d3f1d20794cfce35ddd684ced9628df",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/live_review.py",
+      "bytes": 22236,
+      "sha256": "a23c5ddc2ef7cd81b5cb5b1e47e7c5f8fefa45fca21677b5e6892388ae84b0bc",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/live_runtime.py",
+      "bytes": 44333,
+      "sha256": "410a29138b3e5ab629e472fc8a4f49505afd1b6ea374def1f57ee161cf4f834b",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/prompts.py",
+      "bytes": 5529,
+      "sha256": "3bf72e88b8f9eac0027273c345719bc9eb839d7e91705a6ea8eb5f866cf04f8c",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/protocol.json",
+      "bytes": 34092,
+      "sha256": "1793deffccabc835c210b80a16ed2eb6d3c0b35362a17042a60d1fa644b84402",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/runner.py",
+      "bytes": 19994,
+      "sha256": "4e9ccfbab3fb576d1126f61f028b02ce5647ef56da0e5442ed29d44ce2b7dfbb",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/schemas.py",
+      "bytes": 7708,
+      "sha256": "e550e52b8b660a757197c5bfbc82681f22c5d06bc4d3a82c5af352cdc8a94e02",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/score.py",
+      "bytes": 47827,
+      "sha256": "a12eb7db74475927a68a3eab11b97d44d4ce04c855dde0f35e1f3004e90f1220",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/storage.py",
+      "bytes": 2048,
+      "sha256": "70a5e8b713c1c0008ba2a3637725c66495d3790c2c0715f68f35bc259badf764",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/peer_reporting/world.py",
+      "bytes": 29129,
+      "sha256": "7d73d78706c8722651fe56c4dcdce284bb51ef649908c6c388e09948c033e6b7",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/policy.py",
+      "bytes": 6130,
+      "sha256": "f315f7b3f42442e22fa47821af7d637dc71b9538cfe530e9de783b94c118635e",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/predict.py",
+      "bytes": 41846,
+      "sha256": "25e0201a822f002db80e0f84a8bc9a371f8abc5e1843396f837530d3ed9af30e",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/provenance.py",
+      "bytes": 1733,
+      "sha256": "c19ba8ed45d4282918d41f09e6024b63f6e3500efda83c42e6c6f82fb2c4b0fb",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/related_tasks.py",
+      "bytes": 17137,
+      "sha256": "21087260c4158f385d600a08bef6a2f5bc08f499752defea69a1e71487ad9260",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/report.py",
+      "bytes": 13669,
+      "sha256": "b9d872440d5cbdba8abbcf3494c5b502147bf6874a95c0395705124c05cb19cc",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/review.py",
+      "bytes": 11292,
+      "sha256": "58bf12a6fc1ea9934e5d88c468ef8c364827a61320079d13baa77add03ae64b1",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/runtime.py",
+      "bytes": 39966,
+      "sha256": "0e50e3de6ad85a5689aa72aa89d87381a3f0a6ae59f295c1e030bc437ff19a28",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/scheduling.py",
+      "bytes": 2264,
+      "sha256": "70092c2e05406038000fc23d827f43cc1da6fabf970b42d4e80962971772eb7e",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/semantic_review.py",
+      "bytes": 26314,
+      "sha256": "8ad07649cfcd37e10cebd730659bf8215c233305f70c783feb26f10e6b4efe13",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/evaluator/t01_pagination.py",
+      "bytes": 483,
+      "sha256": "e2f9c340da83851f29a61dd329a16a21b30a1083107498fc7f05860f33f833a1",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/evaluator/t02_duration.py",
+      "bytes": 455,
+      "sha256": "c6927bf22111bbbe9cdab30931bc5be97bfe8dbb29958d9154ac4d5a36b080ca",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/evaluator/t03_headers.py",
+      "bytes": 527,
+      "sha256": "8f91a61fc5025dc47bdb9d62ffc9ffdf0946afbcdcdecc825a6b28f483a8b9aa",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/evaluator/t04_backoff.py",
+      "bytes": 476,
+      "sha256": "0aeb1c7563f175509ff9db963dc2593395f79edfe045624b0208ebafa5d1f5eb",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/evaluator/t05_unique.py",
+      "bytes": 381,
+      "sha256": "bea6e3d8b71e2166798ba5c47d9eecd805171c5a7225b2d11d2b9d013066ae94",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/evaluator/t06_inventory.py",
+      "bytes": 538,
+      "sha256": "0f136fc07bc65992fd82cdd505a924225ca041b8f78438a3ff7b1a2165af76ed",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/evaluator/t07_redaction.py",
+      "bytes": 588,
+      "sha256": "8f283bcd900a5069d544d38d2f3c051b6de5e6855c4dd3acacc0c56070394aae",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/evaluator/t08_archive.py",
+      "bytes": 513,
+      "sha256": "efa0b463f1d78e662397a119be2f4310e3da389dd1dacaa21f5bf88ff7f71b24",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t01_pagination/solution.py",
+      "bytes": 134,
+      "sha256": "e45b797df8e6dccd72dbb726d446f104e5b4979671a17fe5f9ace1615788d1c2",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t01_pagination/tests/test_visible.py",
+      "bytes": 312,
+      "sha256": "c127f72240a9e2af2084a9b5dfcc9a283a4bdb6d74adf412af56acf006e4122f",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t02_duration/solution.py",
+      "bytes": 333,
+      "sha256": "8e944931916ec182cdf76e768ad68d730295063f502b238dee2823d98f231397",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t02_duration/tests/test_visible.py",
+      "bytes": 284,
+      "sha256": "777a4aaad7826799f2c2b1f20f289f08c852d34f2c383c77665d5829d858cae6",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t03_headers/solution.py",
+      "bytes": 166,
+      "sha256": "730ea0df2c2750b42106875db21aaaa9016392451b536d2a2fdb7780652caf0e",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t03_headers/tests/test_visible.py",
+      "bytes": 233,
+      "sha256": "626a47094fd6f902140ab63b999cf3cc5b445d429f96455998d035bb4a38f2af",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t04_backoff/solution.py",
+      "bytes": 169,
+      "sha256": "dd32b33f6f60e458df9cec1fd570d4949372206d0cc32934d1f5de458476e67b",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t04_backoff/tests/test_visible.py",
+      "bytes": 298,
+      "sha256": "17eec495bc2cca8e0fbcbf92d7ef21bf5226fb0566de76cb1a324a66cd5b1aac",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t05_unique/solution.py",
+      "bytes": 292,
+      "sha256": "fd99363125bb141f2a1d26af74a14bfd70e5c4f8af497902676abaa8c7832276",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t05_unique/tests/test_visible.py",
+      "bytes": 216,
+      "sha256": "2ed8042b437213df50802c641f624579b77b3e547cc5b75daa218634d931c822",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t06_inventory/solution.py",
+      "bytes": 196,
+      "sha256": "8aa3b7d218c6a9fbf7916037a3c979f967153e9824e4a1a71f018371a72d9801",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t06_inventory/tests/test_visible.py",
+      "bytes": 400,
+      "sha256": "a61033702c7da93a23697fd8637a7cdc6b7ba26c9ca3eb24183ae6cbba86c71a",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t07_redaction/solution.py",
+      "bytes": 186,
+      "sha256": "ec4e6334cfacb1565be095798e88cf8c7b1b550adcc67738bc65c0b6c47bfe1e",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t07_redaction/tests/test_visible.py",
+      "bytes": 249,
+      "sha256": "3da8e7ee1e16859dbb77152124165f97e7cd863a7d43edcdbfa99f1f84dbfc4f",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t08_archive/solution.py",
+      "bytes": 157,
+      "sha256": "89bf6020414bcfe2106daa32947ef21abacb11d203cd08e7dc219703238a2b2d",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/task_data/fixtures/t08_archive/tests/test_visible.py",
+      "bytes": 392,
+      "sha256": "85abd0efce194db0c21d33acc33c7e4c960d968f519202da4d69783b009996f2",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/tasks.py",
+      "bytes": 5104,
+      "sha256": "58894a68b945a47236ed8a726d5a34072f4ba37ef537d6e2beabcbef498cf690",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "src/swarm_auth_bench/world.py",
+      "bytes": 18228,
+      "sha256": "bb1f55832a17de3ca333ab879859326b6081f0bab3719f7dee6f5173f1961a42",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "tests/test_peer_reporting_budget.py",
+      "bytes": 9068,
+      "sha256": "5d8313599ef88896e2424b93f08deccd012ecb152fcf292ff9db161928de3b22",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "tests/test_peer_reporting_catalog.py",
+      "bytes": 3226,
+      "sha256": "772c58928cebac499632c8d4abdefd50fdd4b9eb019b8e21f2dd4ed827eeaa58",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "tests/test_peer_reporting_config.py",
+      "bytes": 5324,
+      "sha256": "d12fe678ed0d94b660f59dc7625ab89ba14cc3c43dfca340713a71e54decac18",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "tests/test_peer_reporting_fixtures.py",
+      "bytes": 40193,
+      "sha256": "cc278fc6a6181bb9a18a539200e76071f07ae8dfa3204d563025c67c70d8e1fa",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "tests/test_peer_reporting_live.py",
+      "bytes": 50326,
+      "sha256": "e51e0e054e66b8e79bbb0aa7fd7c326975705b0b349d4e930f4cee4d3a9f92fb",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "tests/test_peer_reporting_live_integrity.py",
+      "bytes": 9886,
+      "sha256": "53504f572e8d0adf9e5651fcf30ef7631efd87e9a3337a562cc17232ea14962d",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "tests/test_peer_reporting_live_review.py",
+      "bytes": 14942,
+      "sha256": "f0f98d93f642a4fee092092a20535154b5e30b979041aac5766caafbccf57ecb",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "tests/test_peer_reporting_live_runtime.py",
+      "bytes": 26229,
+      "sha256": "e47ec181cb2775f7fb4ff15dde1f0747fea3da9bbfbe1651824e85b62ccb1b99",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "tests/test_peer_reporting_pipeline.py",
+      "bytes": 23680,
+      "sha256": "fc1903543b91ba9dc22a5615b10eee8e620de2ff2deeba9ec69ebfac3ff4a5f9",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "tests/test_peer_reporting_score.py",
+      "bytes": 53027,
+      "sha256": "950d083c4d9c18bf2ae384096a6bec168cb770236e773651502f1e251b316275",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "tests/test_peer_reporting_summary.py",
+      "bytes": 5031,
+      "sha256": "821749bed4fee0c2bb301b3a4023364f50a5d917b4fea8de4883a49f65886544",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "tests/test_peer_reporting_world.py",
+      "bytes": 23701,
+      "sha256": "5f875b85f457aeb3ef59f7820e57bde6da9cf88dc9271d56db1881dc0dc6b675",
+      "origin": "copied_unchanged"
+    },
+    {
+      "path": "uv.lock",
+      "bytes": 206834,
+      "sha256": "0c00d8872951166df55945dc7a969532acc38306080686798a2b6d0d2196b620",
+      "origin": "copied_unchanged"
+    }
+  ],
+  "file_count": 122,
+  "total_bytes": 2027995
+}

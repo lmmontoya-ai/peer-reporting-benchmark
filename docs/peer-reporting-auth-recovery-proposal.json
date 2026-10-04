@@ -1,0 +1,40 @@
+{
+  "kind": "peer_reporting_engineering_recovery_proposal",
+  "status": "approved_user_per_call_limits_frozen_before_recovery",
+  "original_plan_hash": "b40d98c3e2df6b96a601fb7f0b623cb839bbfb711df5e2540d4bbaea6383a93f",
+  "original_attempt": "compatibility-v1-gpt-6-luna-attempt-1",
+  "failure": "workspace routing discovery unauthorized (401)",
+  "repair": "Expired guest login replaced with current login for the same account; no credentials in artifacts.",
+  "original_usage": "unknown",
+  "original_reserved_tokens_retained": 75000,
+  "original_phase_stays_stopped": true,
+  "new_phase_config": "configs/peer-reporting-compatibility-auth-recovery-v2.json",
+  "maximum_additional_call_starts": 3,
+  "maximum_total_starts_across_both_phases": 4,
+  "new_phase_caps": {
+    "max_trial_wall_seconds": 360,
+    "drain_grace_seconds": 10,
+    "max_tool_requests_per_trial": 16,
+    "trial_observed_token_stop_target": 240000,
+    "reserved_tokens_per_trial": 300000,
+    "collection_wall_seconds": 1200,
+    "collection_observed_token_stop_target": 900000,
+    "max_concurrency": 1
+  },
+  "reserved_capacity_across_original_and_new_phase": 975000,
+  "hard_provider_billing_ceiling": false,
+  "reason_for_explicit_decision": "The original policy stops new admission on unknown usage and permits one attempt per model. This proposal needs an explicit exception for a separate capped engineering repair phase.",
+  "behavioral_assignments_consumed": 0,
+  "user_supplied_limits": {
+    "seconds": 360,
+    "tokens": 240000,
+    "scope": "each_model_call"
+  },
+  "authorization": "User approved the separate recovery phase and clarified that 360 seconds and 240000 tokens apply to each model call.",
+  "aggregate_derivation": {
+    "reservation_per_call": "1.25 * 240000 = 300000",
+    "phase_tokens": "3 * 300000 = 900000",
+    "phase_wall": "3 * (360 + 10 drain) + 90 overhead = 1200 seconds"
+  },
+  "recovery_config_content_hash": "4efeb4731e86074588ac459f770dc66159ca677c69318f4056564f8fe45f82a4"
+}

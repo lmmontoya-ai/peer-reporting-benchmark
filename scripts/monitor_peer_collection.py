@@ -1,0 +1,114 @@
+"""Read provisional guest progress without inspecting or changing active evidence."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from guest import command
+
+REMOTE_READ = r'''
+import json, sys
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+root=Path(sys.argv[1])
+phases={}
+for split, planned in [('smoke',9),('collection',216)]:
+    directory=root/('live-'+split)
+    index_path=directory/'phase-index.json'
+    ledger_path=directory/'budget-ledger.json'
+    row={'planned':planned,'status':'unstarted','counts':{},'starts':0,'archived':0,
+         'current':[],'known_reported_tokens':0,'unknown_usage_attempts':0,'halt_reason':None,
+         'latest_evidence_utc':None}
+    try:
+        if index_path.exists():
+            index=json.loads(index_path.read_text())
+            entries=list(index.get('entries',{}).values())
+            row['counts']=dict(Counter(e.get('status','unknown') for e in entries))
+            row['starts']=sum(e.get('attempt') is not None for e in entries)
+            row['archived']=row['counts'].get('archived',0)
+            row['current']=[{'model':e.get('model'),'attempt_id':e.get('attempt_id')}
+                            for e in entries if e.get('status')=='started']
+            halt=(index.get('last_run') or {}).get('halted')
+            row['halt_reason']=halt.get('reason') if isinstance(halt,dict) else halt
+            row['status']='halted' if halt else ('archived' if row['archived']==planned else 'in_progress')
+            timestamps=[index_path.stat().st_mtime]
+            if ledger_path.exists():
+                ledger=json.loads(ledger_path.read_text())
+                attempts=list(ledger.get('attempts',{}).values())
+                row['known_reported_tokens']=sum(a.get('actual',0) if a.get('status')=='settled'
+                    else a.get('observed',0) for a in attempts)
+                row['unknown_usage_attempts']=sum(a.get('status')=='unresolved' for a in attempts)
+                row['reserved_tokens']=sum(a.get('reservation',0) for a in attempts if a.get('status')!='settled')
+                row['halt_reason']=row['halt_reason'] or ledger.get('stop_reason')
+                if row['unknown_usage_attempts']:
+                    row['halt_reason']=row['halt_reason'] or 'unknown_usage_hold'
+                timestamps.append(ledger_path.stat().st_mtime)
+            row['latest_evidence_utc']=datetime.fromtimestamp(max(timestamps),timezone.utc).isoformat()
+    except (OSError,ValueError,TypeError,KeyError):
+        row['status']='snapshot_unavailable'
+        row['snapshot_error']='Could not read this provisional snapshot; retry on next refresh.'
+    phases[split]=row
+print(json.dumps({'kind':'provisional_status_snapshot','verified_final_evidence':False,
+ 'updated_utc':datetime.now(timezone.utc).isoformat(),'phases':phases}))
+'''
+
+
+def snapshot(project: str) -> dict:
+    result = subprocess.run(command(['.venv/bin/python', '-c', REMOTE_READ, 'runs/study'], project),
+                            capture_output=True, text=True, timeout=40, check=True)
+    return json.loads(result.stdout)
+
+
+def atomic_write(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                     prefix='.run-status-', suffix='.tmp', delete=False) as stream:
+        temp = Path(stream.name)
+        json.dump(value, stream, indent=2, allow_nan=False)
+        stream.write('\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--project', default='/opt/swarm-auth-bench/phases/peer-reporting-p1-collection-v1')
+    parser.add_argument('--output', type=Path, default=Path(__file__).resolve().parents[1] / 'docs/long-run-explanation/run-status.json')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--once', action='store_true')
+    mode.add_argument('--watch', action='store_true')
+    parser.add_argument('--interval', type=float, default=45)
+    parser.add_argument('--deadline', default='2026-10-05T00:00:00Z')
+    args = parser.parse_args()
+    deadline = datetime.fromisoformat(args.deadline.replace('Z', '+00:00'))
+    if deadline.tzinfo is None or not 1 <= args.interval <= 60:
+        parser.error('deadline must include a timezone; interval must be between 1 and 60 seconds')
+    while True:
+        try:
+            value = snapshot(args.project)
+            atomic_write(args.output, value)
+            print(json.dumps(value), flush=True)
+        except (subprocess.SubprocessError, OSError, ValueError) as error:
+            # Preserve the last successful snapshot and its halt reason. Its age exposes a stale reader.
+            print(json.dumps({'monitor_error':type(error).__name__, 'last_success_preserved':True}), flush=True)
+            if not args.watch:
+                raise SystemExit(1)
+        if not args.watch or datetime.now(timezone.utc) >= deadline:
+            break
+        remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+        time.sleep(max(0, min(args.interval, remaining)))
+
+
+if __name__ == '__main__':
+    main()

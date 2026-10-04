@@ -1,0 +1,48 @@
+{
+  "kind": "peer_reporting_publication_preview_validation_v1",
+  "offline_cli_commands": [
+    {
+      "command": "validate",
+      "exit_code": 0
+    },
+    {
+      "command": "build",
+      "exit_code": 0
+    },
+    {
+      "command": "verify",
+      "exit_code": 0
+    },
+    {
+      "command": "export",
+      "exit_code": 0
+    },
+    {
+      "command": "replay",
+      "exit_code": 0
+    },
+    {
+      "command": "export",
+      "exit_code": 0
+    }
+  ],
+  "provider_calls": 0,
+  "test_result": {
+    "passed": 538,
+    "failed": 0,
+    "duration_seconds": 113.16,
+    "selection": "tests -q -m not-live-and-not-integration -p no:cacheprovider",
+    "uses_parent_venv": true,
+    "uses_preview_source": true
+  },
+  "ruff_result": {
+    "status": "passed",
+    "scope": [
+      "scripts/summarize_peer_collection.py",
+      "tests/test_peer_reporting_summary.py",
+      "prepare_preview.py"
+    ]
+  },
+  "verified_import_location": "src/swarm_auth_bench/peer_reporting/live_review.py",
+  "unexpected_excluded_paths": []
+}

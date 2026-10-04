@@ -1,0 +1,80 @@
+Peer-reporting P1: two-minute demo framework
+
+This AI-assisted artifact is a factual demo outline for the project or video.
+It is not an answer to the submission form. The form requires a human to write
+its answers without AI. Do not paste this outline into the form or describe it
+as human-authored. No form is submitted by these scripts.
+
+This is a framework, not a completed-results claim. Fill the counts only from a
+closed, fetched archive after the verified summary command succeeds.
+
+0:00-0:25
+We ask whether an observer carrying out an ordinary inventory task raises a
+private, evidence-supported concern about a fictional approval breach. N is the
+number of scripted peers, excluding the observer. K is the number of verified
+participants in the shared incident. A concern about a signer's prohibited action
+can identify the shared incident. The focal-operation endpoint separately asks
+whether the observer identifies the original submit_request operation.
+
+0:25-0:45
+Show the public packet and approval records in the existing evidence export.
+All participants, messages, records, rules and incidents are authored fiction.
+AI Digest / AI Village supplies related setting context selected after these
+fixtures were authored. No Village agent committed the depicted incident.
+Attribution: AI Digest, "AI Village dataset", 2026,
+https://theaidigest.org/village; aidigestorg/ai-village revision 838b415,
+events/0001d4ba-6999-4eee-8ea0-1e54b4cd6d49.
+
+0:45-1:10
+Open the summary's collection table. Read its planned and status counts aloud.
+Keep the 9 smoke assignments separate from the 216 collection assignments.
+Compatibility checks established transport support, not reporting propensity.
+Show report attempts beside accepted private reports, task submissions, termination
+and resource observations. An attempted call can fail; an accepted report can be
+incorrect. Unknown resource use is unavailable, not zero.
+
+1:10-1:35
+Open one verified trace chosen by a declared, outcome-independent rule, such as
+the first archived collection assignment in planned order. In the existing live
+export show the public records, private report, observer outputs and termination.
+If there is no archived collection assignment, show the status and reason instead.
+State which semantic outputs await human review. Supported shared-incident and
+focal-operation concern are distinct endpoints. Unsupported material claims must
+be reviewed across private reports, public posts and final answers. A correct
+concern does not erase a false claim elsewhere.
+
+1:35-2:00
+Show cell counts and all-assigned bounds in summary.json. The two finite fixture
+blocks are different stimuli, not identical independent repetitions. K changes
+evidence as well as participation. This pilot does not establish a population
+threshold, diffusion of responsibility, peer-pressure resistance or costly
+whistleblowing. Final accuracy requires the specified human review, including
+independent second review and adjudication where required.
+
+Postcollection commands (repository Python environment; no provider calls)
+
+python scripts/summarize_peer_collection.py .local/peer-reporting-p1-collection-v1/runs/study --output .local/peer-reporting-p1-summary-v1
+
+The output must be new and outside the source archive. Files are summary.json,
+assignments.csv and index.html. The JSON retains all 225 assignments, exact
+model/prompt/N/K/block/variant cells, semantic applicability, pending values,
+conditional resolved counts and all-assigned bounds. CSV blank cells are unknown
+or unavailable; endpoint applicability and reasons are explicit columns. This
+summary is a researcher artifact, not a blinded reviewer packet.
+
+For transcript inspection and masked reviewer packets use the existing command:
+python -m swarm_auth_bench.peer_reporting export .local/peer-reporting-p1-collection-v1/runs/study --output .local/peer-reporting-p1-live-export-v1
+
+Check the installed CLI help if the export command changes. Keep controller
+bindings private. After human review, optional --reviews and --bindings arguments
+accept JSON maps keyed by assignment ID. They must be supplied together and bound
+to the exact archived output. The scorer rejects invalid labels and the summary
+retains review_error. Summary counts alone do not certify review sampling or
+second-review completion.
+
+Source archives are not rewritten. The existing phase verifier may acquire its
+budget lock. Run against a closed snapshot; changed payload hashes abort resource
+attachment. Collection-level verification failure aborts. Phase or attempt
+corruption remains visible as quarantined planned rows. No source raw text is
+republished here. Publication notification to AI Digest remains the repository
+owner's responsibility under the reviewed terms.

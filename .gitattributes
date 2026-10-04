@@ -1,0 +1,26 @@
+* text=auto eol=lf
+*.ps1 text eol=crlf
+
+# Preserve bytes used by research-artifact hashes on every checkout platform.
+results/episode-records/** -text whitespace=cr-at-eol,-blank-at-eof
+results/runtime-probe/** -text whitespace=cr-at-eol,-blank-at-eof
+results/resource-samples.jsonl -text
+study/model_review_output/** -text whitespace=cr-at-eol,-blank-at-eof
+study/pilot_model_review_output/** -text whitespace=cr-at-eol,-blank-at-eof
+study/luna_model_review_output/** -text whitespace=cr-at-eol,-blank-at-eof
+study/luna_pilot_review_output/** -text whitespace=cr-at-eol,-blank-at-eof
+study/luna_control_review_output/** -text whitespace=cr-at-eol,-blank-at-eof
+results/luna/** -text whitespace=cr-at-eol,-blank-at-eof
+results/related/** -text whitespace=cr-at-eol
+results/long/** -text whitespace=cr-at-eol
+# Archive payloads are exact evidence bytes, not editable source patches.
+results/long/archives/**/payload/* -text -diff
+# Matplotlib path data contains trailing spaces. Keep the sealed SVG bytes.
+results/related/figures-final-v1/*.svg -text whitespace=-blank-at-eol,cr-at-eol
+results/long/figures-*/*.svg -text whitespace=-blank-at-eol,cr-at-eol
+results/long/primary-v3/figures*/*.svg -text whitespace=-blank-at-eol,cr-at-eol
+study/related/** -text whitespace=cr-at-eol
+src/swarm_auth_bench/data/luna-direct-catalog.json -text
+
+# Keep the publication manifest and frozen source hashes exact on all platforms.
+* -text whitespace=cr-at-eol,-blank-at-eof

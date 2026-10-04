@@ -1,0 +1,58 @@
+{
+  "kind": "peer_reporting_publication_preview_audit_v1",
+  "created_at_utc": "2026-10-04T14:28:17.744278+00:00",
+  "copied_file_count": 119,
+  "copied_bytes_match_source": true,
+  "included": [
+    "Python source and synthetic package assets",
+    "dependency metadata and lockfile",
+    "peer-reporting configs and tests",
+    "peer-reporting helper scripts",
+    "specification, source attribution, resource proposal, human review plan and runtime docs",
+    "AI-assisted project README and local preparation script"
+  ],
+  "excluded": [
+    ".git and repository history",
+    "original .local tree and raw dataset cache",
+    "runs, results, study and legacy observed agent data",
+    "authentication and environment files",
+    "compiled files and cache directories",
+    "private review bindings and any live outcomes",
+    "original repository README and unrelated documentation/configs/tests"
+  ],
+  "scan": {
+    "scope": "every manifest file",
+    "rule_names": [
+      "private_key_block",
+      "openai_like_token",
+      "huggingface_like_token",
+      "github_like_token",
+      "aws_access_key",
+      "credential_assignment_candidate"
+    ],
+    "candidate_file_count": 0,
+    "candidate_files_and_counts": [],
+    "matched_values_disclosed": false,
+    "limit": "Pattern scan is not a proof that every possible secret format is absent."
+  },
+  "result_status": "no_live_benchmark_outcomes_included",
+  "validation_record": "validation.json",
+  "known_limits": [
+    "Repository source license is not declared; Codex-derived catalog assets retain Apache 2.0 notice/license.",
+    "Supporting source modules include legacy software paths, but no legacy observed datasets or run artifacts.",
+    "Historical doc references may target documents outside this focused preview.",
+    "Human review plan is bound to its original sealed collection plan, not a newly generated offline plan.",
+    "Public source review uses original paraphrase and provenance only; AI Village custom terms remain applicable.",
+    "AI Digest publication notification remains the repository owner's responsibility.",
+    "Live collection requires separately qualified isolation/runtime/model access and evidence gates.",
+    "Human must write submission form answers without AI; this README is an AI-assisted project artifact.",
+    "Pattern findings must be assessed before publication; no credentials or token values are printed."
+  ],
+  "publication_status_at_preview_creation": "local_preview_only_no_commit_push_visibility_change_or_form_submission",
+  "publication_authorization": "User approved publishing this clean copy as a new public repository on2026-10-04.",
+  "post_preview_packaging_changes": [
+    "Added guest.py and sync_to_wsl.py dependencies for the included monitor helper.",
+    "Preserve every file byte in Git so manifest and frozen source hashes survive checkout.",
+    "README now identifies this copy as a repository. No model/runtime behavior changed."
+  ]
+}
