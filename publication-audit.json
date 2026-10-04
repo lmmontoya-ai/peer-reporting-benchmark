@@ -99,5 +99,62 @@
       "uses_public_copy_source": true,
       "provider_calls": 0
     }
+  },
+  "admission_and_monitor_repair_v1": {
+    "base_commit": "cc7fe70c185a712a65c29a735bd2ee9e2f272c34",
+    "admission_validation_at_preparation": {
+      "kind": "peer_reporting_public_admission_update_validation_v1",
+      "base_commit": "cc7fe70c185a712a65c29a735bd2ee9e2f272c34",
+      "allowlist_files": 6,
+      "payload_bytes": 190077,
+      "manifest_sha256": "dbfacc240ff6705408133e70369d3d7a6db418c0945ec1c54774417707f9315e",
+      "manifest_hashes_match": true,
+      "actual_runner_source_files_byte_identical": true,
+      "combined_public_copy_import_root": "check/src/swarm_auth_bench",
+      "tests": {
+        "passed": 155,
+        "failed": 0,
+        "errors": 0,
+        "duration_seconds": 67.596,
+        "scope": [
+          "tests/test_peer_reporting_budget.py",
+          "tests/test_peer_reporting_live.py",
+          "tests/test_peer_reporting_live_integrity.py",
+          "tests/test_peer_reporting_live_review.py"
+        ],
+        "offline_synthetic_only": true
+      },
+      "ruff": "passed for all five payload Python files and preparation helper",
+      "private_data_or_secret_pattern_candidates": [],
+      "public_checkout_mutated": false,
+      "public_checkout_clean": true,
+      "provider_calls": 0,
+      "policy_history_explicit": true,
+      "no_actual_approval_artifact_included": true,
+      "no_phase_outputs_or_raw_study_data_included": true,
+      "limitations": [
+        "Payload contains generic approval format, not execution authorization.",
+        "No live findings or completed human-review claims included.",
+        "Existing public publication manifest/audit will need refresh when parent applies this delta.",
+        "Full repository suite was not repeated; focused related155 tests ran on combined publicbase+delta."
+      ]
+    },
+    "monitor_offline_tests_passed": 9,
+    "monitor_sha256": "cefe351aff436efcd526230fc5b6f54f0ccc43c558c3abfb88dd1aaf412013d7",
+    "monitor_test_sha256": "c6b0a73b65b9af51b40e7f3a2d8b455b7996e46a3c4775b72c456a1224cdf05c",
+    "changed_paths": [
+      "src/swarm_auth_bench/peer_reporting/budget.py",
+      "src/swarm_auth_bench/peer_reporting/live.py",
+      "src/swarm_auth_bench/peer_reporting/cli.py",
+      "tests/test_peer_reporting_budget.py",
+      "tests/test_peer_reporting_live.py",
+      "docs/collection-admission-amendment.md",
+      "scripts/monitor_peer_collection.py",
+      "tests/test_peer_collection_monitor.py",
+      "README.md"
+    ],
+    "private_data_scan_candidates": 0,
+    "includes_live_outcomes": false,
+    "includes_actual_approval_record": false
   }
 }

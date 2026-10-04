@@ -39,6 +39,39 @@ def test_unknown_usage_holds_admission_until_reconciliation(tmp_path):
     assert ledger.admit("b")
 
 
+def test_retained_unknowns_keep_full_capacity_and_actual_unknown(tmp_path):
+    ledger = BudgetLedger(tmp_path / "ledger.json", limits(max_concurrency=1,
+                          collection_observed_token_stop_target=240), plan_hash=PLAN_HASH, create=True)
+    assert ledger.admit("a")
+    ledger.observe("a", "a-usage", 20)
+    ledger.settle("a", None)
+    assert not ledger.admit("b")
+    assert ledger.admit("b", retained_unresolved=frozenset({"a"}))
+    ledger.settle("b", None)
+    assert not ledger.admit("c", retained_unresolved=frozenset({"a", "b"}))  # full reservations still charge
+    snapshot = ledger.snapshot()
+    assert all(a["actual"] is None and a["reservation"] == 120 for a in snapshot["attempts"].values())
+
+
+def test_retained_unknowns_do_not_override_wall_or_token_stop(tmp_path):
+    now = [100]
+    ledger = BudgetLedger(tmp_path / "ledger.json", limits(collection_wall_seconds=1),
+                          plan_hash=PLAN_HASH, create=True, clock=lambda: now[0])
+    assert ledger.admit("a")
+    ledger.settle("a", None)
+    now[0] += 1
+    assert not ledger.admit("b", retained_unresolved=frozenset({"a"}))
+    assert ledger.snapshot()["stop_generation"]
+
+
+def test_retained_unknown_ids_must_cover_exact_unknowns(tmp_path):
+    ledger = BudgetLedger(tmp_path / "ledger.json", limits(), plan_hash=PLAN_HASH, create=True)
+    assert ledger.admit("a")
+    ledger.settle("a", None)
+    assert not ledger.admit("b", retained_unresolved=frozenset({"other"}))
+    assert not ledger.admit("b", retained_unresolved=frozenset({"a", "other"}))
+
+
 def test_duplicate_and_stale_usage_not_double_charged(tmp_path):
     ledger = BudgetLedger(tmp_path / "ledger.json", limits(), plan_hash=PLAN_HASH, create=True)
     ledger.admit("a")

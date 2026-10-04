@@ -2,6 +2,7 @@ import asyncio
 import functools
 import shutil
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,132 @@ from swarm_auth_bench.peer_reporting.collection import build_collection, verify_
 from swarm_auth_bench.peer_reporting.config import MODELS, StudyConfig, read_json
 from swarm_auth_bench.peer_reporting.live_runtime import PeerCodexRuntime
 from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, seal
+
+
+def amendment_for(plan, *, status="approved", **changes):
+    return seal({"kind": live.ADMISSION_AMENDMENT_KIND, "schema_version": live.ADMISSION_AMENDMENT_VERSION,
+                 "phase_plan_hash": plan["seal_hash"], "policy": "keep_unresolved_reservations",
+                 "authorization": {"status": status, "text": "Test-only explicit admission approval."},
+                 "max_unresolved_trials": len(plan["planned_order"]), **changes})
+
+
+async def test_collection_admission_amendment_retains_unknowns_and_never_repeats(tmp_path):
+    plan, fixture = live.build_compatibility_plan(config())
+    plan["phase"] = "collection"
+    directory = tmp_path / "amended-phase"
+    scripts = {model: [("usage", plan["caps"]["trial_observed_token_stop_target"]),
+                       ("stall", lambda: None)] for model in MODELS}
+
+    async def run(harness, *, resume=False, amendment=None):
+        kwargs = harness.kwargs()
+        hooks = live._hooks(kwargs["runtime_factory"], kwargs["preflight"], kwargs["environment_check"],
+                            None, live.time.monotonic, asyncio.sleep, live.time.time, 0.01)
+        return await live._run_phase(directory, plan, {}, resume=resume, hooks=hooks,
+                                     inputs=lambda _: (fixture, plan["instructions"]),
+                                     evaluate=live.evaluate_transport, binary_check=None,
+                                     admission_amendment=amendment)
+
+    first = Harness(tmp_path / "first-homes", scripts)
+    stopped = await run(first)
+    assert stopped["live_model_call_starts"] == 1
+    assert stopped["halted"]["reason"] == "unknown_usage_hold"
+    original_plan = (directory / "phase-plan.json").read_bytes()
+    original_attempt_path = next((directory / "attempts").glob("*/attempt.json"))
+    original_attempt = original_attempt_path.read_bytes()
+    approved = tmp_path / "approval.json"
+    atomic_json(approved, amendment_for(read_sealed(directory / "phase-plan.json")))
+    second = Harness(tmp_path / "second-homes", scripts)
+    continued = await run(second, resume=True, amendment=approved)
+    assert continued["live_model_call_starts"] == 3 and continued["halted"] is None
+    assert len(second.created) == 2
+    assert continued["ledger"]["reserved_tokens"] == 3 * plan["caps"]["reserved_tokens_per_trial"]
+    assert len(continued["ledger"]["unresolved_reservations"]) == 3
+    assert (directory / "phase-plan.json").read_bytes() == original_plan
+    assert original_attempt_path.read_bytes() == original_attempt
+    third = Harness(tmp_path / "third-homes", scripts)
+    with pytest.raises(live.LivePhaseError, match="same admission amendment"):
+        await run(third, resume=True)
+    report = await run(third, resume=True, amendment=approved)
+    assert third.created == [] and report["live_model_call_starts"] == 3
+    assert len(report["admission_amendment"]["eligible_retained_reservation_ids"]) == 3
+    assert kinds(directory).count("admission_amendment_applied") == 1
+    changed = tmp_path / "changed.json"
+    atomic_json(changed, amendment_for(read_sealed(directory / "phase-plan.json"), max_unresolved_trials=2))
+    with pytest.raises(live.LivePhaseError, match="differs from retained"):
+        await run(third, resume=True, amendment=changed)
+    assert live.verify_phase(directory)["admission_amendment"]["hash"] == read_sealed(approved)["seal_hash"]
+    state = live._PhaseState(directory)
+    try:
+        state.admission_amendment = amendment_for(state.plan, max_unresolved_trials=2)
+        assert not state.retained_unresolved(state.ledger_state())
+    finally:
+        state.journal.close()
+
+
+def eligible_unknown_payload():
+    return {"phase": "collection", "observer_error": None,
+            "orchestrator": {"evidence_failures": [], "usage_failures": []},
+            "observer_result": {"execution_kind": "live_model", "runtime_closed": True,
+                "queue_reconciled": True, "infrastructure_failures": [], "termination_kind": "per_trial_limit",
+                "boundary": {"termination_kind": "per_trial_limit", "reason": "trial_observed_token_limit"},
+                "usage": {"observed_total_tokens": 60000, "total_tokens": None},
+                "initial_receipt": {"thread_id": "thread", "turn_id": "turn"},
+                "raw_events": [{"raw": {"method": "turn/completed", "params": {
+                    "threadId": "thread", "turn": {"id": "turn", "status": "interrupted"}}}}]}}
+
+
+@pytest.mark.parametrize("failure", ["disconnect", "thread", "error", "overshoot", "cleanup", "infra", "missing_usage", "no_boundary"])
+def test_unknown_amendment_rejects_unsafe_closed_trials(failure):
+    payload = eligible_unknown_payload()
+    reservation = {"observed": 60000, "reservation": 75000}
+    assert live._retained_unknown_eligible(payload, reservation, PLAN_CAPS)
+    result = payload["observer_result"]
+    if failure == "disconnect":
+        result["raw_events"].insert(0, {"raw": {"method": "runtime/disconnected"}})
+    elif failure == "thread":
+        result["raw_events"][0]["raw"]["params"]["threadId"] = "other"
+    elif failure == "error":
+        result["raw_events"][0]["raw"]["params"]["turn"]["error"] = {"message": "auth failure"}
+    elif failure == "overshoot":
+        result["usage"]["observed_total_tokens"] = 75001
+        reservation.update(observed=75001, reservation=75001)
+    elif failure == "cleanup":
+        result["runtime_closed"] = False
+    elif failure == "infra":
+        result["infrastructure_failures"] = ["auth failure"]
+    elif failure == "missing_usage":
+        result["usage"]["observed_total_tokens"] = None
+    else:
+        result["boundary"] = {"termination_kind": "natural_end", "reason": "turn_completed"}
+    assert not live._retained_unknown_eligible(payload, reservation, PLAN_CAPS)
+
+
+def test_post_terminal_transport_teardown_and_finish_cap_evidence():
+    payload = eligible_unknown_payload()
+    result = payload["observer_result"]
+    result["raw_events"].append({"raw": {"method": "runtime/disconnected"}})
+    reservation = {"observed": 60000, "reservation": 75000}
+    assert live._retained_unknown_eligible(payload, reservation, PLAN_CAPS)
+    result["boundary"] = {"termination_kind": "natural_end", "reason": "agent_finish"}
+    result["termination_kind"] = "natural_end"
+    assert live._retained_unknown_eligible(payload, reservation, PLAN_CAPS)
+    result["usage"]["observed_total_tokens"] = 10
+    assert not live._retained_unknown_eligible(payload, reservation, PLAN_CAPS)
+
+
+def test_amendment_requires_approved_sealed_plan_bound_schema():
+    plan, _ = live.build_compatibility_plan(config())
+    plan["phase"] = "collection"
+    plan = seal(plan)
+    assert live.validate_admission_amendment(amendment_for(plan), plan)
+    for bad in (amendment_for(plan, status="proposed"), amendment_for(plan, phase_plan_hash="a" * 64),
+                amendment_for(plan, max_unresolved_trials=4), amendment_for(plan, caps={})):
+        with pytest.raises(ValueError):
+            live.validate_admission_amendment(bad, plan)
+    mutated = deepcopy(amendment_for(plan))
+    mutated["max_unresolved_trials"] = 2
+    with pytest.raises(ValueError, match="seal mismatch"):
+        live.validate_admission_amendment(mutated, plan)
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "peer-reporting-compatibility-v1.json"
 PLAN_CAPS = {"max_trial_wall_seconds": 180, "drain_grace_seconds": 10, "max_tool_requests_per_trial": 16,

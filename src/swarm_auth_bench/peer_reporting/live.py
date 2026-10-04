@@ -44,7 +44,7 @@ from .live_integrity import verify_ledger_history
 from .prompts import build_instructions
 from .schemas import TOOL_DESCRIPTORS
 from .score import VALID_CLOSE_KINDS
-from .storage import atomic_json, read_sealed, safe_child, seal
+from .storage import atomic_json, check_seal, read_sealed, safe_child, seal
 from .world import audit_state
 
 LIVE_VERSION = "peer-reporting-live-phases-v1"
@@ -53,6 +53,79 @@ QUALIFIER_FIXTURE_SEED = 9173
 PLAN_KIND = "peer_reporting_live_phase_plan"
 INDEX_KIND = "peer_reporting_live_phase_index"
 ATTEMPT_KIND = "peer_reporting_live_attempt"
+ADMISSION_AMENDMENT_KIND = "peer_reporting_collection_admission_amendment"
+ADMISSION_AMENDMENT_VERSION = "peer-reporting-admission-amendment-v1"
+
+
+def validate_admission_amendment(amendment: dict, plan: dict) -> dict:
+    """Validate explicit approval of an admission-only exception to unknown holds."""
+    check_seal(amendment)
+    if set(amendment) != {"kind", "schema_version", "phase_plan_hash", "policy", "authorization",
+                          "max_unresolved_trials", "seal_hash"}:
+        raise ValueError("invalid admission amendment fields")
+    authorization = amendment["authorization"]
+    if (plan["phase"] != "collection" or amendment["kind"] != ADMISSION_AMENDMENT_KIND
+            or amendment["schema_version"] != ADMISSION_AMENDMENT_VERSION
+            or amendment["phase_plan_hash"] != plan["seal_hash"]
+            or amendment["policy"] != "keep_unresolved_reservations"):
+        raise ValueError("admission amendment kind, policy, phase, or plan mismatch")
+    if (type(authorization) is not dict or set(authorization) != {"status", "text"}
+            or authorization["status"] != "approved" or type(authorization["text"]) is not str
+            or not authorization["text"].strip() or len(authorization["text"]) > 20000):
+        raise ValueError("admission amendment requires explicit approved authorization text")
+    maximum = amendment["max_unresolved_trials"]
+    if type(maximum) is not int or not 1 <= maximum <= len(plan["planned_order"]):
+        raise ValueError("invalid maximum unresolved trials")
+    return deepcopy(amendment)
+
+
+def _retained_unknown_eligible(payload: dict, reservation: dict, caps: dict) -> bool:
+    original_reservation = caps["reserved_tokens_per_trial"]
+    result = payload.get("observer_result") or {}
+    orchestrator = payload.get("orchestrator") or {}
+    boundary = result.get("boundary") or {}
+    allowed_boundaries = {("natural_end", "agent_finish"), ("per_trial_limit", "trial_wall_limit"),
+                          ("per_trial_limit", "tool_request_limit"), ("per_trial_limit", "trial_observed_token_limit"),
+                          ("collection_forced_truncation", "collection_stop")}
+    if (payload.get("phase") != "collection" or payload.get("observer_error") is not None
+            or result.get("execution_kind") != "live_model" or result.get("runtime_closed") is not True
+            or result.get("queue_reconciled") is not True or result.get("infrastructure_failures") != []
+            or orchestrator.get("evidence_failures") != [] or orchestrator.get("usage_failures") != []
+            or (boundary.get("termination_kind"), boundary.get("reason")) not in allowed_boundaries
+            or result.get("termination_kind") != boundary.get("termination_kind")):
+        return False
+    observed = (result.get("usage") or {}).get("observed_total_tokens")
+    if (type(observed) is not int or not 0 <= observed <= original_reservation
+            or type(reservation.get("observed")) is not int
+            or reservation["observed"] > original_reservation
+            or reservation["reservation"] < max(original_reservation, observed, reservation["observed"])):
+        return False
+    if boundary.get("reason") == "agent_finish" and not (
+            observed >= caps["trial_observed_token_stop_target"]
+            or len(result.get("tool_requests", [])) >= caps["max_tool_requests_per_trial"]
+            or (type(result.get("elapsed_seconds")) in (int, float)
+                and result["elapsed_seconds"] >= caps["max_trial_wall_seconds"])):
+        return False
+    receipt = result.get("initial_receipt") or {}
+    thread, turn = receipt.get("thread_id"), receipt.get("turn_id")
+    if type(thread) is not str or not thread or type(turn) is not str or not turn:
+        return False
+    completions = []
+    for event in result.get("raw_events", []):
+        raw = event.get("raw") or {}
+        if raw.get("method") in {"error", "thread/error"}:
+            return False
+        # A disconnect after the matching terminal event is normal transport
+        # teardown only when cleanup succeeded and no infrastructure failed.
+        if raw.get("method") == "runtime/disconnected" and not completions:
+            return False
+        if raw.get("method") == "turn/completed":
+            params = raw.get("params") or {}
+            completed = params.get("turn") or {}
+            if params.get("threadId") == thread and completed.get("id") == turn:
+                completions.append(completed)
+    return (len(completions) == 1 and completions[0].get("status") == "interrupted"
+            and not completions[0].get("error"))
 PLAN_FILE = "phase-plan.json"
 INDEX_FILE = "phase-index.json"
 JOURNAL_FILE = "journal.jsonl"
@@ -477,6 +550,7 @@ class _PhaseState:
             self.ledger_recovered = False
             self.ledger = self._open_ledger()
             self.verify_budget_history()
+            self.admission_amendment = self._read_admission_amendment()
         except BaseException:
             self.journal.close()
             raise
@@ -484,6 +558,77 @@ class _PhaseState:
     @property
     def ledger_path(self) -> Path:
         return self.directory / LEDGER_FILE
+
+    def _read_admission_amendment(self) -> dict | None:
+        records = self.journal.of_kind("admission_amendment_applied")
+        if not records:
+            return None
+        if len(records) != 1:
+            raise EvidenceError("admission amendment must have one append-only application record")
+        data = records[0]["data"]
+        try:
+            amendment = validate_admission_amendment(data["amendment"], self.plan)
+            if data != {"amendment_hash": amendment["seal_hash"], "amendment": amendment}:
+                raise ValueError("journal amendment binding mismatch")
+            path = safe_child(self.directory, f"admissions/{amendment['seal_hash']}.json")
+            if read_sealed(path) != amendment:
+                raise ValueError("retained amendment differs from its journal")
+        except (KeyError, ValueError, OSError) as error:
+            raise EvidenceError(f"admission amendment evidence invalid: {error}") from error
+        return amendment
+
+    def apply_admission_amendment(self, supplied: Path | None) -> None:
+        """Append approval without modifying the phase plan or earlier attempts."""
+        if supplied is None:
+            if self.admission_amendment is not None:
+                raise LivePhaseError("resume requires the same admission amendment")
+            return
+        amendment = validate_admission_amendment(read_sealed(Path(supplied)), self.plan)
+        if self.admission_amendment is not None:
+            if amendment != self.admission_amendment:
+                raise LivePhaseError("supplied admission amendment differs from retained approval")
+            return
+        path = safe_child(self.directory, f"admissions/{amendment['seal_hash']}.json")
+        path.parent.mkdir(exist_ok=True)
+        if path.exists():
+            if read_sealed(path) != amendment:
+                raise EvidenceError("retained admission amendment file changed")
+        else:
+            atomic_json(path, amendment)
+        self.journal.append("admission_amendment_applied", amendment_hash=amendment["seal_hash"], amendment=amendment)
+        self.admission_amendment = amendment
+        self.save_index()
+
+    def retained_unresolved(self, ledger_state: dict) -> frozenset[str]:
+        """Return every eligible unknown hold, or none if any hold is unsafe.
+
+        The conservative reservation remains a capacity charge, not a verified
+        upper bound on unknown provider usage. Observed overshoot is ineligible.
+        """
+        unresolved = {key for key, value in ledger_state["attempts"].items() if value["status"] == "unresolved"}
+        if not unresolved or self.admission_amendment is None:
+            return frozenset()
+        if len(unresolved) > self.admission_amendment["max_unresolved_trials"]:
+            return frozenset()
+        starts = {record["data"]["reservation_id"]: record["data"]
+                  for record in self.journal.of_kind("attempt_started")}
+        for reservation in unresolved:
+            start = starts.get(reservation)
+            if start is None:
+                return frozenset()
+            entry = self.index["entries"][start["entry_id"]]
+            if entry["status"] != "archived":
+                return frozenset()
+            payload = read_sealed(safe_child(self.directory, f"attempts/{start['attempt_id']}/attempt.json"))
+            result = payload.get("observer_result") or {}
+            orchestrator = payload["orchestrator"]
+            current = ledger_state["attempts"][reservation]
+            if not _retained_unknown_eligible(payload, current, self.caps):
+                return frozenset()
+            # Verify_attempts binds result.raw_events and its cleanup to durable logs.
+            if orchestrator["usage_settlement"].get("status") != "unresolved" or result.get("usage", {}).get("total_tokens") is not None:
+                return frozenset()
+        return frozenset(unresolved)
 
     @property
     def call_starts(self) -> int:
@@ -890,7 +1035,8 @@ class _PhaseRun:
         if state["stop_generation"]:
             return {"reason": state["stop_reason"] or "ledger_stop", "ledger": summary}
         if summary["unresolved_reservations"]:
-            return {"reason": "unknown_usage_hold", "ledger": summary}
+            if self.state.retained_unresolved(state) != frozenset(summary["unresolved_reservations"]):
+                return {"reason": "unknown_usage_hold", "ledger": summary}
         if summary["active_reservations"]:
             return {"reason": "active_reservation_unreconciled", "ledger": summary}
         cleanup = self.state.cleanup_debt()
@@ -987,7 +1133,7 @@ class _PhaseRun:
             self.state.verify_budget_history()
             ledger = self._ensure_ledger()
             reservation = self._reservation_id(attempt_id)
-            if not ledger.admit(reservation):
+            if not ledger.admit(reservation, retained_unresolved=self.state.retained_unresolved(self.state.ledger_state())):
                 hold = self._ledger_hold(refresh=False) or {"reason": "admission_refused"}
                 self.journal.append("admission_refused", entry_id=entry["entry_id"], reservation_id=reservation,
                                     **hold)
@@ -1177,6 +1323,12 @@ def _report(state: _PhaseState) -> dict:
     passed = [row for row in entries if row["status"] == "archived" and row["check_passed"] is True]
     return {
         "phase": plan["phase"], "directory": str(state.directory), "plan_hash": state.plan_hash,
+        "admission_amendment": ({"hash": state.admission_amendment["seal_hash"],
+                                 "policy": state.admission_amendment["policy"],
+                                 "max_unresolved_trials": state.admission_amendment["max_unresolved_trials"],
+                                 "eligible_retained_reservation_ids": sorted(state.retained_unresolved(state.ledger_state()))
+                                 if state.ledger is not None else []}
+                                if state.admission_amendment is not None else None),
         "live_model_call_starts": state.call_starts, "maximum_live_calls": plan["maximum_live_calls"],
         "planned_order": [entry["attempt_id"] for entry in plan["planned_order"]],
         "realized_order": [record["data"]["attempt_id"] for record in state.journal.of_kind("attempt_started")],
@@ -1194,7 +1346,7 @@ def _report(state: _PhaseState) -> dict:
 
 async def _run_phase(directory: Path, plan: dict, files: dict[str, dict], *, resume: bool, hooks: _Hooks,
                      inputs: Callable[[dict], tuple[dict, str]], evaluate: Callable[..., dict],
-                     binary_check: Callable[[str, dict], None] | None) -> dict:
+                     binary_check: Callable[[str, dict], None] | None, admission_amendment: Path | None = None) -> dict:
     directory = Path(directory)
     if type(resume) is not bool:
         raise ValueError("resume must be a boolean")
@@ -1225,6 +1377,7 @@ async def _run_phase(directory: Path, plan: dict, files: dict[str, dict], *, res
             run = _PhaseRun(state, hooks, inputs=inputs, evaluate=evaluate, binary_check=binary_check)
             run.reconcile()
             state.verify_attempts()
+            state.apply_admission_amendment(admission_amendment)
             return await run.run(resumed=resume, implementation_changes=changes)
         finally:
             state.journal.close()
@@ -1423,6 +1576,7 @@ async def run_collection_phase(
     observer: Callable[..., Awaitable[dict]] | None = None, clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Any] = asyncio.sleep, ledger_clock: Callable[[], float] = time.time,
     poll_seconds: float = 1.0,
+    admission_amendment: Path | None = None,
 ) -> dict:
     """Run the nine smoke rows or the 216 collection rows after every gate passes.
 
@@ -1431,6 +1585,8 @@ async def run_collection_phase(
     """
     hooks = _hooks(runtime_factory, preflight, environment_check, observer, clock, sleep, ledger_clock, poll_seconds)
     collection_directory = Path(collection_directory)
+    if admission_amendment is not None and split != "collection":
+        raise ValueError("admission amendment is collection-only")
     gates = check_phase_gates(collection_directory, split, caps, compatibility_directories=compatibility_directories,
                               smoke_directory=smoke_directory, source_review=source_review)
     if not gates["passed"]:
@@ -1456,7 +1612,8 @@ async def run_collection_phase(
                                  f"qualified client {qualified['codex_version_output']!r}")
 
     return await _run_phase(collection_directory / f"live-{split}", plan, {}, resume=resume, hooks=hooks,
-                            inputs=inputs, evaluate=evaluate_transport, binary_check=binary_check)
+                            inputs=inputs, evaluate=evaluate_transport, binary_check=binary_check,
+                            admission_amendment=admission_amendment)
 
 
 # Read-only inspection and explicit reconciliation

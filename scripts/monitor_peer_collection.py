@@ -18,15 +18,34 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 root=Path(sys.argv[1])
+
+def complete_journal_records(path):
+    # This is a provisional reader, not a chain verifier. The writer can be
+    # appending a final line, so only newline-terminated records are considered.
+    raw=path.read_bytes()
+    complete=raw[:raw.rfind(b'\n')+1]
+    records=[json.loads(line) for line in complete.splitlines() if line.strip()]
+    if any(type(record) is not dict for record in records):
+        raise ValueError('journal record must be an object')
+    if any(record.get('kind') in ('run_opened','run_closed','admission_amendment_applied')
+            and type(record.get('data')) is not dict for record in records):
+        raise ValueError('journal status record data must be an object')
+    return records
+
 phases={}
 for split, planned in [('smoke',9),('collection',216)]:
     directory=root/('live-'+split)
     index_path=directory/'phase-index.json'
     ledger_path=directory/'budget-ledger.json'
+    journal_path=directory/'journal.jsonl'
     row={'planned':planned,'status':'unstarted','counts':{},'starts':0,'archived':0,
          'current':[],'known_reported_tokens':0,'unknown_usage_attempts':0,'halt_reason':None,
          'latest_evidence_utc':None,'execution_checks_passed':0,'execution_checks_failed':0,
-         'failed_execution_checks':[],'mean_completed_trial_seconds':None}
+         'failed_execution_checks':[],'mean_completed_trial_seconds':None,
+         'run_status_source':None,'latest_run_record_kind':None,'latest_run_record_sequence':None,
+         'historical_halt_reason':None,'ledger_stop_reason':None,'admission_amendment':None,
+         'retained_reservations':[],'retained_reservations_provisional':True,
+         'unretained_unknown_usage_attempts':0}
     try:
         if index_path.exists():
             index=json.loads(index_path.read_text())
@@ -47,19 +66,52 @@ for split, planned in [('smoke',9),('collection',216)]:
                             for e in entries if e.get('status')=='started']
             halt=(index.get('last_run') or {}).get('halted')
             row['halt_reason']=halt.get('reason') if isinstance(halt,dict) else halt
-            row['status']='halted' if halt else ('archived' if row['archived']==planned else 'in_progress')
+            row['historical_halt_reason']=row['halt_reason']
+            row['run_status_source']='index_fallback'
+            row['status']='halted' if halt else ('archived' if row['archived']==planned else
+                ('in_progress' if row['starts'] else 'unstarted'))
             timestamps=[index_path.stat().st_mtime]
+            unresolved=[]
             if ledger_path.exists():
                 ledger=json.loads(ledger_path.read_text())
-                attempts=list(ledger.get('attempts',{}).values())
+                ledger_attempts=ledger.get('attempts',{})
+                attempts=list(ledger_attempts.values())
                 row['known_reported_tokens']=sum(a.get('actual',0) if a.get('status')=='settled'
                     else a.get('observed',0) for a in attempts)
                 row['unknown_usage_attempts']=sum(a.get('status')=='unresolved' for a in attempts)
                 row['reserved_tokens']=sum(a.get('reservation',0) for a in attempts if a.get('status')!='settled')
-                row['halt_reason']=row['halt_reason'] or ledger.get('stop_reason')
-                if row['unknown_usage_attempts']:
-                    row['halt_reason']=row['halt_reason'] or 'unknown_usage_hold'
+                row['ledger_stop_reason']=ledger.get('stop_reason')
+                unresolved=[{'reservation_id':key,'reserved_tokens':value.get('reservation')}
+                    for key,value in ledger_attempts.items() if value.get('status')=='unresolved']
                 timestamps.append(ledger_path.stat().st_mtime)
+            if journal_path.exists():
+                records=complete_journal_records(journal_path)
+                runs=[record for record in records if record.get('kind') in ('run_opened','run_closed')]
+                amendments=[record for record in records if record.get('kind')=='admission_amendment_applied']
+                if amendments:
+                    data=amendments[-1]['data']
+                    amendment=data['amendment']
+                    row['admission_amendment']={'hash':data['amendment_hash'],
+                        'policy':amendment.get('policy'),'max_unresolved_trials':amendment.get('max_unresolved_trials'),
+                        'verified_by_monitor':False}
+                    maximum=amendment.get('max_unresolved_trials')
+                    if (amendment.get('policy')=='keep_unresolved_reservations'
+                            and type(maximum) is int and len(unresolved)<=maximum):
+                        row['retained_reservations']=unresolved
+                if runs:
+                    latest=runs[-1]
+                    row['run_status_source']='complete_journal_record'
+                    row['latest_run_record_kind']=latest['kind']
+                    row['latest_run_record_sequence']=latest.get('sequence')
+                    if latest['kind']=='run_opened':
+                        row['status']='in_progress'
+                        row['halt_reason']=None
+                    else:
+                        halt=latest['data'].get('halted')
+                        row['halt_reason']=halt.get('reason') if isinstance(halt,dict) else halt
+                        row['status']='halted' if halt else ('archived' if row['archived']==planned else 'closed')
+                timestamps.append(journal_path.stat().st_mtime)
+            row['unretained_unknown_usage_attempts']=len(unresolved)-len(row['retained_reservations'])
             row['latest_evidence_utc']=datetime.fromtimestamp(max(timestamps),timezone.utc).isoformat()
     except (OSError,ValueError,TypeError,KeyError):
         row['status']='snapshot_unavailable'

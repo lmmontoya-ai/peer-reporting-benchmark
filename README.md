@@ -101,6 +101,11 @@ above. A copied candidate config alone does not authorize or qualify a live run.
 See the [specification](docs/peer-reporting-spec.md) and
 [runtime description](docs/runtime.md).
 
+The [collection admission amendment](docs/collection-admission-amendment.md)
+documents the optional approved recovery rule. Unknown final usage retains its
+full reservation; it is never replaced with an invented measured total.
+
+
 ## Scenario and dataset provenance
 
 The benchmark participants, messages, records, approval rule, release request,

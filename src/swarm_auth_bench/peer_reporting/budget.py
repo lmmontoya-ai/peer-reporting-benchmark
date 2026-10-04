@@ -188,15 +188,29 @@ class BudgetLedger:
             atomic_json(self.path, seal(state))
             return result
 
-    def admit(self, attempt_id: str) -> bool:
+    def admit(self, attempt_id: str, *, retained_unresolved: frozenset[str] = frozenset()) -> bool:
+        """Reserve capacity; only phase-verified closed unknowns may stay retained.
+
+        This exception never settles unknown usage or releases its reservation.
+        The live phase supplies exactly the eligible unresolved reservation IDs.
+        Direct callers remain responsible for that evidence; default behavior
+        continues to hold on any unresolved usage.
+        """
         if not isinstance(attempt_id, str) or not attempt_id or len(attempt_id) > 200:
             raise ValueError("bounded attempt ID required")
+        if type(retained_unresolved) is not frozenset or any(type(value) is not str for value in retained_unresolved):
+            raise ValueError("retained_unresolved must be a frozenset of reservation IDs")
 
         def operation(state: dict) -> bool:
             if attempt_id in state["attempts"]:
                 raise ValueError("attempt already reserved; use a distinct recovery ID")
             settled, reserved, unknown = self._totals(state)
-            active = sum(a["status"] != "settled" for a in state["attempts"].values())
+            unresolved = {key for key, value in state["attempts"].items() if value["status"] == "unresolved"}
+            if retained_unresolved and retained_unresolved != unresolved:
+                return False
+            unknown = unknown and unresolved != retained_unresolved
+            active = sum(a["status"] != "settled" and key not in retained_unresolved
+                         for key, a in state["attempts"].items())
             initial = self.caps["reserved_tokens_per_trial"]
             if (state["stop_generation"] or unknown or active >= self.caps["max_concurrency"]
                     or settled + reserved + initial > self.caps["collection_observed_token_stop_target"]):

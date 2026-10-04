@@ -51,6 +51,9 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--smoke-evidence", type=Path)
         command.add_argument("--source-review", type=Path)
         command.add_argument("--resume", action="store_true")
+        if name == "collect":
+            command.add_argument("--admission-amendment", type=Path,
+                                 help="sealed approved admission-only amendment; required unchanged on later resumes")
     args = parser.parse_args(argv)
     try:
         if args.command in {"validate", "build"}:
@@ -129,7 +132,8 @@ def main(argv: list[str] | None = None) -> int:
             result = asyncio.run(run_collection_phase(
                 args.directory, split, caps=caps,
                 runtime_factory=reviewed_runtime_factory, compatibility_directories=args.qualification,
-                smoke_directory=args.smoke_evidence, source_review=args.source_review, resume=args.resume))
+                smoke_directory=args.smoke_evidence, source_review=args.source_review, resume=args.resume,
+                admission_amendment=getattr(args, "admission_amendment", None)))
     except (OSError, ValueError, TypeError, KeyError) as error:
         # An error after admission cannot be asserted to have spent zero calls.
         print(json.dumps({"error": str(error), "live_model_calls": None if

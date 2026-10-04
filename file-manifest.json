@@ -21,9 +21,9 @@
     },
     {
       "path": "README.md",
-      "bytes": 7755,
-      "sha256": "6eaf3ae02e0eec0cbadfc55735ca194a914a6fbdc563276af3eaba4f12f14150",
-      "origin": "audited_public_interface_update_v2"
+      "bytes": 7990,
+      "sha256": "cd5a3378fff554b256608c5cf89c99e444446855f38b29e63e7d6e9d2e1194a1",
+      "origin": "admission_and_monitor_repair_v1"
     },
     {
       "path": "configs/peer-reporting-compatibility-auth-recovery-v2.json",
@@ -48,6 +48,12 @@
       "bytes": 708,
       "sha256": "66c3290bae9140705bd6dd04a866a9c757b482fb8d1b0c45709837e40a5545e3",
       "origin": "copied_unchanged"
+    },
+    {
+      "path": "docs/collection-admission-amendment.md",
+      "bytes": 4646,
+      "sha256": "2185089de1278fd8e962f809befe310cf9d8eeaa36e68e7c1b61c9cdfec0bd1b",
+      "origin": "admission_and_monitor_repair_v1"
     },
     {
       "path": "docs/long-run-explanation/demo.css",
@@ -189,9 +195,9 @@
     },
     {
       "path": "scripts/monitor_peer_collection.py",
-      "bytes": 6432,
-      "sha256": "188f3d45b32ddc46e759fdc827b12562d3be8daae58d939daa0f4b8254f00fc5",
-      "origin": "audited_public_interface_update_v2"
+      "bytes": 9683,
+      "sha256": "cefe351aff436efcd526230fc5b6f54f0ccc43c558c3abfb88dd1aaf412013d7",
+      "origin": "admission_and_monitor_repair_v1"
     },
     {
       "path": "scripts/peer_reporting_preflight.py",
@@ -393,9 +399,9 @@
     },
     {
       "path": "src/swarm_auth_bench/peer_reporting/budget.py",
-      "bytes": 12944,
-      "sha256": "cd08ec3c1fdeaf33541681db0116897b56bdd1f44183e7b4695919eafbbe8144",
-      "origin": "copied_unchanged"
+      "bytes": 13940,
+      "sha256": "e5e9414bf9628965d155171baab959129f66c632b7bf9118701d9be20272ac03",
+      "origin": "admission_and_monitor_repair_v1"
     },
     {
       "path": "src/swarm_auth_bench/peer_reporting/catalog.py",
@@ -405,9 +411,9 @@
     },
     {
       "path": "src/swarm_auth_bench/peer_reporting/cli.py",
-      "bytes": 8198,
-      "sha256": "97d4d0dc7d3dc3f9bcc3242567125bcd55236be5b37a226e79eb4e473dddcf57",
-      "origin": "copied_unchanged"
+      "bytes": 8496,
+      "sha256": "6a7a8dde1a098ec3b8ccbea17a3c552df4006e76db56904c4f9b40c78f9a61aa",
+      "origin": "admission_and_monitor_repair_v1"
     },
     {
       "path": "src/swarm_auth_bench/peer_reporting/collection.py",
@@ -453,9 +459,9 @@
     },
     {
       "path": "src/swarm_auth_bench/peer_reporting/live.py",
-      "bytes": 85016,
-      "sha256": "6962462003735ea1fb0d21437ca280299447fa56cd302366f028063881ce38d9",
-      "origin": "copied_unchanged"
+      "bytes": 94754,
+      "sha256": "628ddc6d4d7e39227e7849bd373732fab92df6cf7ab7dc4f7dda095de98b3f7e",
+      "origin": "admission_and_monitor_repair_v1"
     },
     {
       "path": "src/swarm_auth_bench/peer_reporting/live_archive.py",
@@ -735,15 +741,15 @@
     },
     {
       "path": "tests/test_peer_collection_monitor.py",
-      "bytes": 1784,
-      "sha256": "8068d2dd9d910da0f825dba85329e718c357be2e60c1401ae274cf0c1d132662",
-      "origin": "audited_public_interface_update_v2"
+      "bytes": 6868,
+      "sha256": "c6b0a73b65b9af51b40e7f3a2d8b455b7996e46a3c4775b72c456a1224cdf05c",
+      "origin": "admission_and_monitor_repair_v1"
     },
     {
       "path": "tests/test_peer_reporting_budget.py",
-      "bytes": 9068,
-      "sha256": "5d8313599ef88896e2424b93f08deccd012ecb152fcf292ff9db161928de3b22",
-      "origin": "copied_unchanged"
+      "bytes": 10631,
+      "sha256": "a416bbba111321186c35d8ab1f742367bff2d1d5a5fc825a1626f3bfcfbb6b7d",
+      "origin": "admission_and_monitor_repair_v1"
     },
     {
       "path": "tests/test_peer_reporting_catalog.py",
@@ -765,9 +771,9 @@
     },
     {
       "path": "tests/test_peer_reporting_live.py",
-      "bytes": 50326,
-      "sha256": "e51e0e054e66b8e79bbb0aa7fd7c326975705b0b349d4e930f4cee4d3a9f92fb",
-      "origin": "copied_unchanged"
+      "bytes": 57610,
+      "sha256": "1239bff84853ec5a843d95e5899a21af7e52c07430dae1dcf23f4f0d86111cbc",
+      "origin": "admission_and_monitor_repair_v1"
     },
     {
       "path": "tests/test_peer_reporting_live_integrity.py",
@@ -830,6 +836,6 @@
       "origin": "copied_unchanged"
     }
   ],
-  "file_count": 137,
-  "total_bytes": 2085383
+  "file_count": 138,
+  "total_bytes": 2118478
 }
