@@ -1,5 +1,5 @@
 {
-  "kind": "peer_reporting_publication_preview_validation_v1",
+  "kind": "peer_reporting_publication_validation_with_results_v1",
   "offline_cli_commands": [
     {
       "command": "validate",
@@ -28,12 +28,12 @@
   ],
   "provider_calls": 0,
   "test_result": {
-    "passed": 538,
+    "passed": 590,
     "failed": 0,
-    "duration_seconds": 113.16,
+    "duration_seconds": 122.64,
     "selection": "tests -q -m not-live-and-not-integration -p no:cacheprovider",
     "uses_parent_venv": true,
-    "uses_preview_source": true
+    "uses_public_checkout_source": true
   },
   "ruff_result": {
     "status": "passed",
@@ -44,5 +44,75 @@
     ]
   },
   "verified_import_location": "src/swarm_auth_bench/peer_reporting/live_review.py",
-  "unexpected_excluded_paths": []
+  "unexpected_excluded_paths": [],
+  "initial_preview_test_result": {
+    "passed": 538,
+    "failed": 0,
+    "duration_seconds": 113.16,
+    "selection": "tests -q -m not-live-and-not-integration -p no:cacheprovider",
+    "uses_parent_venv": true,
+    "uses_preview_source": true
+  },
+  "public_results_validation": {
+    "kind": "peer_reporting_public_results_update_validation_v1",
+    "base_commit": "7f6ff081c2b26184e038134c2afcf8832c4749d8",
+    "manifest_sha256": "d26ad5ddde3e0255137cc57cfb529432defe7be112571d6b124a1cfdd019b986",
+    "file_count": 468,
+    "payload_bytes": 13343631,
+    "exact_private_summary_projection_equal": true,
+    "rows": 225,
+    "collection_assignments": 216,
+    "smoke_assignments": 9,
+    "collection_report_requests": 399,
+    "collection_accepted_reports": 322,
+    "collection_task_correct": 216,
+    "collection_pending_outputs": 755,
+    "collection_unresolved_usage_settlements": 1,
+    "final_human_output_labels": 0,
+    "original_private_reviewer_ids_hashes_checked": 1456,
+    "original_private_reviewer_id_hash_hits": 0,
+    "runtime_provider_ids_checked": 2505,
+    "runtime_provider_id_hits": 0,
+    "provider_calls": 0,
+    "public_checkout_mutated": false,
+    "tests": {
+      "passed": 113,
+      "failed": 0,
+      "errors": 0,
+      "duration_seconds": 21.125,
+      "scope": [
+        "test_export_public_peer_results.py",
+        "test_stage_peer_demo.py",
+        "test_peer_review_upload.py",
+        "test_peer_reporting_score.py",
+        "test_peer_reporting_summary.py"
+      ],
+      "source": "combined public gitarchive+payload check/src"
+    },
+    "ruff": "passed for new/export and staged helper scripts/tests",
+    "javascript_syntax": "demo.js passed node --check",
+    "privacy_decisions": [
+      "No original reviewer packets/templates/hashes, controller bindings, runtime traces or actual approval record.",
+      "Summary removes raw endpoint output-ID lists and private attempt/error text.",
+      "New evidence uses independent public IDs and readable escaped HTML; source archives are unchanged.",
+      "Mechanical audit sidecar contains aggregate counts only.",
+      "Default helper verifies/copies bundled public projection; missing bundle fails before output.",
+      "Private run/status pages are not staged."
+    ],
+    "limits": [
+      "Parent shell supplies rendered project.html and sanitized final execution audit; validate final combined link graph before publishing.",
+      "No full repository suite repeated here; parent plans one full run on combined publication.",
+      "Pattern redaction alone cannot prove every unusual private phrase is absent.",
+      "Model-labeled evidence may permit content matching by blinded reviewers; reviewers should avoid public researcher output until independent initial judgments finish.",
+      "Human review, independent second review and adjudication remain pending."
+    ]
+  },
+  "public_results_browser_checks": {
+    "counts_loaded": true,
+    "first_evidence_matches_planned_order": true,
+    "filter_selected_expected_assignment": true,
+    "mobile_width_css_pixels": 390,
+    "horizontal_page_overflow": false,
+    "screenshot_capture": "T3 snapshot tool failed; no screenshot-based visual approval claimed"
+  }
 }

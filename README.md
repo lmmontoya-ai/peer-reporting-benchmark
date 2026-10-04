@@ -12,10 +12,26 @@ assignments. Two fixture blocks change declared stimulus features. They are not
 repeated calls on identical inputs. Changing K, the number of verified incident
 participants, also changes the available evidence.
 
-This repository contains code and study documents. It contains no live
-benchmark outcomes. Passing software tests or compatibility checks does not
-establish reporting propensity. Verified results may be added in a separately
-audited artifact after collection.
+The collection is complete: 216 collection assignments and 9 separate smoke
+assignments. Every assignment ran once, in the sealed order. This repository
+includes a privacy-audited projection of the closed results and observer-visible
+evidence. Raw provider traces and private review bindings remain private.
+
+[Open the demo](https://lmmontoya-ai.github.io/peer-reporting-benchmark/) or read
+[the project write-up](docs/peer-reporting-project-writeup.md).
+
+The first finding concerns the reporting interface. All 162 positive main cases
+triggered a report attempt. Only 156 had an accepted report. The six remaining
+cases each had report requests rejected by schema validation. Across the full
+collection, 399 report requests produced 322 accepted reports; the 77 rejected
+requests had 76 overlong action fields and one summary with the wrong type.
+These are mechanical observations. Accepted reports still need human review
+before we can say whether their claims are accurate.
+
+All 216 inventory tasks were correct. One trial has unknown final token usage.
+Its full 95,000-token allocation is retained; that allocation is neither measured
+usage nor a proven upper bound. The original failure remains in the results.
+No assignment was rerun.
 
 ## Offline reproduction
 
@@ -47,8 +63,15 @@ from the larger project; this preview's tests and documentation focus on P1.
 
 ## Local demo and review workspace
 
-Collection is pending. This update publishes the authored interface and review
-tools; it contains no final behavioral or accuracy results and no run artifacts.
+The public demo includes the completed collection's mechanical results, a
+filterable assignment table, and evidence pages. Accuracy labels remain pending.
+To serve the published demo locally without making any model calls:
+
+```bash
+python -m http.server 8765 --bind 127.0.0.1 --directory docs
+```
+
+Open <http://127.0.0.1:8765/>. The following command also stages the bundled public demo in a new directory:
 
 ```bash
 python scripts/stage_peer_demo.py --output .local/demo-v2
@@ -59,9 +82,8 @@ Open <http://127.0.0.1:8765/demo.html> for the scenario and saved-observation
 viewer, or <http://127.0.0.1:8765/review.html> to load masked local packets and
 record your own judgments. The review page performs no semantic inference.
 See [local demo instructions](docs/public-demo.md) for optional verified local
-evidence, review validation and provisional guest monitoring. Generated evidence
-and controller bindings stay in ignored local directories; they are not part of
-this code update.
+evidence, review validation and provisional guest monitoring. Raw archives and
+controller bindings stay private. Public evidence pages use new identifiers and omit the private reviewer mapping and provider metadata.
 
 ## Evidence and review
 
@@ -146,4 +168,6 @@ tasks for the repository owner. The public code repository does not submit a for
 
 See [publication-audit.json](publication-audit.json) and
 [file-manifest.json](file-manifest.json) for the copied files, hash checks,
-exclusions and validation. Results are optional; no finding is claimed here.
+exclusions and validation. The reported findings concern tool use and task
+completion. Final semantic accuracy and the prescribed human reviews remain
+unresolved.

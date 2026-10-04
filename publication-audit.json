@@ -9,16 +9,16 @@
     "peer-reporting configs and tests",
     "peer-reporting helper scripts",
     "specification, source attribution, resource proposal, human review plan and runtime docs",
-    "AI-assisted project README and local preparation script"
+    "AI-assisted project README and local preparation script",
+    "Audited public projection of 225 closed assignments, researcher evidence, mechanical findings and demo"
   ],
   "excluded": [
-    ".git and repository history",
-    "original .local tree and raw dataset cache",
-    "runs, results, study and legacy observed agent data",
-    "authentication and environment files",
-    "compiled files and cache directories",
-    "private review bindings and any live outcomes",
-    "original repository README and unrelated documentation/configs/tests"
+    "Original repository Git history and unrelated research artifacts",
+    "Raw provider traces, runtime/session identifiers and raw study archives",
+    "Private reviewer packets, controller bindings and original review identifiers",
+    "Authentication, environment files, credentials, machine paths and dataset caches",
+    "Actual private execution approval records",
+    "Human semantic judgments: none completed"
   ],
   "scan": {
     "scope": "every manifest file",
@@ -35,7 +35,7 @@
     "matched_values_disclosed": false,
     "limit": "Pattern scan is not a proof that every possible secret format is absent."
   },
-  "result_status": "no_live_benchmark_outcomes_included",
+  "result_status": "audited_closed_mechanical_results_with_pending_human_review",
   "validation_record": "validation.json",
   "known_limits": [
     "Repository source license is not declared; Codex-derived catalog assets retain Apache 2.0 notice/license.",
@@ -156,5 +156,95 @@
     "private_data_scan_candidates": 0,
     "includes_live_outcomes": false,
     "includes_actual_approval_record": false
+  },
+  "initial_preview_excluded": [
+    ".git and repository history",
+    "original .local tree and raw dataset cache",
+    "runs, results, study and legacy observed agent data",
+    "authentication and environment files",
+    "compiled files and cache directories",
+    "private review bindings and any live outcomes",
+    "original repository README and unrelated documentation/configs/tests"
+  ],
+  "public_results_update_v1": {
+    "base_commit": "7f6ff081c2b26184e038134c2afcf8832c4749d8",
+    "prepared_utc": "2026-10-04T18:02:46.429873+00:00",
+    "manifest_sha256": "d26ad5ddde3e0255137cc57cfb529432defe7be112571d6b124a1cfdd019b986",
+    "preparation_validation": {
+      "kind": "peer_reporting_public_results_update_validation_v1",
+      "base_commit": "7f6ff081c2b26184e038134c2afcf8832c4749d8",
+      "manifest_sha256": "d26ad5ddde3e0255137cc57cfb529432defe7be112571d6b124a1cfdd019b986",
+      "file_count": 468,
+      "payload_bytes": 13343631,
+      "exact_private_summary_projection_equal": true,
+      "rows": 225,
+      "collection_assignments": 216,
+      "smoke_assignments": 9,
+      "collection_report_requests": 399,
+      "collection_accepted_reports": 322,
+      "collection_task_correct": 216,
+      "collection_pending_outputs": 755,
+      "collection_unresolved_usage_settlements": 1,
+      "final_human_output_labels": 0,
+      "original_private_reviewer_ids_hashes_checked": 1456,
+      "original_private_reviewer_id_hash_hits": 0,
+      "runtime_provider_ids_checked": 2505,
+      "runtime_provider_id_hits": 0,
+      "provider_calls": 0,
+      "public_checkout_mutated": false,
+      "tests": {
+        "passed": 113,
+        "failed": 0,
+        "errors": 0,
+        "duration_seconds": 21.125,
+        "scope": [
+          "test_export_public_peer_results.py",
+          "test_stage_peer_demo.py",
+          "test_peer_review_upload.py",
+          "test_peer_reporting_score.py",
+          "test_peer_reporting_summary.py"
+        ],
+        "source": "combined public gitarchive+payload check/src"
+      },
+      "ruff": "passed for new/export and staged helper scripts/tests",
+      "javascript_syntax": "demo.js passed node --check",
+      "privacy_decisions": [
+        "No original reviewer packets/templates/hashes, controller bindings, runtime traces or actual approval record.",
+        "Summary removes raw endpoint output-ID lists and private attempt/error text.",
+        "New evidence uses independent public IDs and readable escaped HTML; source archives are unchanged.",
+        "Mechanical audit sidecar contains aggregate counts only.",
+        "Default helper verifies/copies bundled public projection; missing bundle fails before output.",
+        "Private run/status pages are not staged."
+      ],
+      "limits": [
+        "Parent shell supplies rendered project.html and sanitized final execution audit; validate final combined link graph before publishing.",
+        "No full repository suite repeated here; parent plans one full run on combined publication.",
+        "Pattern redaction alone cannot prove every unusual private phrase is absent.",
+        "Model-labeled evidence may permit content matching by blinded reviewers; reviewers should avoid public researcher output until independent initial judgments finish.",
+        "Human review, independent second review and adjudication remain pending."
+      ]
+    },
+    "independent_audit_sha256": "900bfc8e16c6b398310613d36806459808a885c1ce94226873178fd76a9e17ff",
+    "independent_audit_status": "passed",
+    "independent_audit_type": "model_assisted_not_human_semantic_review",
+    "privacy_identifier_matches": 0,
+    "broken_internal_links": 0,
+    "full_offline_tests": {
+      "passed": 590,
+      "failed": 0,
+      "duration_seconds": 122.64,
+      "source": "assembled public checkout"
+    },
+    "browser_checks": {
+      "counts_loaded": true,
+      "first_evidence_matches_planned_order": true,
+      "filter_selected_expected_assignment": true,
+      "mobile_width_css_pixels": 390,
+      "horizontal_page_overflow": false,
+      "screenshot_capture": "T3 snapshot tool failed; no screenshot-based visual approval claimed"
+    },
+    "source_archive_changes": false,
+    "human_semantic_review": "pending",
+    "provider_calls": 0
   }
 }

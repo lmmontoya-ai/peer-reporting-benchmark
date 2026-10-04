@@ -1,0 +1,87 @@
+{
+  "audit_timestamp_utc": "2026-10-04T17:35:01.572191+00:00",
+  "status": "pass_execution_integrity_with_disclosed_unknown_usage",
+  "blockers": [],
+  "collection_plan_hash": "a325976f9df4c0601c312f03a221db28bc09e9b788a1394248ed123875a8b166",
+  "planned_assignments": {
+    "collection": 216,
+    "smoke": 9,
+    "total": 225
+  },
+  "counts_by_phase": {
+    "smoke": {
+      "started": 9,
+      "archived": 9,
+      "passed_execution_checks": 9,
+      "planned_order_equals_actual_order": true,
+      "each_assignment_consumed_once": true,
+      "unreconciled_starts": [],
+      "journal": {
+        "count": 92,
+        "final_hash": "dd0b09387ec33878f69e0b954ebe91a3af1e6c12e06e72308587b73cdb09fadb"
+      }
+    },
+    "collection": {
+      "started": 216,
+      "archived": 216,
+      "passed_execution_checks": 215,
+      "planned_order_equals_actual_order": true,
+      "each_assignment_consumed_once": true,
+      "unreconciled_starts": [],
+      "journal": {
+        "count": 2139,
+        "final_hash": "60606147abb1ade868f7daeee749e97df7d89c6c3284cd1550dbed11dd0b4ccd"
+      }
+    }
+  },
+  "collection_closed_utc": "2026-10-04T17:31:23.479517+00:00",
+  "resources": {
+    "collection_settled_reported_tokens": 6592379,
+    "collection_unknown_observed_tokens": 76181,
+    "collection_reported_lower_bound_tokens": 6668560,
+    "collection_retained_allocation_tokens": 95000,
+    "collection_actual_total_tokens": null,
+    "smoke_settled_reported_tokens": 235470,
+    "collection_caps": {
+      "collection_observed_token_stop_target": 20520000,
+      "collection_wall_seconds": 31440,
+      "drain_grace_seconds": 10,
+      "max_concurrency": 1,
+      "max_tool_requests_per_trial": 16,
+      "max_trial_wall_seconds": 120,
+      "reserved_tokens_per_trial": 95000,
+      "trial_observed_token_stop_target": 75000
+    },
+    "collection_allocation_charged_tokens": 6687379,
+    "reservation_is_proved_upper_usage_bound": false,
+    "original_phase_clock_preserved": true,
+    "active_reservations": [],
+    "max_concurrent_consumed_attempts_from_journal": 1,
+    "maximum_observed_tool_requests": 15
+  },
+  "preservation": {
+    "prior19_attempt_files_byte_identical": 114,
+    "prior19_ledger_reservations_unchanged": 19,
+    "prior_journal_is_exact_prefix": true,
+    "smoke_archive_files_byte_identical": 59,
+    "fixture_files_byte_identical": 25,
+    "collection_manifest_byte_identical": true,
+    "collection_phase_plan_byte_identical": true
+  },
+  "limitations": [
+    "This is an execution/integrity audit, not human semantic validation.",
+    "Final usage of collection trial 19 remains unknown; 76181 is observed usage and 95000 is retained allocation, not measured actual usage or a proved upper bound.",
+    "The collection CLI nonzero exit is expected because its existing success condition requires every archived attempt check_passed; trial 19 still fails usage_known. This is not a new collection fault.",
+    "The frozen manifest pending/live_ready fields are historical design metadata; verified retained phase evidence supplies completed execution checks."
+  ],
+  "kind": "public_projection_of_model_assisted_execution_audit_v1",
+  "source_audit_sha256": "7460f7184b36901e3747defad5588dd918d678384a1fbddd391c6257c8c408cc",
+  "human_validation": false,
+  "independent_model_assisted_audit": true,
+  "publication_projection": "Private local paths, amendment approval identity, unknown attempt identity, source patch metadata and author identifiers omitted.",
+  "amendment": {
+    "policy": "keep_unresolved_reservations",
+    "retained_unknown_count": 1,
+    "approved": true
+  }
+}

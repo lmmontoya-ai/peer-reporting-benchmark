@@ -1,0 +1,108 @@
+<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Public factual results</title><style>body{font:16px/1.5 system-ui;max-width:1100px;margin:auto;padding:24px}pre{white-space:pre-wrap;overflow-wrap:anywhere}table{border-collapse:collapse}td,th{padding:8px;border:1px solid #ccc}</style><h1>Public factual results</h1><p>Mechanical results only. Human semantic review is pending.</p><p><a href='../collection-v1/index.html'>Assignment evidence</a> | <a href='summary.json'>Derived summary JSON</a></p><pre>{
+  &quot;kind&quot;: &quot;verified_peer_collection_factual_summary_v1&quot;,
+  &quot;publication_kind&quot;: &quot;redacted_public_peer_results_v1&quot;,
+  &quot;limitations&quot;: [
+    &quot;Mechanical report calls and accepted reports do not establish justified reporting.&quot;,
+    &quot;Semantic labels await explicit bound human judgments. Unknown labels remain unknown.&quot;,
+    &quot;Smoke is separate from collection. No semantic model ranking is computed.&quot;,
+    &quot;Unresolved provider usage stays unknown; retained capacity is not actual billing usage.&quot;,
+    &quot;Public evidence is a redacted researcher copy with independent IDs, not a blinded review packet.&quot;,
+    &quot;The original frozen manifest&#x27;s static live_ready/pending metadata is omitted here; archived execution facts are reported separately.&quot;
+  ],
+  &quot;planned_counts&quot;: {
+    &quot;collection&quot;: 216,
+    &quot;smoke&quot;: 9
+  },
+  &quot;status_counts_by_split&quot;: {
+    &quot;collection&quot;: {
+      &quot;archived&quot;: 216
+    },
+    &quot;smoke&quot;: {
+      &quot;archived&quot;: 9
+    }
+  },
+  &quot;execution_audit&quot;: {
+    &quot;archived_assignments&quot;: 225,
+    &quot;verified_model_observations&quot;: 225,
+    &quot;cleanup_confirmed_assignments&quot;: 225,
+    &quot;unresolved_usage_assignments&quot;: 1,
+    &quot;final_human_output_count&quot;: 0
+  },
+  &quot;mechanical_audit&quot;: {
+    &quot;kind&quot;: &quot;mechanical_schema_audit_aggregates_v1&quot;,
+    &quot;human_semantic_validation&quot;: false,
+    &quot;groups&quot;: [
+      {
+        &quot;split&quot;: &quot;collection&quot;,
+        &quot;group&quot;: &quot;positive_main&quot;,
+        &quot;assignments&quot;: 162,
+        &quot;attempted_assignments&quot;: 162,
+        &quot;accepted_assignments&quot;: 156,
+        &quot;report_requests&quot;: 388,
+        &quot;accepted_reports&quot;: 313
+      },
+      {
+        &quot;split&quot;: &quot;collection&quot;,
+        &quot;group&quot;: &quot;zero_violation_main&quot;,
+        &quot;assignments&quot;: 36,
+        &quot;attempted_assignments&quot;: 0,
+        &quot;accepted_assignments&quot;: 0,
+        &quot;report_requests&quot;: 0,
+        &quot;accepted_reports&quot;: 0
+      },
+      {
+        &quot;split&quot;: &quot;collection&quot;,
+        &quot;group&quot;: &quot;unverified_accusation&quot;,
+        &quot;assignments&quot;: 9,
+        &quot;attempted_assignments&quot;: 9,
+        &quot;accepted_assignments&quot;: 9,
+        &quot;report_requests&quot;: 11,
+        &quot;accepted_reports&quot;: 9
+      },
+      {
+        &quot;split&quot;: &quot;collection&quot;,
+        &quot;group&quot;: &quot;matching_principal_approval&quot;,
+        &quot;assignments&quot;: 9,
+        &quot;attempted_assignments&quot;: 0,
+        &quot;accepted_assignments&quot;: 0,
+        &quot;report_requests&quot;: 0,
+        &quot;accepted_reports&quot;: 0
+      },
+      {
+        &quot;split&quot;: &quot;smoke&quot;,
+        &quot;group&quot;: &quot;positive_main&quot;,
+        &quot;assignments&quot;: 9,
+        &quot;attempted_assignments&quot;: 9,
+        &quot;accepted_assignments&quot;: 8,
+        &quot;report_requests&quot;: 14,
+        &quot;accepted_reports&quot;: 8
+      }
+    ],
+    &quot;schema_failure_counts_by_split&quot;: {
+      &quot;collection&quot;: {
+        &quot;action_exceeds_100_characters&quot;: 76,
+        &quot;summary_is_not_string&quot;: 1
+      },
+      &quot;smoke&quot;: {
+        &quot;action_exceeds_100_characters&quot;: 6,
+        &quot;summary_is_not_string&quot;: 0
+      }
+    },
+    &quot;collection_difference_explanation&quot;: {
+      &quot;report_requests&quot;: 399,
+      &quot;unique_accepted_reports&quot;: 322,
+      &quot;difference&quot;: 77,
+      &quot;captured_schema_errors&quot;: 77,
+      &quot;other_rejections&quot;: 0,
+      &quot;duplicate_stored_receipts&quot;: 0,
+      &quot;action_length_failures&quot;: 76,
+      &quot;nonstring_summary_failures&quot;: 1
+    },
+    &quot;positive_assignments_without_accepted_reports&quot;: {
+      &quot;assignments&quot;: 6,
+      &quot;report_requests&quot;: 11,
+      &quot;action_length_failures&quot;: 11
+    },
+    &quot;interpretation&quot;: &quot;Schema rejection counts describe tool admission, not detection quality or semantic accuracy. No rejected-call references or private archive paths are published.&quot;
+  }
+}</pre></html>
