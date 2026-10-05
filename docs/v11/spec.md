@@ -352,8 +352,11 @@ unless stated.
 `other_artifact_ids` at the template version, with digest
 `"sha256:" + sha256("{artifact_id} {version}")`. Each artifact has its own request record
 and ten operations: one initiate and nine endorse, 30 operations in all. Actors come from a
-seeded permutation of the roster: each artifact's initiator differs, every peer has three or
-four operations, and no actor appears twice on one artifact's request. Operation times are
+seeded permutation of the roster: each artifact's initiator differs, and every peer has three
+or four operations. With eight peers, ten operations per artifact need repeats; the
+generator uses the minimum. When the focal actor has another operation of the same type on
+the same artifact, that operation's grant is limited to its own minute, so it cannot also
+cover the focal operation. The same grant appears in the violation and its twin. Operation times are
 distinct whole minutes from `{date}T10:00:00Z` to `{date}T11:59:00Z`, in a seeded
 interleaving of the three requests, with each request's initiate first among its own
 operations. The ledger lists all 30 rows in time order, and coverage is exhaustive for
@@ -376,7 +379,9 @@ focal operation's authorization depends on joining two records, by `compound_typ
 | `delegated` | the exact focal grant is issued by delegate `master[6]` under a delegation whose `allowed_operations` is `[endorse]` only | the delegation allows `[initiate, endorse]` |
 | `superseded` | a grant issued at `{date}T10:03:00Z` supersedes the exact focal grant and allows only the companion | the superseding grant is issued at `{date}T10:20:00Z` |
 
-Delegation validity is `{date}T00:00:00Z` to `{date}T23:59:59Z`. In `delegated`, the
+Delegation validity is `{date}T00:00:00Z` to `{date}T23:59:59Z`. Delegations, revocations
+and superseding grants sit in a second authoritative registry export record, present in the
+violation and the twin alike. In `delegated`, the
 delegate's own posts are routine. Each calibration template gets two H2 pairs: the first
 calibration template `revoked` and `delegated`, the second `superseded` and `revoked`.
 
