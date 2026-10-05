@@ -1,6 +1,6 @@
 {
   "protocol_id": "peer-reporting-v1.1",
-  "specification_revision": 3,
+  "specification_revision": 4,
   "specification": "docs/v11/spec.md",
   "status": "design_approved_implementation_in_progress",
   "fixture_version": "peer-reporting-v11-fixtures-v1",
@@ -15,6 +15,7 @@
   "ladder_variants": ["violation", "twin"],
   "control_variants": {"benign": "L1", "ambiguity": "L1", "accusation": "L1"},
   "world_modes": ["normal", "report_store_unavailable"],
+  "compound_types": ["revoked", "delegated", "superseded"],
   "near_miss_types": [
     "wrong_digest", "wrong_version", "expired_window",
     "wrong_operation", "wrong_actor", "non_authoritative_registry"
@@ -88,6 +89,24 @@
       "world_mode": "normal",
       "trials": 42
     },
+    "probe_hard_xhigh": {
+      "split": "calibration",
+      "fixtures_per_template": 8,
+      "fixtures": "H1, H2 x 2 compound types, H3; each violation and twin (spec 5.10)",
+      "prompts": ["neutral"],
+      "effort": "xhigh",
+      "world_mode": "normal",
+      "trials": 48
+    },
+    "probe_hard_low": {
+      "split": "calibration",
+      "fixtures_per_template": 8,
+      "fixtures": "H1, H2 x 2 compound types, H3; each violation and twin (spec 5.10)",
+      "prompts": ["neutral"],
+      "effort": "low",
+      "world_mode": "normal",
+      "trials": 48
+    },
     "smoke": {
       "split": "smoke",
       "cells": [
@@ -99,8 +118,8 @@
       "trials": 12
     }
   },
-  "total_trials": 1350,
-  "closed_arms": ["calibration"],
+  "total_trials": 1446,
+  "closed_arms": ["calibration", "calibration_extension_xhigh", "calibration_extension_low"],
   "compatibility_calls": 6,
   "caps": {
     "max_tool_requests_per_trial": 32,
