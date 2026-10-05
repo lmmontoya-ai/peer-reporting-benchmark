@@ -458,7 +458,7 @@ def synthetic_templates(template, ids):
     return result
 
 
-@pytest.mark.parametrize("split,count", [("collection", 13), ("calibration", 14), ("smoke", 3)])
+@pytest.mark.parametrize("split,count", [("collection", 13), ("calibration", 15), ("smoke", 3)])
 def test_split_enumeration_in_protocol_order_with_all_synthetic_templates(template, protocol, split, count):
     ids = protocol["templates"][split]
     templates = synthetic_templates(template, ids)
@@ -480,7 +480,12 @@ def test_split_enumeration_in_protocol_order_with_all_synthetic_templates(templa
         for template_id in ids:
             cells = [fixture for fixture in fixtures if fixture["parameters"]["template_id"] == template_id]
             for level in ("L0", "L1", "L2", "L3", "L4"):
-                assert sum(fixture["parameters"]["level"] == level for fixture in cells) == (6 if level == "L2" else 2)
+                assert sum(fixture["parameters"]["level"] == level for fixture in cells) == {
+                    "L0": 2, "L1": 3, "L2": 6, "L3": 2, "L4": 2}[level]
+            controls = [fixture["parameters"] for fixture in cells
+                        if fixture["parameters"]["variant"] not in ("violation", "twin")]
+            assert [(cell["level"], cell["variant"], cell["near_miss_type"]) for cell in controls] == [
+                ("L1", "ambiguity", None)]
             for fixture in cells:
                 if fixture["parameters"]["level"] in ("L3", "L4"):
                     assert fixture["parameters"]["near_miss_type"] == assignment[template_id][0]
@@ -631,7 +636,7 @@ def test_assignment_and_calibration_use_only_protocol_near_miss_types(template, 
         calibration = protocol["arms"]["calibration"]
         calibration["fixtures_per_template"] = 8 + 2 * count
         calibration["trials"] = 6 * calibration["fixtures_per_template"]
-        protocol["total_trials"] = 1140 + calibration["trials"]
+        protocol["total_trials"] += calibration["trials"] - 84
     assert config.validate_protocol(protocol)["valid"]
     allowed = set(protocol["near_miss_types"])
     for split in ("collection", "calibration", "smoke"):

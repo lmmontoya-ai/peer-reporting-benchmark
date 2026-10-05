@@ -13,19 +13,22 @@ from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, se
 from swarm_auth_bench.peer_reporting_v11 import collection
 from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
 from swarm_auth_bench.peer_reporting_v11.collection import STUDY_MANIFEST, build_study, verify_study
-from swarm_auth_bench.peer_reporting_v11.config import SPLITS, arm_fixture_cells
+from swarm_auth_bench.peer_reporting_v11.config import CALIBRATION_EXTENSION_ARMS, SPLITS, arm_fixture_cells
+from swarm_auth_bench.peer_reporting_v11.ladder import calibration_near_miss_types
 from swarm_auth_bench.peer_reporting_v11.live import load_study, validate_assignment_rows
 
 from .test_config import COUNTS
+
+PAIRED_ARMS = ("collection", "calibration", "low_effort", *CALIBRATION_EXTENSION_ARMS)
 
 
 def test_real_counts_and_all_fixtures_verify(wp6_study, wp6_inputs, monkeypatch):
     directory, manifest, result = wp6_study
     assert result["counts"] == COUNTS
-    assert result["total_trials"] == len(manifest["assignments"]) == 1224
+    assert result["total_trials"] == len(manifest["assignments"]) == 1350
     assert Counter(row["arm"] for row in manifest["assignments"]) == COUNTS
-    assert result["split_counts"] == {"collection": 1128, "calibration": 84, "smoke": 12}
-    assert result["fixtures"] == len(manifest["fixtures"]) == 135
+    assert result["split_counts"] == {"collection": 1128, "calibration": 210, "smoke": 12}
+    assert result["fixtures"] == len(manifest["fixtures"]) == 137
     seen = set()
     original = collection.verify_fixture
 
@@ -81,10 +84,25 @@ def test_custom_protocol_generator_parameters_build_and_verify_study(tmp_path, w
     assert result["valid"], result["errors"]
 
 
+@pytest.mark.parametrize("split,expected_hash", [
+    ("collection", "83a4277ac13a7cb8c9adeefdca4ea2e30b56f6c44591f20975eee97ca5fc83de"),
+    ("calibration", "6cfb4280ccc30d34549cc2f1ec61f11cc912016465de1563b23fd7317cd9ff68"),
+    ("smoke", "d885dac24cf251c7d424520ab2c604280d8eeb1d12de68358ca8fc4f65803fd7"),
+])
+def test_existing_assignments_keep_their_content_and_relative_order(split, expected_hash, wp6_study):
+    # Captured from the original ordering implementation with the same revision 3 inputs,
+    # omitting extension arms. Calibration's planned positions change when arms interleave.
+    _, manifest, _ = wp6_study
+    rows = [{key: value for key, value in row.items() if key != "planned_order"}
+            for row in manifest["assignments"]
+            if row["split"] == split and row["arm"] not in CALIBRATION_EXTENSION_ARMS]
+    assert content_hash(rows) == expected_hash
+
+
 def test_identities_bind_all_inputs_and_stay_bounded(wp6_study):
     _, manifest, _ = wp6_study
     rows = manifest["assignments"]
-    assert len({row["assignment_id"] for row in rows}) == 1224
+    assert len({row["assignment_id"] for row in rows}) == 1350
     assert all(len(row["assignment_id"]) <= 90 for row in rows)
     bindings = {"protocol_id": manifest["protocol_id"], "caps_hash": manifest["caps_hash"],
                 "tool_manifest_hash": manifest["tool_manifest_hash"]}
@@ -114,10 +132,13 @@ def _round_chunks(manifest, split, protocol):
             else:
                 if len(definition["prompts"]) == 1 and round_index not in (0, 3, 6):
                     continue
+                if len(definition["prompts"]) == 2 and round_index >= 6:
+                    continue
                 size = arm_sizes[arm]
             chunk = rows[position:position + size]
             assert len(chunk) == size
             assert all(row["arm"] == arm for row in chunk)
+            assert all(row["round"] == round_index for row in chunk)
             yield round_index, arm, chunk
             position += size
     assert position == len(rows)
@@ -125,17 +146,22 @@ def _round_chunks(manifest, split, protocol):
 
 def _pair_key(row):
     return tuple(row[key] for key in ("arm", "template_id", "level", "near_miss_type", "model",
-                                     "prompt_condition", "effort", "world_mode"))
+                                     "prompt_condition", "effort", "world_mode", "round"))
 
 
 def test_every_fixture_model_prompt_effort_world_cell_appears_once(wp6_study):
     directory, manifest, _ = wp6_study
     protocol = manifest["protocol"]
+    calibration_types = calibration_near_miss_types(protocol["templates"]["calibration"],
+                                                   protocol["seeds"]["calibration"], protocol=protocol)
     expected = Counter()
     for fixture_id, reference in manifest["fixtures"].items():
         parameters = read_sealed(directory / reference["path"])["parameters"]
         for arm, definition in protocol["arms"].items():
             if definition["split"] != parameters["split"]:
+                continue
+            if (arm in CALIBRATION_EXTENSION_ARMS and parameters["variant"] != "ambiguity"
+                    and parameters["near_miss_type"] != calibration_types[parameters["template_id"]][0]):
                 continue
             if arm == "smoke":
                 cells = [cell for cell in definition["cells"]
@@ -156,11 +182,38 @@ def test_every_fixture_model_prompt_effort_world_cell_appears_once(wp6_study):
     assert Counter(cell[0] for cell in actual) == COUNTS
 
 
+@pytest.mark.parametrize("arm", CALIBRATION_EXTENSION_ARMS)
+def test_extension_cells_use_first_calibration_type_and_ambiguity_once(arm, wp6_study, wp6_inputs):
+    _, manifest, _ = wp6_study
+    protocol = wp6_inputs["protocol"]
+    types = calibration_near_miss_types(protocol["templates"]["calibration"], protocol["seeds"]["calibration"],
+                                       protocol=protocol)
+    definition = protocol["arms"][arm]
+    expected = Counter()
+    for template_id, near_types in types.items():
+        cells = [(level, variant, near_types[0]) for level in ("L2", "L3", "L4")
+                 for variant in ("violation", "twin")] + [("L1", "ambiguity", None)]
+        for level, variant, near in cells:
+            for model in protocol["models"]:
+                for prompt in definition["prompts"]:
+                    expected[template_id, level, variant, near, model, prompt,
+                             definition["effort"], "normal", "calibration"] += 1
+    rows = [row for row in manifest["assignments"] if row["arm"] == arm]
+    actual = Counter(tuple(row[key] for key in ("template_id", "level", "variant", "near_miss_type", "model",
+                                               "prompt_condition", "effort", "world_mode", "split")) for row in rows)
+    assert actual == expected
+    assert set(actual.values()) == {1}
+    assert len({row["fixture_id"] for row in rows}) == 14
+    existing = {row["fixture_id"] for row in manifest["assignments"] if row["arm"] == "calibration"}
+    assert {row["fixture_id"] for row in rows if row["variant"] != "ambiguity"} <= existing
+    assert len({row["fixture_id"] for row in rows if row["variant"] == "ambiguity"} - existing) == 2
+
+
 @pytest.mark.parametrize("split", SPLITS)
 def test_pairs_are_adjacent_in_the_same_model_prompt_and_round(split, wp6_study, wp6_inputs):
     _, manifest, _ = wp6_study
     for _, arm, chunk in _round_chunks(manifest, split, wp6_inputs["protocol"]):
-        if arm not in ("collection", "calibration", "low_effort"):
+        if arm not in PAIRED_ARMS:
             continue
         for index, row in enumerate(chunk):
             if row["variant"] == "violation":
@@ -181,7 +234,7 @@ def test_every_round_boundary_prefix_contains_complete_pairs(split, wp6_study, w
             prefix.extend(rows)
         violations, twins = Counter(), Counter()
         for row in prefix:
-            if row["arm"] not in ("collection", "calibration", "low_effort"):
+            if row["arm"] not in PAIRED_ARMS:
                 continue
             if row["variant"] == "violation":
                 violations[_pair_key(row)] += 1
@@ -214,11 +267,18 @@ def _assert_protocol_round_sequence(manifest, protocol, split):
                                        tuple(row["fixture_id"] for row in block)))
         assert [row["fixture_id"] for row in chunk] == [row["fixture_id"] for block in ordered for row in block]
         for index, block in enumerate(ordered):
-            offsets = ((0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0), (0, 2), (1, 0), (2, 1))
-            a_offset, c_offset = offsets[index % 9]
+            if len(protocol["arms"][arm]["prompts"]) == 2:
+                offsets = ((0, 0), (1, 1), (2, 0), (0, 1), (1, 0), (2, 1))
+            else:
+                offsets = ((0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0), (0, 2), (1, 0), (2, 1))
+            a_offset, c_offset = offsets[index % len(offsets)]
             if len(protocol["arms"][arm]["prompts"]) == 3:
                 model = protocol["models"][(round_index + a_offset) % 3]
                 prompt = protocol["prompt_conditions"][(round_index // 3 + c_offset) % 3]
+            elif len(protocol["arms"][arm]["prompts"]) == 2:
+                assert 0 <= round_index < 6
+                model = protocol["models"][(round_index + a_offset) % 3]
+                prompt = protocol["arms"][arm]["prompts"][(round_index // 3 + c_offset) % 2]
             else:
                 assert round_index in (0, 3, 6)
                 model = protocol["models"][(round_index // 3 + a_offset) % 3]
@@ -280,17 +340,20 @@ def test_verify_rejects_a_sealed_study_using_the_previous_offset_cycle(tmp_path,
     assert "manifest assignments differs from recomputed study" in verified["errors"]
 
 
-@pytest.mark.parametrize("change", ["models", "arms", "smoke_cells", "seed"])
+@pytest.mark.parametrize("change", ["models", "arms", "smoke_cells", "seed", "calibration_arms", "extension_prompts"])
 def test_order_uses_protocol_list_arm_and_seed_order(change, wp6_study, wp6_inputs):
     _, manifest, _ = wp6_study
     protocol = deepcopy(wp6_inputs["protocol"])
-    split = "smoke" if change == "smoke_cells" else "collection"
+    split = ("smoke" if change == "smoke_cells" else
+             "calibration" if change in ("calibration_arms", "extension_prompts") else "collection")
     if change == "models":
         protocol["models"].reverse()
-    elif change == "arms":
+    elif change in ("arms", "calibration_arms"):
         protocol["arms"] = dict(reversed(list(protocol["arms"].items())))
     elif change == "smoke_cells":
         protocol["arms"]["smoke"]["cells"].reverse()
+    elif change == "extension_prompts":
+        protocol["arms"]["calibration_extension_xhigh"]["prompts"].reverse()
     else:
         protocol["seeds"][split] += 1
     original = [row for row in manifest["assignments"] if row["split"] == split]
@@ -306,6 +369,34 @@ def test_order_rejects_duplicate_cells(wp6_study, wp6_inputs):
     rows = [row for row in manifest["assignments"] if row["split"] == "collection"]
     with pytest.raises(ValueError, match="duplicate model/prompt cell"):
         collection._interleave(rows + [rows[0]], wp6_inputs["protocol"], "collection")
+
+
+@pytest.mark.parametrize("arm", CALIBRATION_EXTENSION_ARMS)
+@pytest.mark.parametrize("tamper", ["prompt", "round", "ambiguity", "twin_order"])
+def test_verify_rejects_resealed_extension_row_tampering(tmp_path, wp6_study, wp6_inputs, arm, tamper):
+    source, _, _ = wp6_study
+    directory = tmp_path / "tampered-extension"
+    shutil.copytree(source, directory)
+    path = directory / STUDY_MANIFEST
+    manifest = read_sealed(path)
+    manifest.pop("seal_hash")
+    rows = manifest["assignments"]
+    index = next(index for index, row in enumerate(rows) if row["arm"] == arm
+                 and row["variant"] == ("ambiguity" if tamper == "ambiguity" else "violation"))
+    if tamper == "prompt":
+        rows[index]["prompt_condition"] = "guided"
+    elif tamper == "round":
+        rows[index]["round"] += 1
+    elif tamper == "ambiguity":
+        rows[index]["instructions"] += " tampered"
+    else:
+        positions = rows[index]["planned_order"], rows[index + 1]["planned_order"]
+        rows[index], rows[index + 1] = rows[index + 1], rows[index]
+        rows[index]["planned_order"], rows[index + 1]["planned_order"] = positions
+    atomic_json(path, seal(manifest))
+    verified = verify_study(directory, **wp6_inputs)
+    assert verified["valid"] is False
+    assert "manifest assignments differs from recomputed study" in verified["errors"]
 
 
 @pytest.mark.parametrize("split", ["collection", "calibration", "smoke"])
