@@ -409,6 +409,18 @@ def report_steps(fixture: dict, *, usage: int | None = 2000) -> list:
     return [step for step in steps if not (step[0] == "usage" and usage is None)]
 
 
+OVERLOAD_MESSAGE = "Selected model is at capacity. Please try a different model."
+
+
+def overload_steps(code: str = "serverOverloaded", *, will_retry: bool = False, turn_error: bool = True) -> list:
+    """The observed provider capacity refusal: after packet delivery, a thread ``systemError`` status, an
+    ``error`` notification with ``codexErrorInfo``, a failed ``turn/completed``, and ``runtime/disconnected`` while
+    the runtime closes. No tool request, no output, no usage notification."""
+    error = {"message": OVERLOAD_MESSAGE, "codexErrorInfo": code, "additionalDetails": None}
+    return [("thread_status", {"type": "systemError"}), ("raw", "error", {"error": error, "willRetry": will_retry}),
+            ("disconnect_on_close",), ("end", "failed", error if turn_error else None)]
+
+
 class FakeTransport(V11PeerRuntime):
     """Only process launch, the version and probe subprocesses, and the JSON-RPC wire are replaced."""
 
@@ -423,6 +435,7 @@ class FakeTransport(V11PeerRuntime):
         self.waiters = {}
         self.interrupt = None
         self.model_task = None
+        self.disconnect_on_close = False
 
     async def _probe_manifest(self, specs):
         self.probe_calls += 1
@@ -467,10 +480,14 @@ class FakeTransport(V11PeerRuntime):
         while session.turn_id != self.turn_id:
             await asyncio.sleep(0)
         scope = {"threadId": self.thread_id, "turnId": self.turn_id}
-        user = {"id": "user-item-1", "type": "userMessage", "content": [{"type": "text", "text": packet}]}
-        await self._push("item/started", {**scope, "item": user})
-        await self._push("item/completed", {**scope, "item": {**user, "status": "completed"}})
         script = self.script(packet) if callable(self.script) else self.script
+        if script and script[0] == ("no_packet_delivery",):  # the packet's user item never appears
+            script = script[1:]
+        else:
+            user = {"id": "user-item-1", "type": "userMessage", "content": [{"type": "text", "text": packet}]}
+            await self._push("item/started", {**scope, "item": user})
+            await self._push("item/completed", {**scope, "item": {**user, "status": "completed"}})
+        end = None
         for number, step in enumerate(script, 1):
             if self.interrupt.is_set():
                 break
@@ -502,6 +519,13 @@ class FakeTransport(V11PeerRuntime):
                     "id": "agent-item-1", "type": "agentMessage", "text": step[1]}})
             elif step[0] == "raw":  # an arbitrary scoped notification, e.g. a native tool item
                 await self._push(step[1], {**scope, **step[2]})
+            elif step[0] == "thread_status":  # a thread-scoped status notification (no turn ID)
+                await self._push("thread/status/changed", {"threadId": self.thread_id, "status": step[1]})
+            elif step[0] == "disconnect_on_close":  # the app-server disconnects while the runtime closes
+                self.disconnect_on_close = True
+            elif step[0] == "end":  # the turn ends by itself with this status and optional turn error
+                end = step
+                break
             elif step[0] == "sleep":
                 await asyncio.sleep(step[1])
             elif step[0] == "stall":
@@ -517,15 +541,44 @@ class FakeTransport(V11PeerRuntime):
                 stop.cancel()
                 if self.interrupt.is_set():
                     break
-        status = "interrupted" if self.interrupt.is_set() else "completed"
-        await self._push("turn/completed", {"threadId": self.thread_id, "turn": {"id": self.turn_id, "status": status}})
+        turn = {"id": self.turn_id, "status": "interrupted" if self.interrupt.is_set() else "completed"}
+        if end is not None and not self.interrupt.is_set():
+            turn = {"id": self.turn_id, "status": end[1], **({"error": end[2]} if end[2] is not None else {})}
+        await self._push("turn/completed", {"threadId": self.thread_id, "turn": turn})
 
     async def close(self):
         self.observe("close", self)
         if self.model_task is not None and not self.model_task.done():
             self.model_task.cancel()
             await asyncio.gather(self.model_task, return_exceptions=True)
+        if self.disconnect_on_close and self.thread_id in self._sessions:
+            await self._sessions[self.thread_id].queue.put({"method": "runtime/disconnected", "params": {}})
         await super().close()
+
+
+class PauseClock:
+    """A wall clock that moves only while the dispatcher waits out a provider pause (``pause_sleep``).
+
+    Each wait advances it by at least ``step`` seconds, so a 10-minute pause takes a few polls.
+    ``on_wait`` runs before each advance, for example to touch a stop file or raise a crash.
+    """
+
+    def __init__(self, start: float | None = None, *, step: float = 60.0, on_wait=None):
+        import time
+
+        self.now = time.time() if start is None else float(start)
+        self.step, self.on_wait = step, on_wait
+        self.waits: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.waits.append(seconds)
+        if self.on_wait is not None:
+            self.on_wait(self)
+        self.now += max(seconds, self.step)
+        await asyncio.sleep(0)
 
 
 async def fake_version(_runtime):

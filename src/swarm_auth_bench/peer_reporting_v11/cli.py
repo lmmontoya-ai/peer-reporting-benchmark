@@ -15,7 +15,8 @@ take ``--study`` and refuse a root that is not registered there or not at its
 registered path. ``build`` creates a behavioral root inside the study, at
 ``STUDY/roots/<name>``. A collection ``build`` needs the frozen review plan
 (``--review-plan``), which is verified against the study before the plan is
-built. ``abandon-root`` seals the abandonment of a root that never started an
+built. A calibration ``build`` may select arms (``--arm``, repeatable); other
+phases refuse it. ``abandon-root`` seals the abandonment of a root that never started an
 attempt. ``reconcile-cleanup`` runs the live environment check and seals a
 cleanup reconciliation, the only way to clear cleanup debt. ``--amendment``
 records a sealed, user-approved amendment in the study before the command runs.
@@ -149,6 +150,8 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--smoke", type=Path)
     build.add_argument("--review-plan", type=Path,
                        help="the frozen review plan (collection only); verified against the study, then retained")
+    build.add_argument("--arm", dest="arms", action="append",
+                       help="calibration only: plan only this arm's rows (repeatable); sealed as selected_arms")
     _prior_roots(build)
     _amendments(build)
     verify = commands.add_parser("verify", help="verify a sealed live root and its retained lane evidence")
@@ -275,8 +278,10 @@ def _run(args: argparse.Namespace) -> dict:
         return asyncio.run(reconcile_cleanup(args.root, sorted(set(args.attempts)), reason=args.reason,
                                              study_directory=args.study, bundle=load_bundle()))
     if args.command == "build":
-        from .live import STUDY_MANIFEST, build_phase_plan, prepare_live_root
+        from .live import STUDY_MANIFEST, build_phase_plan, prepare_live_root, validate_arm_selection
 
+        if args.arms is not None:
+            validate_arm_selection(args.phase, args.arms)
         bundle = load_bundle()
         review = None
         if args.phase == "collection":
@@ -293,10 +298,10 @@ def _run(args: argparse.Namespace) -> dict:
             raise ValueError("--review-plan applies only to a collection build")
         plan = build_phase_plan(args.phase, read_json(args.caps), revision=args.revision, study_directory=args.study,
                                 compatibility_directories=args.compatibility, smoke_directory=args.smoke,
-                                prior_roots=args.prior_roots, bundle=bundle, review_plan=review)
+                                prior_roots=args.prior_roots, bundle=bundle, review_plan=review, arms=args.arms)
         study = args.study if args.phase != "compatibility" else None
-        return prepare_live_root(args.root, plan, study_directory=study, prior_roots=args.prior_roots, bundle=bundle,
-                                 review_plan=review)
+        return {**prepare_live_root(args.root, plan, study_directory=study, prior_roots=args.prior_roots,
+                                    bundle=bundle, review_plan=review), "selected_arms": plan[0]["selected_arms"]}
     if args.command == "verify":
         from .live import verify_live_root
 

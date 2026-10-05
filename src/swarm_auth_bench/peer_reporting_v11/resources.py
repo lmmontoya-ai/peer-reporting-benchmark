@@ -21,6 +21,7 @@ from .lanes import (
     CAPS_KIND,
     MAX_GLOBAL_CONCURRENCY,
     PHASES,
+    PROVIDER_UNAVAILABLE,
     TOOL_REQUEST_CAP,
     lane_caps,
     lane_id,
@@ -71,6 +72,8 @@ def _planned_rows(manifest: dict) -> dict[str, Counter]:
 def _ignore_reason(row: dict) -> str | None:
     if row["status"] != "archived":
         return f"not_archived:{row['status']}"
+    if row.get("classification") == PROVIDER_UNAVAILABLE:  # spec 10: a capacity refusal measures nothing
+        return f"classification:{PROVIDER_UNAVAILABLE}"
     if row.get("usage_settlement") != "settled":
         return f"usage_settlement:{row.get('usage_settlement')}"
     total = row.get("usage_total_tokens")
@@ -140,7 +143,8 @@ def propose_caps(roots: Iterable[Path], *, study_directory: Path, phase: str, pr
         for lane, lane_report in report["lanes"].items():
             for row in lane_report["entries"]:
                 observation = {"plan_hash": report["plan_hash"], "lane_id": lane,
-                               **{key: row.get(key) for key in ("attempt_id", "status", "usage_settlement",
+                               **{key: row.get(key) for key in ("attempt_id", "status", "classification",
+                                                               "usage_settlement", "settlement_reason",
                                                                "usage_total_tokens", "elapsed_seconds",
                                                                "tool_request_count")}}
                 reason = _ignore_reason(row)
