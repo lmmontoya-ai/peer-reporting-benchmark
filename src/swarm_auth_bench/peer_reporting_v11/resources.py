@@ -21,7 +21,7 @@ from .lanes import (
     CAPS_KIND,
     MAX_GLOBAL_CONCURRENCY,
     PHASES,
-    PROVIDER_UNAVAILABLE,
+    PROVIDER_PAUSE_CLASSIFICATIONS,
     TOOL_REQUEST_CAP,
     lane_caps,
     lane_id,
@@ -72,8 +72,8 @@ def _planned_rows(manifest: dict) -> dict[str, Counter]:
 def _ignore_reason(row: dict) -> str | None:
     if row["status"] != "archived":
         return f"not_archived:{row['status']}"
-    if row.get("classification") == PROVIDER_UNAVAILABLE:  # spec 10: a capacity refusal measures nothing
-        return f"classification:{PROVIDER_UNAVAILABLE}"
+    if row.get("classification") in PROVIDER_PAUSE_CLASSIFICATIONS:  # spec 10: a refusal or a stall measures nothing
+        return f"classification:{row['classification']}"
     if row.get("usage_settlement") != "settled":
         return f"usage_settlement:{row.get('usage_settlement')}"
     total = row.get("usage_total_tokens")

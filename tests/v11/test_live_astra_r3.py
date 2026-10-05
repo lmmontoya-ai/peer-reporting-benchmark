@@ -294,6 +294,7 @@ async def test_every_root_of_the_study_waits_out_a_pause_and_the_third_refusal_h
 
 async def test_a_crash_before_the_study_pause_record_leaves_an_incomplete_start_that_holds(compat, tmp_path,
                                                                                          monkeypatch):
+    """Since Astra R1 (round 2), the restart also records the missing study pause from the journaled settlement."""
     study, rows, fixtures = smoke_study(tmp_path / "study")
     root, plan = sealed_root(study, compat)
 
@@ -312,13 +313,20 @@ async def test_a_crash_before_the_study_pause_record_leaves_an_incomplete_start_
     # The classification was never accepted: no archive, no journaled pause, and no study pause.
     assert attempt not in [record["data"]["attempt_id"] for record in records(root, "attempt_archived")]
     assert records(root, "provider_pause_started") == [] and v11_live.study_provider_pauses(study) == {}
-    # The restart reconciles the start as incomplete; it stays consumed, holds, and never runs again.
+    # The restart reconciles the start as incomplete; it stays consumed, holds, and never runs again. Its journaled
+    # settlement names the refusal, so the restart records the missing study pause before anything else.
+    (settled,) = [record["data"] for record in records(root, "usage_settled")
+                  if record["data"]["attempt_id"] == attempt]
+    assert settled["settlement_reason"] == "provider_unavailable"
     resumed = Harness(tmp_path / "h2", scripted(fixtures))
     later = await run_paused(root, plan, resumed, clock, compat, study)
     assert later["status"] == "held" and f"retained_unreconciled_start:{attempt}" in later["holds"]
     assert resumed.created == [] and later["live_model_call_starts"] == 2 and clock.waits == []
+    (recovered,) = later["recovered_study_pauses"]
+    assert recovered["attempt_id"] == attempt and recovered["window_count"] == 1
+    assert v11_live.study_provider_pauses(study)[attempt]["recovery"]["settlement_reason"] == "provider_unavailable"
     report = v11_live.verify_live_root(root, bundle=fake_bundle(), study_directory=study)
-    assert report["study_provider_pauses"] == [] and report["provider_pauses"] == []
+    assert report["study_provider_pauses"] == [recovered] and report["provider_pauses"] == []
 
 
 async def test_a_pause_recorded_before_a_crash_binds_a_superseding_root(compat, tmp_path, monkeypatch):

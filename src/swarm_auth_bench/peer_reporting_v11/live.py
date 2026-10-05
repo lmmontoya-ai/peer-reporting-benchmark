@@ -69,10 +69,13 @@ Study directory additions::
     live-starts/<attempt_id>.json      sealed claim of an attempt start, written once before its session
     provider-pauses/<attempt_id>.json  sealed provider pause, written once before its attempt is archived
 
-Provider pauses (spec 10, revision 3) are recorded at study level: a root of the
-study writes each pause to ``provider-pauses/`` before it seals the attempt or
-journals the pause, and every root of the study, including a replacement root and
-a root that selects other arms, restores the study's pauses before any dispatch.
+Provider pauses (spec 10, revisions 3 and 4: capacity refusals and silent
+stalls) are recorded at study level: a root of the study writes each pause to
+``provider-pauses/`` before it seals the attempt or journals the pause, and every
+root of the study, including a replacement root and a root that selects other
+arms, restores the study's pauses before any dispatch. If a lane journal settled
+an unarchived attempt with a pause classification but the study has no pause for
+it, the next root of the study to run records it before any admission.
 """
 
 from __future__ import annotations
@@ -117,6 +120,8 @@ from .bundle import ProtocolBundle, load_bundle, require_v11_tools
 from .lanes import (
     BOUNDED_USAGE,
     PROMPT_CONDITIONS,
+    PROVIDER_PAUSE_CLASSIFICATIONS,
+    PROVIDER_STALLED,
     PROVIDER_UNAVAILABLE,
     SETTLED_USAGE,
     STOP_TRUNCATION,
@@ -247,6 +252,12 @@ EXECUTION_POLICY = {
                                  "_decided_after_the_last_drain_from_every_reconciled_error"
                                  "_consumed_ineligible_settled_at_reservation_pauses_admission_600s"
                                  "_third_within_3600s_holds_pauses_recorded_at_study_level_and_journaled"),
+    "provider_pause_recovery": ("a_pause_classified_settlement_journaled_without_its_study_pause"
+                                "_is_recorded_by_the_next_root_of_the_study_before_any_admission"),
+    "provider_stall_policy": ("delivery_confirmed_then_no_model_event_until_the_trial_wall_is_provider_stalled"
+                              "_decided_after_the_last_drain_from_every_retained_runtime_event"
+                              "_stop_or_deadline_closed_silence_is_not_a_stall"
+                              "_treated_as_provider_unavailable_and_counted_in_the_same_limit"),
     "lane_wall": "counts_only_open_run_time_summed_across_runs",
     "lane_scheduling": ("global_dispatcher_lowest_unstarted_planned_order_whose_lane_is_idle"
                         "_round_barrier_r_plus_2_per_effort"),
@@ -261,8 +272,8 @@ CLEAN_CLOSE_CHECKS = ("queue_reconciled", "runtime_closed", "no_infrastructure_f
 # attempt was otherwise configured exactly and closed cleanly.
 STOP_TRUNCATION_REQUIRED = ("live_model_execution", "exact_model", "reasoning_effort_valid", "world_mode_bound",
                             "reviewed_catalog", "exact_tool_manifest", "world_bound_to_attempt") + CLEAN_CLOSE_CHECKS
-# Spec 10 (revision 3): a capacity refusal is not an execution failure only when the attempt was configured
-# exactly, the packet was delivered, and the close was clean.
+# Spec 10 (revisions 3 and 4): a capacity refusal or a silent stall is not an execution failure only when the attempt
+# was configured exactly, the packet was delivered, and the close was clean.
 PROVIDER_UNAVAILABLE_REQUIRED = STOP_TRUNCATION_REQUIRED + ("initial_receipt_exact",)
 
 
@@ -397,6 +408,33 @@ def provider_unavailable(result: dict, checks: dict, usage_settlement: str | Non
             and all(checks.get(name) is True for name in PROVIDER_UNAVAILABLE_REQUIRED))
 
 
+def provider_stalled(result: dict, checks: dict, usage_settlement: str | None) -> bool:
+    """Spec 10 (revision 4): packet delivery was confirmed, then no model event arrived until the trial wall.
+
+    The adapter's ``provider_stalled`` termination and its stall evidence, closed
+    by the trial wall, no tool request, no observer output, no usage, an exactly
+    configured attempt with a verified packet receipt and a clean close, and a
+    reservation-bound settlement. It is treated exactly like ``provider_unavailable``.
+    """
+    stall = result.get("provider_stall")
+    return (result.get("termination_kind") == live_runtime.PROVIDER_STALLED
+            and usage_settlement == BOUNDED_USAGE and type(stall) is dict
+            and stall.get("boundary_reason") == "trial_wall_limit"
+            and (result.get("boundary") or {}).get("reason") == "trial_wall_limit"
+            and (result.get("usage") or {}).get("observed_total_tokens") is None
+            and not result.get("tool_requests") and not result.get("observer_outputs")
+            and all(checks.get(name) is True for name in PROVIDER_UNAVAILABLE_REQUIRED))
+
+
+def provider_pause_classification(result: dict, checks: dict, usage_settlement: str | None) -> str | None:
+    """``provider_unavailable``, ``provider_stalled``, or None: the classifications that pause admission."""
+    if provider_unavailable(result, checks, usage_settlement):
+        return PROVIDER_UNAVAILABLE
+    if provider_stalled(result, checks, usage_settlement):
+        return PROVIDER_STALLED
+    return None
+
+
 def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, preflight: dict,
                            bundle: ProtocolBundle, orchestrator_failures: list[str],
                            observer_error: str | None = None, usage_settlement: str | None = None,
@@ -407,7 +445,8 @@ def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, p
     settlement leaves the lane unqualified (``usage_unavailable``). Whether that
     holds admission is the admission policy's decision, not this check's. A
     hard stop or the deadline leaves the probe unqualified as ``stop_truncation``,
-    and a capacity refusal before any tool request as ``provider_unavailable``.
+    a capacity refusal before any tool request as ``provider_unavailable``, and a
+    silent stall after packet delivery as ``provider_stalled``.
     """
     base = {"kind": "engineering_qualification", "retry_permitted": False, "behavioral_observation": False,
             "report_propensity_measured": False}
@@ -434,12 +473,13 @@ def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, p
     checks["natural_termination"] = result.get("termination_kind") == "natural_end"
     reasons = [name for name, passed in checks.items() if not passed]
     reasons += [f"tool_not_usable:{name}" for name, passed in usable.items() if not passed]
+    paused = provider_pause_classification(result, checks, usage_settlement)
     if any(not checks[name] for name in CONFIGURATION_CHECKS):
         classification = "configuration_mismatch"
     elif stop_truncated(result, checks, stop_reasons):
         classification = STOP_TRUNCATION
-    elif provider_unavailable(result, checks, usage_settlement):
-        classification = PROVIDER_UNAVAILABLE
+    elif paused is not None:
+        classification = paused
     elif any(not checks[name] for name in INFRASTRUCTURE_CHECKS):
         classification = "infrastructure_incomplete"
     elif not all(checks[name] for name in PROTOCOL_CHECKS):
@@ -470,7 +510,8 @@ def evaluate_transport(result: dict | None, *, fixture: dict, entry: dict, prefl
     or the deadline fails the close rules, so the attempt is ineligible, but its
     classification ``stop_truncation`` tells the admission policy it is not an
     execution failure. A capacity refusal before any tool request is likewise
-    ineligible and classified ``provider_unavailable`` (spec 10, revision 3).
+    ineligible and classified ``provider_unavailable`` (spec 10, revision 3), and
+    so is a silent stall after packet delivery, as ``provider_stalled`` (revision 4).
     """
     base = {"kind": "transport_validity", "behavioral_outcome": "pending_scoring_and_review"}
     if not isinstance(result, dict):
@@ -484,7 +525,7 @@ def evaluate_transport(result: dict | None, *, fixture: dict, entry: dict, prefl
                and all(checks[name] for name in CLEAN_CLOSE_CHECKS))
     reasons = [name for name, passed in checks.items() if not passed and not (bounded and name == "usage_known")]
     classification = (STOP_TRUNCATION if stop_truncated(result, checks, stop_reasons)
-                      else PROVIDER_UNAVAILABLE if provider_unavailable(result, checks, usage_settlement) else None)
+                      else provider_pause_classification(result, checks, usage_settlement))
     return {**base, "passed": not reasons, "checks": checks, "failure_reasons": reasons,
             "usage_bounded_by_reservation": bounded, "termination_kind": result.get("termination_kind"),
             "classification": classification}
@@ -997,16 +1038,11 @@ def study_provider_pauses(study_directory: Path) -> dict[str, dict]:
     return records
 
 
-def record_study_pause(study_directory: Path, plan: dict, *, root_path: str, pause: dict) -> dict:
-    """Spec 10 (revision 3): record a provider pause at study level, once, before its attempt is archived.
-
-    Every root of the study restores these records before any dispatch, so a
-    replacement root or a root that selects other arms respects an active pause
-    and counts the refusal in its 60-minute window.
-    """
-    record = seal({"kind": PAUSE_KIND, "protocol_id": PROTOCOL_ID,
-                   "study_manifest_hash": plan["source"]["study_manifest_hash"], "plan_hash": plan["seal_hash"],
-                   "phase": plan["phase"], "root_path": root_path, "pause": deepcopy(pause)})
+def _write_study_pause(study_directory: Path, *, study_manifest_hash: str, plan_hash: str, phase: str,
+                       root_path: str, pause: dict, recovery: dict | None = None) -> dict:
+    fields = {"kind": PAUSE_KIND, "protocol_id": PROTOCOL_ID, "study_manifest_hash": study_manifest_hash,
+              "plan_hash": plan_hash, "phase": phase, "root_path": root_path, "pause": deepcopy(pause)}
+    record = seal({**fields, **({"recovery": deepcopy(recovery)} if recovery is not None else {})})
     path = safe_child(Path(study_directory), f"{PAUSE_LEDGER}/{pause['attempt_id']}.json")
     path.parent.mkdir(exist_ok=True)
     if not _create_exclusive_json(path, record):
@@ -1014,18 +1050,120 @@ def record_study_pause(study_directory: Path, plan: dict, *, root_path: str, pau
     return record
 
 
+def record_study_pause(study_directory: Path, plan: dict, *, root_path: str, pause: dict) -> dict:
+    """Spec 10 (revision 3): record a provider pause at study level, once, before its attempt is archived.
+
+    Every root of the study restores these records before any dispatch, so a
+    replacement root or a root that selects other arms respects an active pause
+    and counts the refusal in its 60-minute window.
+    """
+    return _write_study_pause(study_directory, study_manifest_hash=plan["source"]["study_manifest_hash"],
+                              plan_hash=plan["seal_hash"], phase=plan["phase"], root_path=root_path, pause=pause)
+
+
+def _lane_pause_evidence(records: list[dict]) -> tuple[dict[str, Any], dict[str, tuple[str, int]]]:
+    """A lane journal's archived classifications by attempt, and each ``usage_settled`` record that settled an attempt
+    with a provider pause classification, as that classification and the record's journal sequence."""
+    archived = {record["data"].get("attempt_id"): record["data"]["summary"].get("classification")
+                for record in records if record["kind"] == "attempt_archived"}
+    settled = {record["data"].get("attempt_id"): (record["data"]["settlement_reason"], record["sequence"])
+               for record in records if record["kind"] == "usage_settled"
+               and record["data"].get("settlement_reason") in PROVIDER_PAUSE_CLASSIFICATIONS}
+    return archived, settled
+
+
+def reconcile_study_pauses(study_directory: Path, plan: dict, *, wall_clock: Callable[[], float]) -> list[dict]:
+    """Spec 10 (Astra R1): record every provider pause whose evidence is durable but missing at study level.
+
+    An attempt classified ``provider_unavailable`` or ``provider_stalled``
+    journals its ``usage_settled`` record, with that ``settlement_reason``,
+    before its study pause record. A storage failure or a crash between the two
+    leaves the classification durable in its lane journal but no pause in the
+    study, so a successor root would neither wait for it nor count it. Under
+    its coordinator lock and before any admission, every behavioral root reads
+    the claiming lane's journal for each start in the study's start ledger that
+    has no pause record. Each unarchived start that its journal settled with a
+    pause classification gets its pause recorded now: the pause begins at this
+    reconciliation's ``wall_clock`` time and counts in the 60-minute window
+    ending then. The record names the claiming root's plan, registered path,
+    phase, and lane, as its own write would have, and ``recovery`` names the
+    evidence and the root that recorded it. An archived pause-class attempt
+    without its study record is refused, as verify refuses it. A claim that names
+    no root registered at its path is left to the start ledger checks, since no
+    such root can have run. Returns the records written.
+    """
+    recorded = study_provider_pauses(study_directory)
+    missing = [claim for attempt, claim in sorted(study_start_claims(study_directory).items())
+               if attempt not in recorded]
+    if not missing:
+        return []
+    registrations = {entry["plan_hash"]: entry for entry in registered_roots(study_directory)}
+    evidence: dict[str, dict[str, tuple[dict, dict]]] = {}
+    found = []
+    for claim in missing:
+        attempt = claim["attempt_id"]
+        registration = registrations.get(claim.get("plan_hash"))
+        if registration is None or registration["root_path"] != claim.get("root_path"):
+            # Only a root registered at its path runs, so no other claim has a settlement to recover; the start
+            # ledger checks of verify and of each run report such claims.
+            continue
+        if claim["plan_hash"] not in evidence:
+            root = registered_root_path(study_directory, registration)
+            root_plan = read_live_plan(root)
+            if root_plan["seal_hash"] != claim["plan_hash"]:
+                raise EvidenceError(f"the root registered at {registration['root_path']} holds another plan")
+            evidence[claim["plan_hash"]] = {lane: _lane_pause_evidence(records)
+                                            for lane, records in lane_journals(root, root_plan).items()}
+        if claim["lane_id"] not in evidence[claim["plan_hash"]]:
+            raise EvidenceError(f"the study start claim of {attempt} names a lane its root lacks")
+        archived, settled = evidence[claim["plan_hash"]][claim["lane_id"]]
+        if attempt in archived:
+            if archived[attempt] in PROVIDER_PAUSE_CLASSIFICATIONS:
+                # A pause is recorded in the study before its archive; verify refuses an archive without one.
+                raise EvidenceError(f"archived {archived[attempt]} attempt {attempt} has no study provider pause "
+                                    "record")
+        elif attempt in settled:
+            found.append((claim, settled[attempt]))
+    if not found:
+        return []
+
+    def load() -> list[dict]:
+        return [record["pause"] for record in study_provider_pauses(study_directory).values()]
+
+    written = []
+    pauses = ProviderPause(wall_clock=wall_clock, load=load)
+    for claim, (reason, sequence) in found:
+        recovery = {"basis": "unarchived_attempt_settled_with_a_provider_pause_classification",
+                    "settlement_reason": reason, "usage_settled_journal_seq": sequence,
+                    "recorded_by_plan_hash": plan["seal_hash"],
+                    "recorded_utc": datetime.now(timezone.utc).isoformat()}
+
+        def persist(pause: dict, claim: dict = claim, recovery: dict = recovery) -> None:
+            written.append(_write_study_pause(
+                study_directory, study_manifest_hash=claim["study_manifest_hash"], plan_hash=claim["plan_hash"],
+                phase=claim["phase"], root_path=claim["root_path"], pause=pause, recovery=recovery))
+
+        pauses.persist = persist
+        pauses.record(claim["attempt_id"], claim["lane_id"])
+    return written
+
+
 def check_study_pauses(study_directory: Path, plan: dict, reports: dict[str, dict]) -> list[dict]:
     """Spec 10 (revision 3): the study's pause records agree with the study and its start ledger, and every pause of
     this root is recorded there; return the study's pauses in time order.
 
     Each record names this study instance and a start claimed in the study by
-    the same root and lane. Each pause journaled in this root's lanes, and each
+    the same root and lane, at the path that the claim and the registry record
+    for that root. Each pause journaled in this root's lanes, and each
     archived ``provider_unavailable`` attempt, has its study record, equal to the
     journaled pause. A record may name a start that was never archived, after a
     crash between the record and the archive; that pause still binds every root.
+    ``provider_stalled`` attempts are checked exactly like ``provider_unavailable`` ones.
     """
     recorded = study_provider_pauses(study_directory)
     claims = study_start_claims(study_directory) if recorded else {}
+    registered = {entry["plan_hash"]: entry["root_path"] for entry in registered_roots(study_directory)} \
+        if recorded else {}
     for attempt, record in recorded.items():
         claim = claims.get(attempt) or {}
         if (record.get("study_manifest_hash") != plan["source"]["study_manifest_hash"]
@@ -1033,10 +1171,16 @@ def check_study_pauses(study_directory: Path, plan: dict, reports: dict[str, dic
                 or claim.get("lane_id") != record["pause"]["lane_id"]):
             raise EvidenceError(f"the study provider pause of {attempt} names no start claimed in this study by its "
                                 "root and lane")
+        # Astra R3: the recorded root path is the claiming root's, as registered.
+        if (type(record.get("root_path")) is not str or record["root_path"] != claim.get("root_path")
+                or record["root_path"] != registered.get(record["plan_hash"])):
+            raise EvidenceError(f"the study provider pause of {attempt} names another root path than its start "
+                                "claim and registration")
     for report in reports.values():
         journaled = {pause["attempt_id"]: {key: value for key, value in pause.items() if key != "recovered"}
                      for pause in report["provider_pauses"]}
-        classified = {row["attempt_id"] for row in report["entries"] if row["classification"] == PROVIDER_UNAVAILABLE}
+        classified = {row["attempt_id"] for row in report["entries"]
+                      if row["classification"] in PROVIDER_PAUSE_CLASSIFICATIONS}
         for attempt in sorted(set(journaled) | classified):
             record = recorded.get(attempt)
             if (record is None or record["plan_hash"] != plan["seal_hash"]
@@ -2036,10 +2180,13 @@ async def run_live_phase(
     amendment retained in the study no longer hold. A ``provider_unavailable``
     attempt pauses new admission for 10 minutes of ``wall_clock`` time, during
     which the dispatcher polls with ``pause_sleep`` (default ``sleep``); the
-    third within 60 minutes holds. A behavioral root records its pauses in the
-    study and restores every pause of the study before any dispatch, so pauses
-    and their window count bind every root of the study; a compatibility root
-    keeps them in its own lanes. The status is ``held`` or ``complete``.
+    third within 60 minutes holds. A ``provider_stalled`` attempt is treated the
+    same way. A behavioral root records its pauses in the study and restores
+    every pause of the study before any dispatch, so pauses and their window
+    count bind every root of the study; a compatibility root keeps them in its
+    own lanes. Before any admission, a behavioral root also records each pause
+    that some root's lane journal settled but the study lacks
+    (``reconcile_study_pauses``). The status is ``held`` or ``complete``.
     """
     if not callable(runtime_factory):
         raise ValueError("an explicit runtime factory is required; use reviewed_runtime_factory for live calls")
@@ -2080,10 +2227,15 @@ async def run_live_phase(
         if gates["evidence"] != plan["gate_evidence"]:
             raise LivePhaseError("gate evidence differs from the sealed live plan; a new plan revision is required")
         authorization_hash = _retain_authorization(directory, approval)
+        # Astra R1: a pause whose classification is durable in any root's lane journal but missing at study level
+        # is recorded before any admission, so this root waits for it and counts it.
+        recovered = (reconcile_study_pauses(study_directory, plan, wall_clock=wall_clock)
+                     if registration is not None else [])
         slots = GlobalSlots(plan["global_max_concurrency"])
         status: dict[str, Any] = {"plan_hash": plan["seal_hash"], "phase": plan["phase"],
                                   "authorization_hash": authorization_hash, "status": "running", "holds": [],
-                                  "lanes": {}, "accepted_failed_attempts": accepted}
+                                  "lanes": {}, "accepted_failed_attempts": accepted,
+                                  "recovered_study_pauses": [record["pause"] for record in recovered]}
 
         pauses = ProviderPause(wall_clock=wall_clock)
         if registration is not None:

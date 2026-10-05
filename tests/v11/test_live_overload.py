@@ -146,7 +146,7 @@ async def test_the_observed_overload_is_provider_unavailable_and_pauses_admissio
     (row,) = [row for row in lane["entries"] if row["attempt_id"] == attempt]
     assert row["classification"] == "provider_unavailable" and row["settlement_reason"] == "provider_unavailable"
     assert lane["ledger"]["bounded_tokens_by_settlement_reason"] == {
-        "observed_usage_after_clean_close": 0, "provider_unavailable": 75000}
+        "observed_usage_after_clean_close": 0, "provider_unavailable": 75000, "provider_stalled": 0}
     assert report["provider_pauses"] == [pause] and report["unreconciled_starts"] == []
     # Export: consumed and excluded from analysis, not quarantined.
     export_live_review(root, tmp_path / "export", study_directory=study, bundle=fake_bundle())

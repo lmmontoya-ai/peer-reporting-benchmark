@@ -21,10 +21,13 @@ inside a run, and an archived failed attempt holds every later run of the same
 plan unless an approved amendment accepts it.
 
 A provider capacity refusal before any tool request (``provider_unavailable``,
-spec 10, revision 3) is consumed and ineligible but is not an execution failure:
-it pauses all new admission for 10 minutes (``ProviderPause``), and a third such
-attempt within any 60 minutes holds all new admission. In a study, pauses and
-their counts are recorded at study level, so they bind every root of the study.
+spec 10, revision 3), and a silent provider stall (``provider_stalled``, spec 10,
+revision 4: packet delivery confirmed, then no model event of any kind until the
+trial wall closed the attempt), are consumed and ineligible but are not execution
+failures: each pauses all new admission for 10 minutes (``ProviderPause``), and a
+third such attempt, of either kind, within any 60 minutes holds all new
+admission. In a study, pauses and their counts are recorded at study level, so
+they bind every root of the study.
 
 This module performs no model call and imports no v1.1 content module.
 """
@@ -76,6 +79,11 @@ STOP_TRUNCATION = "stop_truncation"  # classification: consumed, ineligible, not
 # Spec 10 (revision 3): a provider capacity refusal before any tool request. Consumed, ineligible, settled at its
 # reservation, not an execution failure; it pauses new admission, and the third within the window holds.
 PROVIDER_UNAVAILABLE = "provider_unavailable"
+# Spec 10 (revision 4): a silent provider stall. Packet delivery was confirmed, then no model event of any kind
+# arrived until the trial wall closed the attempt. Treated exactly like ``provider_unavailable``.
+PROVIDER_STALLED = "provider_stalled"
+# The classifications that pause admission and count toward the shared three-per-hour limit.
+PROVIDER_PAUSE_CLASSIFICATIONS = (PROVIDER_UNAVAILABLE, PROVIDER_STALLED)
 PROVIDER_PAUSE = "provider_pause"  # refusal reason while a pause is active; the entry stays unstarted
 PROVIDER_PAUSE_SECONDS = 600
 PROVIDER_WINDOW_SECONDS = 3600
@@ -265,15 +273,16 @@ def attempt_hold_kinds(check_passed: Any, failure_reasons: Any, usage_settlement
     A failed execution check holds, except a check whose only failure is unknown
     usage after a clean close that settled at the reservation bound, a
     ``stop_truncation`` (a hard stop or the deadline truncated an otherwise clean
-    attempt), and a ``provider_unavailable`` attempt settled at its reservation
-    (its pause and window limit are ``ProviderPause``'s). Any settlement other than
-    ``settled`` or ``bounded_by_reservation`` holds, including for a stop truncation.
+    attempt), and a ``provider_unavailable`` or ``provider_stalled`` attempt settled
+    at its reservation (its pause and window limit are ``ProviderPause``'s). Any
+    settlement other than ``settled`` or ``bounded_by_reservation`` holds, including
+    for a stop truncation.
     """
     kinds = []
     bounded_only = usage_settlement == BOUNDED_USAGE and set(failure_reasons or []) <= {"usage_known"}
-    provider_unavailable = classification == PROVIDER_UNAVAILABLE and usage_settlement == BOUNDED_USAGE
+    provider_pause = classification in PROVIDER_PAUSE_CLASSIFICATIONS and usage_settlement == BOUNDED_USAGE
     if (check_passed is not True and not bounded_only and classification != STOP_TRUNCATION
-            and not provider_unavailable):
+            and not provider_pause):
         kinds.append("execution_check_failure")
     if usage_settlement not in SETTLED_USAGE:
         kinds.append("unknown_final_usage")
@@ -401,9 +410,10 @@ def validate_pause_record(record: Any) -> dict:
 
 
 class ProviderPause:
-    """Spec 10 (revision 3): provider capacity refusals pause new admission; the third within the window holds.
+    """Spec 10 (revisions 3 and 4): provider refusals and silent stalls pause new admission; the third within the
+    window holds.
 
-    Each ``provider_unavailable`` attempt pauses all new admission for
+    Each ``provider_unavailable`` or ``provider_stalled`` attempt pauses all new admission for
     ``PROVIDER_PAUSE_SECONDS`` of wall-clock time from its archive. Its window
     count is the number of such attempts, itself included, in the
     ``PROVIDER_WINDOW_SECONDS`` ending at its archive; at
@@ -450,7 +460,8 @@ class ProviderPause:
         return sum(at - PROVIDER_WINDOW_SECONDS < event["paused_at"] <= at for event in self.events)
 
     def record(self, attempt_id: str, lane_id: str) -> dict:
-        """Pause admission for a provider_unavailable attempt; persist it, then return its journal record."""
+        """Pause admission for a provider_unavailable or provider_stalled attempt; persist it, then return its
+        journal record."""
         self.refresh()
         if any(event["attempt_id"] == attempt_id for event in self.events):
             raise ValueError(f"{attempt_id} already paused admission; an attempt is consumed once")

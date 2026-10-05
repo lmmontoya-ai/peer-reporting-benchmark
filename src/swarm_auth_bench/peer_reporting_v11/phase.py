@@ -38,7 +38,11 @@ Differences from P1:
   stays unstarted and is dispatched again after it. A root of a study also
   records each pause at study level before sealing its attempt, and restores the
   study's pauses before any dispatch and again before each admission
-  (``ProviderPause.load`` and ``persist``), so every root of the study respects them.
+  (``ProviderPause.load`` and ``persist``), so every root of the study respects them;
+- a ``provider_stalled`` attempt (packet delivery confirmed, then no model event
+  until the trial wall closed it, spec 10, revision 4) is treated exactly like a
+  ``provider_unavailable`` attempt: settled at its reservation, holding nothing,
+  pausing admission, and counting toward the same limit.
 
 A lane seals its plan before any model call, reserves budget before the start,
 writes ``attempt_started`` before the authenticated session, consumes each
@@ -88,6 +92,8 @@ from .bundle import ProtocolBundle
 from .lanes import (
     BOUNDED_USAGE,
     PROVIDER_PAUSE,
+    PROVIDER_PAUSE_CLASSIFICATIONS,
+    PROVIDER_STALLED,
     PROVIDER_UNAVAILABLE,
     STOP_TRUNCATION_REASON,
     GlobalSlots,
@@ -329,9 +335,9 @@ class _PhaseState:
             except ValueError as error:
                 raise EvidenceError(f"{entry['attempt_id']}: {error}") from error
             pause = payload["orchestrator"].get("provider_pause")
-            if (pause is not None) != (attempt.get("classification") == PROVIDER_UNAVAILABLE):
+            if (pause is not None) != (attempt.get("classification") in PROVIDER_PAUSE_CLASSIFICATIONS):
                 raise EvidenceError(f"{entry['attempt_id']}: a provider pause is sealed exactly for a "
-                                    "provider_unavailable attempt")
+                                    "provider_unavailable or provider_stalled attempt")
             if pause is not None:
                 try:
                     validate_pause_record(pause)
@@ -372,7 +378,7 @@ class _PhaseState:
             expected = sealed.get(data.get("attempt_id"))
             archive = archived.get(data.get("attempt_id"))
             if (expected is None and archive is not None
-                    and archive["data"]["summary"].get("classification") == PROVIDER_UNAVAILABLE):
+                    and archive["data"]["summary"].get("classification") in PROVIDER_PAUSE_CLASSIFICATIONS):
                 try:
                     payload = read_sealed(safe_child(self.directory, f"attempts/{data['attempt_id']}") / "attempt.json")
                 except (OSError, ValueError) as error:
@@ -475,18 +481,26 @@ def usage_unobserved(result: Any, notices: dict) -> str | None:
     return None
 
 
-def provider_unavailable_close(result: Any, observer_error: str | None, failures: list[str], notices: dict) -> bool:
-    """Spec 10 (revision 3): the adapter classified a capacity refusal before any tool request, and the close was clean.
+def provider_pause_close(result: Any, observer_error: str | None, failures: list[str], notices: dict) -> str | None:
+    """Spec 10 (revisions 3 and 4): ``provider_unavailable`` or ``provider_stalled`` when the adapter classified a
+    capacity refusal before any tool request, or a silent stall after packet delivery, and the close was clean.
 
     This is the one exception to the observed-usage requirement: the attempt
     settles at its reservation even though no usage was observed. A usage
-    notification without a total still leaves usage unresolved.
+    notification without a total still leaves usage unresolved, and a silent
+    stall has no usage notification at all.
     """
-    return (clean_shutdown(result, observer_error, failures)
-            and result.get("termination_kind") == live_runtime.PROVIDER_UNAVAILABLE
-            and type(result.get("provider_overload")) is dict and not result.get("tool_requests")
+    if not (clean_shutdown(result, observer_error, failures) and not result.get("tool_requests")
             and not result.get("observer_outputs") and result.get("exposure_confirmed") is True
-            and not notices["without_total"])
+            and not notices["without_total"]):
+        return None
+    kind = result.get("termination_kind")
+    if kind == live_runtime.PROVIDER_UNAVAILABLE and type(result.get("provider_overload")) is dict:
+        return PROVIDER_UNAVAILABLE
+    if (kind == live_runtime.PROVIDER_STALLED and type(result.get("provider_stall")) is dict
+            and not notices["with_total"]):
+        return PROVIDER_STALLED
+    return None
 
 
 def started_record(start: dict) -> dict:
@@ -554,12 +568,14 @@ def reconcile_lane(state: _PhaseState) -> None:
     # A crash between an archive and its pause record: the pause sealed in the attempt is journaled now.
     journaled_pauses = {record["data"]["attempt_id"] for record in journal.of_kind("provider_pause_started")}
     for attempt_id, record in archived.items():
-        if record["data"]["summary"].get("classification") != PROVIDER_UNAVAILABLE or attempt_id in journaled_pauses:
+        if (record["data"]["summary"].get("classification") not in PROVIDER_PAUSE_CLASSIFICATIONS
+                or attempt_id in journaled_pauses):
             continue
         payload = read_sealed(safe_child(state.directory, f"attempts/{attempt_id}") / "attempt.json")
         pause = (payload.get("orchestrator") or {}).get("provider_pause")
         if pause is None:
-            raise EvidenceError(f"{attempt_id}: a provider_unavailable attempt has no sealed provider pause")
+            raise EvidenceError(f"{attempt_id}: a {record['data']['summary']['classification']} attempt has no "
+                                "sealed provider pause")
         journal.append("provider_pause_started", **pause, recovered=True)
         changed = True
     if changed or state.ledger_recovered:
@@ -923,14 +939,14 @@ class _PhaseRun:
             await asyncio.gather(watcher, return_exceptions=True)
 
     def _settle(self, reservation: str, total: int | None, result: Any, observer_error: str | None,
-                failures: list[str], unobserved: str | None, *, provider_unavailable: bool = False) -> dict:
+                failures: list[str], unobserved: str | None, *, provider_pause: str | None = None) -> dict:
         """Settle the reservation: known usage, the reservation bound, or unresolved.
 
         The reservation bound applies only after a clean close with usage
         observed during the attempt (spec 10, W09 R2-M1), or to a
-        ``provider_unavailable`` attempt, which settles at its reservation
-        whether or not usage was observed (spec 10, revision 3; labeled
-        ``settlement_reason: "provider_unavailable"``).
+        ``provider_unavailable`` or ``provider_stalled`` attempt (``provider_pause``),
+        which settles at its reservation whether or not usage was observed
+        (spec 10, revisions 3 and 4; labeled with that ``settlement_reason``).
         """
         ledger = self.ledger
         if total is not None:
@@ -944,11 +960,11 @@ class _PhaseRun:
         if not clean_shutdown(result, observer_error, failures):
             ledger.settle(reservation, None)
             return {"status": "unresolved", "actual_tokens": None, "reason": "unclean_close"}
-        if unobserved is not None and not provider_unavailable:
+        if unobserved is not None and provider_pause is None:
             ledger.settle(reservation, None)
             return {"status": "unresolved", "actual_tokens": None, "reason": unobserved}
         current = self.state.ledger_state()["attempts"][reservation]
-        reported = result["usage"]["observed_total_tokens"]  # an integer unless provider_unavailable
+        reported = result["usage"]["observed_total_tokens"]  # an integer unless a provider pause classification
         observed = max(current["observed"], reported if type(reported) is int else 0)
         bound = max(observed, current["reservation"])
         try:
@@ -959,7 +975,7 @@ class _PhaseRun:
             return {"status": "unresolved", "actual_tokens": None, "conflict": str(error)}
         settlement = {"status": BOUNDED_USAGE, "actual_tokens": bound, "observed_tokens": observed,
                       "reservation_tokens": current["reservation"]}
-        return {**settlement, "settlement_reason": PROVIDER_UNAVAILABLE} if provider_unavailable else settlement
+        return {**settlement, "settlement_reason": provider_pause} if provider_pause is not None else settlement
 
     def _archive(self, entry: dict, state: dict, preflight: dict, fixture: dict, instructions: str,
                  reservation: str, attempt_dir: Path, *, result: Any, observer_error: str | None,
@@ -976,20 +992,20 @@ class _PhaseRun:
                 failures.append("observer result was not exact JSON; non-JSON values were kept as text")
         total = _known_total(result, usage_failures)
         unobserved = usage_unobserved(result, usage_notices)
-        provider = total is None and provider_unavailable_close(result, observer_error, failures, usage_notices)
+        provider = provider_pause_close(result, observer_error, failures, usage_notices) if total is None else None
         # Provisional hold: the moment the observer result shows a failed check. Later steps only
         # add failures, so the final decision in on_archived never lifts it.
         provisional = ("settled" if total is not None
                        else BOUNDED_USAGE if clean_shutdown(result, observer_error, failures)
-                       and (unobserved is None or provider) else "unresolved")
+                       and (unobserved is None or provider is not None) else "unresolved")
         check = self.evaluate(result, fixture=fixture, entry=entry, preflight=preflight, bundle=self.bundle,
                               orchestrator_failures=list(failures), observer_error=observer_error,
                               usage_settlement=provisional, stop_reasons=list(stop_reasons))
         for kind in attempt_hold_kinds(check["passed"], check["failure_reasons"], provisional,
                                        check.get("classification")):
             self.hooks.hold(f"{kind}:{attempt_id}")
-        # Only an attempt the evaluator also classifies provider_unavailable settles at its reservation unobserved.
-        provider = provider and check.get("classification") == PROVIDER_UNAVAILABLE
+        # Only an attempt the evaluator classifies the same way settles at its reservation unobserved.
+        provider = provider if provider is not None and check.get("classification") == provider else None
         sink_closed = True
         try:
             sink_log.close()
@@ -997,7 +1013,7 @@ class _PhaseRun:
             sink_closed = False
             failures.append(f"event sink close: {type(error).__name__}: {error}")
         settlement = self._settle(reservation, total, result, observer_error, failures, unobserved,
-                                  provider_unavailable=provider)
+                                  provider_pause=provider)
         details = {key: value for key, value in settlement.items() if key not in {"status", "actual_tokens"}}
         self.journal.append("usage_settled", attempt_id=attempt_id, reservation_id=reservation,
                             status="settled" if settlement["actual_tokens"] is not None else "unresolved",
@@ -1006,10 +1022,11 @@ class _PhaseRun:
         check = self.evaluate(result, fixture=fixture, entry=entry, preflight=preflight, bundle=self.bundle,
                               orchestrator_failures=failures, observer_error=observer_error,
                               usage_settlement=settlement["status"], stop_reasons=list(stop_reasons))
-        # Spec 10 (revision 3): a provider_unavailable attempt pauses all new admission now, before any await;
-        # the pause is sealed into the attempt and journaled, and the third in the window holds.
+        # Spec 10 (revisions 3 and 4): a provider_unavailable or provider_stalled attempt pauses all new admission
+        # now, before any await; the pause is sealed into the attempt and journaled, and the third in the window
+        # holds, whichever kinds the three are.
         pause = (self.pauses.record(attempt_id, self.lane_id)
-                 if check.get("classification") == PROVIDER_UNAVAILABLE else None)
+                 if check.get("classification") in PROVIDER_PAUSE_CLASSIFICATIONS else None)
         if pause is not None and pause["holds_admission"]:
             self.hooks.hold(f"provider_unavailable_limit:{attempt_id}")
         sink_checkpoint = {"count": sink_log.count, "final_hash": sink_log.last_hash, "closed": sink_closed}
@@ -1043,11 +1060,11 @@ class _PhaseRun:
 
 
 def settlement_reason(usage_settlement: Any, recorded: Any) -> str | None:
-    """Why an archived attempt settled at its reservation bound: provider_unavailable, or observed usage after a
-    clean close. None for any other settlement."""
+    """Why an archived attempt settled at its reservation bound: provider_unavailable, provider_stalled, or observed
+    usage after a clean close. None for any other settlement."""
     if usage_settlement != BOUNDED_USAGE:
         return None
-    return recorded if recorded == PROVIDER_UNAVAILABLE else BOUNDED_AFTER_CLEAN_CLOSE
+    return recorded if recorded in PROVIDER_PAUSE_CLASSIFICATIONS else BOUNDED_AFTER_CLEAN_CLOSE
 
 
 def lane_report(state: _PhaseState) -> dict:
@@ -1087,11 +1104,12 @@ def lane_report(state: _PhaseState) -> dict:
             label: sum(row["usage_total_tokens"] for row in entries if row["status"] == "archived"
                        and row["usage_settlement"] == label and type(row["usage_total_tokens"]) is int)
             for label in ("settled", BOUNDED_USAGE)}
-        # Revision 3: a provider_unavailable charge is a bound without any observed usage; keep it apart.
+        # Revisions 3 and 4: a provider_unavailable or provider_stalled charge is a bound without any observed
+        # usage; keep it apart.
         ledger["bounded_tokens_by_settlement_reason"] = {
             reason: sum(row["usage_total_tokens"] for row in entries if row["settlement_reason"] == reason
                         and type(row["usage_total_tokens"]) is int)
-            for reason in (BOUNDED_AFTER_CLEAN_CLOSE, PROVIDER_UNAVAILABLE)}
+            for reason in (BOUNDED_AFTER_CLEAN_CLOSE, *PROVIDER_PAUSE_CLASSIFICATIONS)}
     return {
         "phase": plan["phase"], "lane_id": plan["lane_id"], "model": plan["model"],
         "reasoning_effort": plan["reasoning_effort"], "directory": str(state.directory), "plan_hash": state.plan_hash,
