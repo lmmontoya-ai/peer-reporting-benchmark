@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from live_fakes import build_fixture, compat_root, fake_bundle, load_template
+from .live_fakes import build_fixture, compat_root, fake_bundle, load_template
 
 from swarm_auth_bench.peer_reporting.storage import read_sealed
 from swarm_auth_bench.peer_reporting_v11 import runner

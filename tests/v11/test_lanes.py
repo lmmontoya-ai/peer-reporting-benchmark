@@ -4,7 +4,7 @@ import asyncio
 from copy import deepcopy
 
 import pytest
-from live_fakes import authorization, caps_record
+from .live_fakes import authorization, caps_record
 
 from swarm_auth_bench.peer_reporting.storage import seal
 from swarm_auth_bench.peer_reporting_v11 import lanes

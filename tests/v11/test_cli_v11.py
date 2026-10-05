@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from live_fakes import authorization, caps_record, fake_bundle
+from .live_fakes import authorization, caps_record, fake_bundle
 
 from swarm_auth_bench.peer_reporting.storage import atomic_json
 from swarm_auth_bench.peer_reporting_v11 import bundle as bundle_module

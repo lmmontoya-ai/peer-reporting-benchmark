@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 import pytest
-from live_fakes import (
+from .live_fakes import (
     Harness,
     authorization,
     caps_record,
@@ -18,7 +18,7 @@ from live_fakes import (
     study_rows,
     write_study,
 )
-from live_fakes import run_phase as run
+from .live_fakes import run_phase as run
 
 from swarm_auth_bench.long_events import iter_events
 from swarm_auth_bench.peer_reporting.storage import read_sealed

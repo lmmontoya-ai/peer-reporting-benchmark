@@ -3,7 +3,7 @@
 from copy import deepcopy
 
 import pytest
-from live_fakes import (
+from .live_fakes import (
     FakeTransport,
     FakeV11World,
     build_fixture,
