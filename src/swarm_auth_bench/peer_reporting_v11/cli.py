@@ -78,7 +78,7 @@ def _parser() -> argparse.ArgumentParser:
                                                        "started an attempt; no model call")
     abandon.add_argument("study", type=Path, help="study directory in which the root is registered")
     abandon.add_argument("--plan-hash", required=True, help="the registered root's plan hash")
-    abandon.add_argument("--root", type=Path, help="the root directory; required for a finalized root")
+    abandon.add_argument("--root", type=Path, help="the exact registered root directory; required for a finalized root")
     abandon.add_argument("--reason", required=True)
     for name in ("build-study", "verify-study"):
         study = commands.add_parser(name, help="build or verify the sealed study offline; no model call")

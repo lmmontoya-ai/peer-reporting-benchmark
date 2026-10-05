@@ -43,6 +43,7 @@ from .bundle import ProtocolBundle, load_bundle
 from .live import (
     CONFIGURATION_CHECKS,
     _row_valid,
+    check_abandoned_root,
     evaluate_transport,
     read_live_plan,
     read_root_fixture,
@@ -333,6 +334,7 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     _require(plan["phase"] != "compatibility",
              "compatibility attempts are engineering checks, not behavioral observations")
     registration = root_registration(study_directory, plan, require_finalized=False)
+    check_abandoned_root(directory, registration)
     ledger = verify_consumed_ledger(directory, plan, prior_roots, bundle=bundle)
     amendments = study_amendments(study_directory) if plan["phase"] == "smoke" else []
     data = inspect_live_root(directory, bundle=bundle, scorer=scorer, amendments=amendments)

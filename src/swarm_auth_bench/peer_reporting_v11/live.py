@@ -723,13 +723,19 @@ def _journal_starts(root: Path) -> list[str]:
     return starts
 
 
+def check_abandoned_root(root: Path, registration: dict) -> None:
+    """Refuse retained abandonment evidence that contradicts a root's journaled starts."""
+    if registration["state"] == "abandoned" and _journal_starts(root):
+        raise EvidenceError("an abandoned root has journaled attempt starts; consumed attempts are never abandoned")
+
+
 def abandon_root(study_directory: Path, plan_hash: str, *, reason: str, root: Path | None = None,
                  bundle: ProtocolBundle | None = None) -> dict:
     """Seal an abandonment record for a pending root, or a finalized root whose journals show no start.
 
     An abandoned root never runs and no longer has to be named as a prior root.
-    A finalized root needs its directory, so that its journals can show that no
-    attempt started. Consumed attempts are never abandoned.
+    A finalized root needs its registered directory and a matching sealed plan,
+    so that its journals can show that no attempt started. Consumed attempts are never abandoned.
     """
     if type(reason) is not str or not reason.strip() or len(reason) > 4000:
         raise ValueError("an abandonment needs a reason of at most 4000 characters")
@@ -744,36 +750,62 @@ def abandon_root(study_directory: Path, plan_hash: str, *, reason: str, root: Pa
             raise ValueError("no root with this plan hash is registered in the study")
         if entry["state"] == "abandoned":
             raise ValueError("this root is already abandoned")
-        root_checked = False
+        registered_path = entry.get("root_path")
+        if type(registered_path) is not str or not Path(registered_path).is_absolute():
+            raise EvidenceError("the root registration has no absolute root path; abandonment cannot check it")
+        registered_root = Path(registered_path).resolve()
+        root_checked, journal_hashes = False, {}
+        if root is None and entry["state"] == "pending":
+            root = registered_root
         if root is not None:
-            root = Path(root)
+            if Path(root).resolve() != registered_root:
+                raise ValueError("the supplied root is not the exact registered root path")
+            root = registered_root
+            plan = None
             if (root / LIVE_PLAN_FILE).exists():
-                plan = read_live_plan(root)
-                if plan["seal_hash"] != plan_hash:
-                    raise ValueError("the supplied root has another plan hash")
+                try:
+                    plan = read_live_plan(root)
+                    if plan["seal_hash"] != plan_hash:
+                        raise ValueError("the supplied root has another plan hash")
+                except ValueError:
+                    if entry["state"] != "pending":
+                        raise
+                    plan = None
+            elif entry["state"] != "pending":
+                raise EvidenceError("the finalized registered root has no matching sealed live plan")
+            journal_paths = sorted((root / "lanes").glob("*/journal.jsonl"))
+            if root.exists():
                 stack.enter_context(_exclusive(root / COORDINATOR_LOCK))  # a running root refuses
-                for lane in plan["lanes"]:
-                    stack.enter_context(_exclusive(safe_child(root, lane["path"]) / LOCK_FILE))
-                _, started = consumed_attempts_in_root(root, bundle=bundle)
-                if superseded_by(root, plan):
-                    raise ValueError("this root is already superseded by a later root")
-            else:
-                started = set(_journal_starts(root))
+                lane_dirs = {path.parent for path in journal_paths}
+                if plan is not None:
+                    lane_dirs |= {safe_child(root, lane["path"]) for lane in plan["lanes"]}
+                for lane_dir in sorted(lane_dirs):
+                    stack.enter_context(_exclusive(lane_dir / LOCK_FILE))
+            started = set(_journal_starts(root))
+            if plan is not None:
+                _, consumed = consumed_attempts_in_root(root, bundle=bundle)
+                started |= consumed
+            if superseded_by(root, {"seal_hash": plan_hash}):
+                raise ValueError("this root is already superseded by a later root")
             if started:
                 raise LivePhaseError(f"this root started attempts {sorted(started)[:5]}; consumed attempts are "
                                      "never abandoned")
             root_checked = True
+            journal_hashes = {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                              for path in journal_paths}
         elif entry["state"] == "finalized":
             raise ValueError("abandoning a finalized root needs its directory, so its journals can show no start")
         record = seal({"kind": ABANDONED_KIND, "plan_hash": plan_hash, "phase": entry["phase"],
                        "revision": entry["revision"], "study_manifest_hash": entry["study_manifest_hash"],
                        "prior_state": entry["state"], "root_journals_checked": root_checked,
+                       "root_path": str(registered_root), "lane_journal_hashes": journal_hashes,
                        "consumed_attempt_ids": [], "reason": reason,
                        "recorded_utc": datetime.now(timezone.utc).isoformat()})
         (registry / ABANDONED_DIRECTORY).mkdir(exist_ok=True)
         atomic_json(registry / ABANDONED_DIRECTORY / f"{plan_hash}.json", record)
     return {"plan_hash": plan_hash, "phase": entry["phase"], "prior_state": entry["state"],
-            "abandonment_hash": record["seal_hash"], "root_journals_checked": root_checked, "live_model_calls": 0}
+            "abandonment_hash": record["seal_hash"], "root_journals_checked": root_checked,
+            "root_path": record["root_path"], "lane_journal_hashes": journal_hashes, "live_model_calls": 0}
 
 
 def validate_amendment(record: Any, manifest: dict) -> dict:
@@ -993,9 +1025,9 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
                       prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None) -> dict:
     """Write a fresh sealed root.
 
-    A behavioral root seals a random ``root_instance_nonce`` into its top plan,
+    Every root seals a random ``root_instance_nonce`` into its top plan,
     so its plan hash is unique even when another root, for example one built
-    from a copied study, has the same inputs. It is registered in its study as
+    from a copied study, has the same inputs. A behavioral root is registered in its study as
     pending before anything is written, and finalized last; only a finalized root runs. Under the study
     registry lock and each prior root's coordinator and lane locks, the prior
     roots must still show exactly the sealed consumed attempts. Each prior root
@@ -1037,9 +1069,8 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
                                  f"{sorted(set(sealed) - set(supplied))}")
             if active_registered_roots(study_directory, top["phase"]) != set(sealed):
                 raise LivePhaseError("the study registered another root of this phase after this plan was built")
-        if ledger is not None:
-            # Two roots prepared from the same inputs, e.g. in a copied study, never share a plan hash.
-            top = {**top, "root_instance_nonce": secrets.token_hex(16)}
+        # Even identical compatibility roots need separate execution authorizations.
+        top = {**top, "root_instance_nonce": secrets.token_hex(16)}
         sealed_top = seal(top)
         if ledger is not None:
             registration = safe_child(study_directory, f"{STUDY_REGISTRY}/{sealed_top['seal_hash']}.json")
@@ -1052,6 +1083,7 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
             atomic_json(registration, seal({
                 "kind": REGISTRY_KIND, "plan_hash": sealed_top["seal_hash"], "phase": top["phase"],
                 "revision": top["revision"], "study_manifest_hash": top["source"]["study_manifest_hash"],
+                "root_path": str(directory.resolve()),
                 "prior_plan_hashes": sorted(supplied), "registered_as": "pending"}))
         directory.mkdir(parents=True, exist_ok=False)
         (directory / "fixtures").mkdir()
@@ -1142,6 +1174,7 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
         registration, abandoned = None, set()
     else:
         registration = root_registration(study_directory, plan, require_finalized=False)
+        check_abandoned_root(directory, registration)
         abandoned = {entry["plan_hash"] for entry in registered_roots(study_directory)
                      if entry["state"] == "abandoned"}
     templates: dict[str, dict] = {}
@@ -1243,13 +1276,15 @@ def compatibility_evidence(directories: list[Path] | tuple, *, bundle: ProtocolB
 
 
 def smoke_evidence(directory: Path, *, bundle: ProtocolBundle, source: dict,
-                   smoke_assignment_ids: list[str] | tuple = (), study_directory: Path | None = None
+                   smoke_assignment_ids: list[str] | tuple = (), study_directory: Path | None = None,
+                   required_lanes: list[str] | tuple = ()
                    ) -> tuple[dict | None, list[str]]:
     """Spec 10: one finalized smoke root registered in this study directory, whose entries equal the study's smoke
     rows, every attempt archived and passed, or accepted by an approved amendment.
 
     An attempt settled ``bounded_by_reservation`` after a clean close counts as
     valid. An accepted failed attempt stays consumed and is excluded from analysis.
+    Each required collection lane must retain at least one valid, unamended attempt.
     """
     try:
         plan = read_live_plan(directory)
@@ -1268,6 +1303,12 @@ def smoke_evidence(directory: Path, *, bundle: ProtocolBundle, source: dict,
     if report["unreconciled_starts"] or len(valid) + len(accepted) != plan["maximum_live_calls"]:
         return None, [f"smoke: {len(valid)} of {plan['maximum_live_calls']} smoke records are valid and "
                       f"{len(accepted)} failed records are accepted by an amendment"]
+    unproven = [lane for lane in required_lanes
+                if not any(_row_valid(row) and row["attempt_id"] not in accepted
+                           for row in report["lanes"].get(lane, {}).get("entries", []))]
+    if unproven:
+        return None, [f"smoke: lane {lane} needs at least one passed, valid smoke attempt not covered by an amendment"
+                      for lane in unproven]
     hashes = {}
     for lane in plan["lanes"]:
         for row in report["lanes"][lane["lane_id"]]["entries"]:
@@ -1306,7 +1347,7 @@ def check_phase_gates(phase: str, lanes: list[str], *, bundle: ProtocolBundle, s
         else:
             smoke, smoke_failures = smoke_evidence(smoke_directory, bundle=bundle, source=source,
                                                    smoke_assignment_ids=smoke_assignment_ids,
-                                                   study_directory=study_directory)
+                                                   study_directory=study_directory, required_lanes=lanes)
             failures += smoke_failures
             evidence["smoke"] = smoke
     return {"passed": not failures, "failures": failures, "evidence": evidence}
