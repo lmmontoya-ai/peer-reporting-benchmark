@@ -20,7 +20,8 @@ P1_ATTEMPT_KEYS = {"adapter_version", "execution_kind", "assignment_id", "attemp
                    "termination_kind", "accepted_reports", "observer_outputs", "observed_peer_messages",
                    "task_submissions", "tool_requests", "tool_receipts", "model_execution_confirmed"}
 V11_KEYS = {"model", "effort", "world_mode", "prompt_condition", "phase", "lane_id", "split", "arm", "template_id",
-            "level", "variant", "near_miss_type", "planned_order", "report_attempts", "usage", "elapsed_seconds"}
+            "level", "variant", "near_miss_type", "planned_order", "report_attempts", "usage", "elapsed_seconds",
+            "excluded_from_analysis"}
 
 
 @pytest.fixture(scope="module")
@@ -48,7 +49,7 @@ def test_export_keeps_the_p1_attempt_shape_and_adds_v11_labels(smoked, tmp_path)
         return {"trials": len(scores)}
 
     result = export_live_review(smoked["root"], tmp_path / "export", bundle=fake_bundle(), scorer=scorer,
-                                summarize=summarize)
+                                summarize=summarize, study_directory=smoked["study"])
     assert result["attempts"] == 12 and result["status_counts"] == {"archived": 12}
     assert result["verified_model_observations"] == 12 and len(scored) == 12 and summaries == [12]
     assert file_hashes(smoked["root"]) == before  # the export never edits retained evidence
@@ -110,4 +111,7 @@ def test_compatibility_roots_are_not_exported_and_exports_stay_outside_the_root(
     with pytest.raises(ValueError, match="engineering checks"):
         export_live_review(smoked["compat"], tmp_path / "compat-export", bundle=fake_bundle())
     with pytest.raises(ValueError, match="outside"):
-        export_live_review(smoked["root"], smoked["root"] / "export", bundle=fake_bundle())
+        export_live_review(smoked["root"], smoked["root"] / "export", bundle=fake_bundle(),
+                           study_directory=smoked["study"])
+    with pytest.raises(ValueError, match="study directory"):
+        export_live_review(smoked["root"], tmp_path / "unregistered-export", bundle=fake_bundle())

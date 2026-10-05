@@ -295,11 +295,12 @@ SMOKE_CELLS = (("L1", "violation", "guided", "xhigh", "normal"), ("L3", "violati
 
 def study_rows(split: str = "smoke", cells=SMOKE_CELLS, template_id: str = "token-issuance",
                seed: int = 1103) -> tuple[list[dict], dict]:
+    """One round per cell, in cell order, with every model in each round."""
     bundle = fake_bundle()
     template = load_template(template_id)
     rows, fixtures = [], {}
     order = 0
-    for level, variant, prompt, effort, mode in cells:
+    for round_index, (level, variant, prompt, effort, mode) in enumerate(cells):
         near_miss = "wrong_digest" if level in {"L2", "L3", "L4"} else None
         fixture = build_fixture(template, split=split, seed=seed, level=level, variant=variant,
                                 near_miss_type=near_miss)
@@ -309,13 +310,15 @@ def study_rows(split: str = "smoke", cells=SMOKE_CELLS, template_id: str = "toke
                          "split": split, "arm": split, "model": model, "effort": effort, "prompt_condition": prompt,
                          "world_mode": mode, "template_id": template_id, "level": level, "variant": variant,
                          "near_miss_type": near_miss, "fixture_id": fixture["fixture_id"], "planned_order": order,
+                         "round": round_index,
                          "instructions": bundle.build_instructions(prompt, template, caps_record()["trial"])})
             order += 1
     return rows, fixtures
 
 
 def write_study(directory: Path, rows: list[dict], fixtures: dict, *, caps: dict | None = None,
-                tool_manifest_hash: str | None = None) -> Path:
+                tool_manifest_hash: str | None = None, instance_nonce: str = "0" * 32) -> Path:
+    """A sealed fake study. A different ``instance_nonce`` stands for a rebuild: same rows, another seal."""
     directory = Path(directory)
     (directory / "fixtures").mkdir(parents=True)
     index = {}
@@ -323,7 +326,8 @@ def write_study(directory: Path, rows: list[dict], fixtures: dict, *, caps: dict
         atomic_json(directory / f"fixtures/{fixture_id}.json", seal(fixture))
         index[fixture_id] = {"path": f"fixtures/{fixture_id}.json", "content_hash": content_hash(fixture)}
     atomic_json(directory / v11_live.STUDY_MANIFEST, seal({
-        "kind": "fake_v11_study", "protocol_id": PROTOCOL_ID, "caps_hash": content_hash(caps or caps_record()),
+        "kind": "fake_v11_study", "protocol_id": PROTOCOL_ID, "instance_nonce": instance_nonce,
+        "caps_hash": content_hash(caps or caps_record()),
         "tool_manifest_hash": tool_manifest_hash or fake_bundle().tool_manifest_hash,
         "assignments": rows, "fixtures": index}))
     return directory
@@ -489,6 +493,16 @@ class FakeTransport(V11PeerRuntime):
             elif step[0] == "stall":
                 step[1]()
                 await self.interrupt.wait()
+            elif step[0] == "call":  # a side effect at this point of the turn, e.g. touching a stop file
+                step[1]()
+            elif step[0] == "wait":  # hold the turn until an event is set, unless interrupted first
+                waiter = asyncio.create_task(step[1].wait())
+                stop = asyncio.create_task(self.interrupt.wait())
+                await asyncio.wait({waiter, stop}, return_when=asyncio.FIRST_COMPLETED)
+                waiter.cancel()
+                stop.cancel()
+                if self.interrupt.is_set():
+                    break
         status = "interrupted" if self.interrupt.is_set() else "completed"
         await self._push("turn/completed", {"threadId": self.thread_id, "turn": {"id": self.turn_id, "status": status}})
 
@@ -578,6 +592,7 @@ def smoke_root(base: Path, compatibility: Path) -> dict:
     plan = v11_live.read_live_plan(root)
     FakeV11World.created.clear()
     harness = Harness(base / "smoke-homes", packet_scripts(fixtures))
-    status = asyncio.run(run_phase(root, plan, harness, compatibility_directories=[compatibility]))
+    status = asyncio.run(run_phase(root, plan, harness, compatibility_directories=[compatibility],
+                                   study_directory=study))
     return {"study": study, "root": root, "plan": plan, "status": status, "harness": harness,
             "worlds": list(FakeV11World.created), "fixtures": fixtures}

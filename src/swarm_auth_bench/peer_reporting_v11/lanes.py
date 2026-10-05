@@ -7,14 +7,18 @@ ledger. A global slot limits the attempts that run at once across all lanes to
 
 The admission policy is ported from an earlier unpublished multi-lane study. Any
 failed execution check holds all new admission. So do an unsettled usage
-record, the admission cutoff, the forced-stop deadline, a parent stop file, a
-halted lane, a stopped lane ledger, and retained incomplete or failed evidence.
-Unknown final usage alone does not hold when the world closed and the runtime
-shut down cleanly: the attempt settles at the larger of its observed usage and
-its reservation (``bounded_by_reservation``, spec section 10). Active attempts
-finish within their own caps. At the forced-stop deadline they are truncated
-and drained. A hold is never lifted inside a run, and an archived failed
-attempt holds every later run of the same plan.
+record, the admission cutoff, a soft or hard stop file, the forced-stop
+deadline, a halted lane, a stopped lane ledger, and retained incomplete or
+failed evidence. Unknown final usage alone does not hold when the world closed,
+the runtime shut down cleanly, and usage was observed during the attempt: the
+attempt settles at the larger of its observed usage and its reservation
+(``bounded_by_reservation``, spec section 10). Active attempts finish within
+their own caps after a soft stop (``root/STOP``, ``--stop-file``). A hard stop
+(``root/HARD_STOP``, ``--hard-stop-file``) or the forced-stop deadline truncates
+and drains them; such a truncation is consumed and behaviorally ineligible
+(``stop_truncation``) but is not an execution failure. A hold is never lifted
+inside a run, and an archived failed attempt holds every later run of the same
+plan unless an approved amendment accepts it.
 
 This module performs no model call and imports no v1.1 content module.
 """
@@ -55,6 +59,12 @@ AUTHORIZATION_FIELDS = frozenset({
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 BOUNDED_USAGE = "bounded_by_reservation"
 SETTLED_USAGE = ("settled", BOUNDED_USAGE)
+# Spec 10 stops. A soft stop refuses new admission; a hard stop or the deadline also truncates.
+SOFT_STOP = "soft_stop"
+HARD_STOP = "hard_stop"
+FORCED_STOP_DEADLINE = "forced_stop_deadline"
+STOP_TRUNCATION_REASON = "hard_stop_or_forced_deadline"  # the attempt's collection stop reason
+STOP_TRUNCATION = "stop_truncation"  # classification: consumed, ineligible, not an execution failure
 
 
 def validate_effort(value: Any) -> str:
@@ -138,17 +148,29 @@ def validate_caps_record(record: Any, *, require_frozen: bool = True) -> dict:
 
 
 def lane_caps(record: dict, phase: str, planned_trials: int, *, _validated: bool = False) -> dict:
-    """P1-format caps for one lane: serial, with one reservation per planned trial as its token target."""
+    """P1-format caps for one lane: serial, with a token target one reservation above its planned reservations.
+
+    Spec 10 (W09 N-c): a bounded settlement charges at least a full reservation,
+    so a lane whose trials hit limits and overshoot once must still admit its
+    last planned row. The lane wall counts only time while a run is open.
+    """
     if not _validated:
         validate_caps_record(record, require_frozen=False)
     validate_phase(phase)
     if type(planned_trials) is not int or planned_trials < 1:
         raise ValueError("a lane needs at least one planned trial")
+    reservation = record["trial"]["reserved_tokens_per_trial"]
     caps = {**record["trial"], "collection_wall_seconds": record["lane_wall_seconds"][phase],
-            "collection_observed_token_stop_target": record["trial"]["reserved_tokens_per_trial"] * planned_trials,
-            "max_concurrency": 1}
+            "collection_observed_token_stop_target": reservation * (planned_trials + 1), "max_concurrency": 1}
     validate_caps(caps)
+    validate_token_headroom(caps, planned_trials)
     return caps
+
+
+def validate_token_headroom(caps: dict, planned_trials: int) -> None:
+    """A lane's token target must exceed its planned reservations by at least one reservation."""
+    if caps["collection_observed_token_stop_target"] < caps["reserved_tokens_per_trial"] * (planned_trials + 1):
+        raise ValueError("a lane's token target must exceed its planned reservations by at least one reservation")
 
 
 def trial_policy(record: dict) -> dict:
@@ -208,16 +230,19 @@ def validate_authorization(record: Any, plan: dict) -> dict:
 # Global admission policy
 
 
-def attempt_hold_kinds(check_passed: Any, failure_reasons: Any, usage_settlement: Any) -> list[str]:
+def attempt_hold_kinds(check_passed: Any, failure_reasons: Any, usage_settlement: Any,
+                       classification: Any = None) -> list[str]:
     """Why an archived attempt holds all new admission; empty when it does not.
 
     A failed execution check holds, except a check whose only failure is unknown
-    usage after a clean close that settled at the reservation bound. Any
-    settlement other than ``settled`` or ``bounded_by_reservation`` holds.
+    usage after a clean close that settled at the reservation bound, and a
+    ``stop_truncation`` (a hard stop or the deadline truncated an otherwise clean
+    attempt). Any settlement other than ``settled`` or ``bounded_by_reservation``
+    holds, including for a stop truncation.
     """
     kinds = []
     bounded_only = usage_settlement == BOUNDED_USAGE and set(failure_reasons or []) <= {"usage_known"}
-    if check_passed is not True and not bounded_only:
+    if check_passed is not True and not bounded_only and classification != STOP_TRUNCATION:
         kinds.append("execution_check_failure")
     if usage_settlement not in SETTLED_USAGE:
         kinds.append("unknown_final_usage")
@@ -225,16 +250,26 @@ def attempt_hold_kinds(check_passed: Any, failure_reasons: Any, usage_settlement
 
 
 class AdmissionPolicy:
-    """Holds are one-way. Any reason recorded here refuses every later admission."""
+    """Holds are one-way. Any reason recorded here refuses every later admission.
+
+    ``stop_files`` are soft stops: they refuse new admission and let active
+    attempts finish within their caps. ``hard_stop_files`` and the forced-stop
+    deadline also truncate active attempts (``force_stop_reason``).
+    ``accepted_attempts`` are failed attempts that an approved amendment accepts:
+    their retained evidence no longer holds later runs, and they stay consumed.
+    """
 
     def __init__(self, *, admission_cutoff: float, forced_stop_deadline: float,
-                 wall_clock: Callable[[], float] = time.time, stop_file: Path | None = None,
-                 stop_files: Iterable[Path] = (), on_change: Callable[[], None] | None = None) -> None:
+                 wall_clock: Callable[[], float] = time.time, stop_files: Iterable[Path] = (),
+                 hard_stop_files: Iterable[Path] = (), accepted_attempts: Iterable[str] = (),
+                 on_change: Callable[[], None] | None = None) -> None:
         if not admission_cutoff < forced_stop_deadline:
             raise ValueError("the admission cutoff must precede the forced-stop deadline")
         self.admission_cutoff, self.forced_stop_deadline = admission_cutoff, forced_stop_deadline
         self.wall_clock, self.on_change = wall_clock, on_change
-        self.stop_files = [Path(path) for path in ([stop_file] if stop_file is not None else []) + list(stop_files)]
+        self.stop_files = [Path(path) for path in stop_files]
+        self.hard_stop_files = [Path(path) for path in hard_stop_files]
+        self.accepted_attempts = frozenset(accepted_attempts)
         self.holds: list[str] = []
 
     def hold(self, reason: str) -> None:
@@ -243,13 +278,27 @@ class AdmissionPolicy:
             if self.on_change is not None:
                 self.on_change()
 
+    def force_stop_reason(self) -> str | None:
+        """``hard_stop`` or ``forced_stop_deadline`` when active attempts must be truncated now."""
+        if any(path.exists() for path in self.hard_stop_files):
+            return HARD_STOP
+        if self.wall_clock() >= self.forced_stop_deadline:
+            return FORCED_STOP_DEADLINE
+        return None
+
     def force_stop_due(self) -> bool:
-        return any(path.exists() for path in self.stop_files) or self.wall_clock() >= self.forced_stop_deadline
+        return self.force_stop_reason() is not None
+
+    def soft_stop_requested(self) -> bool:
+        return any(path.exists() for path in self.stop_files)
 
     def admission_check(self) -> dict | None:
         """Return a hold record, or None when a new attempt may be admitted now."""
-        if self.force_stop_due():
-            self.hold("parent_stop_or_forced_deadline")
+        forced = self.force_stop_reason()
+        if forced is not None:
+            self.hold(forced)
+        elif self.soft_stop_requested():
+            self.hold(SOFT_STOP)
         elif self.wall_clock() >= self.admission_cutoff:
             self.hold("admission_cutoff")
         return {"reason": "global_admission_hold", "holds": list(self.holds)} if self.holds else None
@@ -258,12 +307,19 @@ class AdmissionPolicy:
         """Stop all new admission after a failed execution check or an unsettled usage record."""
         check = payload.get("check") or {}
         settlement = ((payload.get("orchestrator") or {}).get("usage_settlement") or {}).get("status")
-        for kind in attempt_hold_kinds(check.get("passed"), check.get("failure_reasons"), settlement):
+        for kind in attempt_hold_kinds(check.get("passed"), check.get("failure_reasons"), settlement,
+                                       check.get("classification")):
             self.hold(f"{kind}:{payload.get('attempt_id')}")
 
     def accept_lane_report(self, lane: str, report: dict, *, retained: bool = False) -> None:
-        """Hold on any lane halt, stopped ledger, unreconciled start, unsettled reservation, or failed row."""
+        """Hold on any lane halt, stopped ledger, unreconciled start, unsettled reservation, or failed row.
+
+        Rows that an approved amendment accepts, and their unresolved reservations,
+        do not hold; they were consumed before this run and never run again.
+        Unreconciled starts and active reservations always hold.
+        """
         prefix = "retained_" if retained else ""
+        accepted = self.accepted_attempts
         halted = report.get("halted")
         if halted and halted.get("reason") not in {None, "global_admission_hold"} and not retained:
             self.hold(f"lane_halted:{lane}:{halted.get('reason')}")
@@ -276,12 +332,16 @@ class AdmissionPolicy:
         # A finished lane may end exactly at its token target, which also sets the stop flag.
         if retained and unstarted and ledger.get("stop_generation"):
             self.hold(f"{prefix}ledger_stop:{lane}:{ledger.get('stop_reason')}")
-        if ledger.get("unresolved_reservations") or ledger.get("active_reservations"):
+        unresolved = [reservation for reservation in ledger.get("unresolved_reservations") or []
+                      if reservation.split("~r", 1)[0] not in accepted]
+        if unresolved or ledger.get("active_reservations"):
             self.hold(f"{prefix}unsettled_lane_reservation:{lane}")
         for row in report.get("entries") or []:
+            if row["attempt_id"] in accepted:
+                continue
             if row["status"] == "archived" and (
                     attempt_hold_kinds(row.get("check_passed"), row.get("failure_reasons"),
-                                       row.get("usage_settlement"))
+                                       row.get("usage_settlement"), row.get("classification"))
                     or type(row.get("usage_total_tokens")) is not int):
                 self.hold(f"{prefix}failed_or_unknown_attempt:{row['attempt_id']}")
             elif row["status"] not in {"archived", "unrun", "not_started_preflight_failed"}:

@@ -41,14 +41,31 @@ def test_real_counts_and_all_fixtures_verify(wp6_study, wp6_inputs, monkeypatch)
     assert verified["counts"] == COUNTS
 
 
-def test_same_inputs_same_manifest_and_fixture_bytes(tmp_path, wp6_study, wp6_inputs):
+def test_a_rebuild_is_a_new_study_instance_with_the_same_content(tmp_path, wp6_study, wp6_inputs):
+    # Spec 10 (W09 R2-M3): each build seals a fresh instance nonce, so a rebuild has another seal.
     directory, manifest, result = wp6_study
     other = tmp_path / "other"
     rebuilt = build_study(other, **wp6_inputs)
-    assert result["seal_hash"] == rebuilt["seal_hash"] == manifest["seal_hash"]
-    assert (directory / STUDY_MANIFEST).read_bytes() == (other / STUDY_MANIFEST).read_bytes()
+    assert result["seal_hash"] == manifest["seal_hash"] != rebuilt["seal_hash"]
+    again = read_sealed(other / STUDY_MANIFEST)
+    assert manifest["instance_nonce"] != again["instance_nonce"] == rebuilt["instance_nonce"]
+    assert len(again["instance_nonce"]) == 32
+    content = {key: value for key, value in manifest.items() if key not in {"instance_nonce", "seal_hash"}}
+    assert content == {key: value for key, value in again.items() if key not in {"instance_nonce", "seal_hash"}}
     for reference in manifest["fixtures"].values():
         assert (directory / reference["path"]).read_bytes() == (other / reference["path"]).read_bytes()
+    assert verify_study(other, **wp6_inputs)["valid"]
+    tampered = tmp_path / "tampered"
+    shutil.copytree(other, tampered)
+    edited = read_sealed(tampered / STUDY_MANIFEST)
+    edited.pop("seal_hash")
+    edited["instance_nonce"] = manifest["instance_nonce"]  # resealed under the original study's nonce
+    atomic_json(tampered / STUDY_MANIFEST, seal(edited))
+    verified = verify_study(tampered, **wp6_inputs)
+    assert verified["valid"] and verified["seal_hash"] == manifest["seal_hash"]  # a copy is the same instance
+    edited.pop("instance_nonce")
+    atomic_json(tampered / STUDY_MANIFEST, seal(edited))
+    assert verify_study(tampered, **wp6_inputs)["valid"] is False
 
 
 def test_custom_protocol_generator_parameters_build_and_verify_study(tmp_path, wp6_inputs):

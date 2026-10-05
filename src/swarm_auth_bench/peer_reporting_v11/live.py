@@ -5,17 +5,28 @@ seal a phase offline: per-lane plans, fixture copies, frozen caps, tool and
 catalog bindings, the study binding, the consumed-attempt ledger, and gate
 evidence. ``run_live_phase`` refuses to start unless the caps are frozen and
 equal the sealed caps, a sealed user authorization names this exact plan, no
-sealed file changed, the root is not superseded, the consumed-attempt ledger
-still holds, the gates still pass, and the tools still match. It then admits
-work through one global dispatcher over one serial lane per model and effort,
-with at most ``global_max_concurrency`` attempts at once, under the
-stop-all-new-admission policy in ``lanes``.
+sealed file changed, the root is finalized in the supplied study directory and
+not superseded, the consumed-attempt ledger still holds, the gates still pass,
+and the tools still match. It then admits work through one global dispatcher
+over one serial lane per model and effort, with at most
+``global_max_concurrency`` attempts at once and the spec 9 round barrier, under
+the stop-all-new-admission policy in ``lanes``.
 
-Consumed attempts (spec 10). Every root built from a study is registered in the
-study's ``live-roots/`` directory. A later root of the same study and phase must
-name every registered root of that phase as a prior root. It excludes every
-assignment with a journaled ``attempt_started`` in any of them, and it marks each
-prior root superseded so that the prior root can never run again.
+Consumed attempts and the study instance (spec 10). The study directory is the
+consumed-attempt ledger of record: move it, never copy it. Every behavioral root
+is registered in the study's ``live-roots/`` directory as pending before its plan
+is written and finalized after. Building, running, verifying, and exporting a
+behavioral root need the study directory in which it is registered, and a gate
+accepts smoke evidence only from a finalized root registered in the collection
+plan's study directory. A later root of the same study and phase must name
+every registered root of that phase that is not abandoned as a prior root. It
+excludes every assignment with a journaled ``attempt_started`` in any of them,
+and it marks each prior root superseded so that the prior root can never run
+again. A pending root, or a finalized root whose journals show no start, can be
+abandoned through a sealed record (``abandon_root``); it never runs and no
+longer blocks builds. An approved amendment (``record_amendment``) can accept
+failed smoke attempts: they stay consumed, are excluded from analysis, no longer
+hold the smoke root, and count as resolved at the collection gate.
 
 Live use needs an explicit runtime factory (``reviewed_runtime_factory``) and, by
 default, a verified gVisor Linux guest. Tests inject fakes for both.
@@ -28,6 +39,14 @@ Root layout::
     authorizations/<hash>.json   sealed authorization records used by runs
     superseded/<hash>.json       sealed marker: a later root of this study and phase replaced this one
     status.json                  coordinator status (informational; evidence is in the lanes)
+    STOP, HARD_STOP              soft and hard stop files, always watched
+
+Study directory additions::
+
+    live-roots/<hash>.json             sealed registration (written pending, before the plan)
+    live-roots/finalized/<hash>.json   sealed finalization (after the plan and supersession markers)
+    live-roots/abandoned/<hash>.json   sealed abandonment of a root that never started an attempt
+    amendments/<hash>.json             sealed, user-approved amendments of this study
 """
 
 from __future__ import annotations
@@ -35,17 +54,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import secrets
 import time
 from contextlib import ExitStack
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ..events import content_hash
+from ..long_events import iter_events
 from ..peer_reporting.catalog import reviewed_catalog
-from ..peer_reporting.config import MODELS
+from ..peer_reporting.config import MODELS, read_json
 from ..peer_reporting.live import (
     LOCK_FILE,
+    UNSTARTED,
     EvidenceError,
     GateError,
     LivePhaseError,
@@ -57,7 +80,7 @@ from ..peer_reporting.live import (
     verify_live_environment,
 )
 from ..peer_reporting.score import VALID_CLOSE_KINDS
-from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
+from ..peer_reporting.storage import atomic_json, check_seal, read_sealed, safe_child, seal
 from ..runtime import SUPPORTED_CODEX_VERSION
 from . import PROTOCOL_ID, SPECIFICATION_REVISION, live_runtime
 from .bundle import ProtocolBundle, load_bundle, require_v11_tools
@@ -65,12 +88,15 @@ from .lanes import (
     BOUNDED_USAGE,
     PROMPT_CONDITIONS,
     SETTLED_USAGE,
+    STOP_TRUNCATION,
+    STOP_TRUNCATION_REASON,
     TOOL_REQUEST_CAP,
     AdmissionPolicy,
     GlobalSlots,
     lane_caps,
     lane_id,
     lane_order,
+    parse_utc,
     trial_policy,
     validate_authorization,
     validate_caps_record,
@@ -100,6 +126,18 @@ COORDINATOR_LOCK = "coordinator.lock"
 STUDY_MANIFEST = "collection-manifest.json"
 STUDY_REGISTRY = "live-roots"
 REGISTRY_KIND = "peer_reporting_v11_live_root_registration"
+REGISTRY_LOCK = "registry.lock"
+FINALIZED_DIRECTORY = "finalized"
+FINALIZED_KIND = "peer_reporting_v11_live_root_finalized"
+ABANDONED_DIRECTORY = "abandoned"
+ABANDONED_KIND = "peer_reporting_v11_live_root_abandoned"
+AMENDMENT_DIRECTORY = "amendments"
+AMENDMENT_KIND = "peer_reporting_v11_amendment"
+AMENDMENT_ACTION = "accept_failed_smoke_attempts"
+AMENDMENT_FIELDS = frozenset({"kind", "protocol_id", "study_manifest_hash", "reason", "approval", "action",
+                              "attempt_ids", "recorded_utc", "seal_hash"})
+STOP_FILE = "STOP"
+HARD_STOP_FILE = "HARD_STOP"
 SUPERSEDED_DIRECTORY = "superseded"
 SUPERSEDED_KIND = "peer_reporting_v11_root_superseded"
 ATTEMPT_SUFFIX = "-live-1"
@@ -136,24 +174,35 @@ QUALIFICATION_CRITERIA = (
 # Attempt IDs (assignment ID + "-live-1") name the world trial and must stay within 100 characters.
 ASSIGNMENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,89}")
 ASSIGNMENT_FIELDS = ("assignment_id", "split", "arm", "model", "effort", "prompt_condition", "world_mode",
-                     "template_id", "level", "variant", "near_miss_type", "fixture_id", "planned_order")
+                     "template_id", "level", "variant", "near_miss_type", "fixture_id", "planned_order", "round")
 EXECUTION_POLICY = {
     "attempts_per_assignment": 1, "outcome_based_retries": False, "consumed_attempts_rerun": False,
     "consumed_attempt_ledger": LEDGER_POLICY,
+    "study_directory": "ledger_of_record_move_never_copy_roots_registered_pending_then_finalized",
     "execution_check_failure_policy": "stop_all_new_admission",
     "provisional_hold": "set_when_an_observer_result_shows_a_failed_check_before_any_await",
-    "unknown_usage_policy": "settle_at_max_observed_and_reservation_after_clean_close_else_stop_all_new_admission",
+    "unknown_usage_policy": ("settle_at_max_observed_and_reservation_after_clean_close_with_observed_usage"
+                             "_else_stop_all_new_admission"),
     "settlement_conflict_policy": "record_failure_and_stop_all_new_admission",
     "unreconciled_start_policy": "stop_all_new_admission",
     "active_on_admission_hold": "finish_within_existing_individual_caps",
-    "deadline_or_parent_stop_policy": "request_collection_stop_for_all_active_attempts_then_drain",
-    "lane_scheduling": "global_dispatcher_lowest_unstarted_planned_order_whose_lane_is_idle",
+    "soft_stop_policy": "root_STOP_or_stop_file_refuses_new_admission_active_attempts_finish_within_caps",
+    "hard_stop_or_deadline_policy": ("root_HARD_STOP_hard_stop_file_or_deadline_truncates_active_attempts"
+                                     "_consumed_ineligible_not_an_execution_failure"),
+    "lane_wall": "counts_only_open_run_time_summed_across_runs",
+    "lane_scheduling": ("global_dispatcher_lowest_unstarted_planned_order_whose_lane_is_idle"
+                        "_round_barrier_r_plus_2_per_effort"),
+    "amendments": "accept_failed_smoke_attempts_only_consumed_and_excluded_from_analysis",
     "freeze": "refuse_to_run_after_any_code_catalog_schema_template_or_protocol_change",
     "every_live_phase_requires_user_authorization": True,
 }
 # Spec 10: the world closed and the runtime shut down cleanly.
 CLEAN_CLOSE_CHECKS = ("queue_reconciled", "runtime_closed", "no_infrastructure_failure",
                       "orchestrator_evidence_intact")
+# Spec 10: a truncation by a hard stop or the deadline is not an execution failure only when the
+# attempt was otherwise configured exactly and closed cleanly.
+STOP_TRUNCATION_REQUIRED = ("live_model_execution", "exact_model", "reasoning_effort_valid", "world_mode_bound",
+                            "reviewed_catalog", "exact_tool_manifest", "world_bound_to_attempt") + CLEAN_CLOSE_CHECKS
 
 
 # Runtime construction and preflight
@@ -265,14 +314,23 @@ PROTOCOL_CHECKS = ("all_six_tools_usable", "operation_ids_exercised", "task_acce
                    "natural_termination")
 
 
+def stop_truncated(result: dict, checks: dict, stop_reasons: list[str] | None) -> bool:
+    """A hard stop or the forced-stop deadline, and nothing else, truncated an otherwise clean attempt."""
+    return (result.get("termination_kind") == "collection_forced_truncation" and bool(stop_reasons)
+            and set(stop_reasons) <= {STOP_TRUNCATION_REASON}
+            and all(checks.get(name) is True for name in STOP_TRUNCATION_REQUIRED))
+
+
 def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, preflight: dict,
                            bundle: ProtocolBundle, orchestrator_failures: list[str],
-                           observer_error: str | None = None, usage_settlement: str | None = None) -> dict:
+                           observer_error: str | None = None, usage_settlement: str | None = None,
+                           stop_reasons: list[str] | None = None) -> dict:
     """Engineering pass/fail. The requested report is a tool check, not a behavioral observation.
 
     Qualification always needs known usage, so a ``bounded_by_reservation``
     settlement leaves the lane unqualified (``usage_unavailable``). Whether that
-    holds admission is the admission policy's decision, not this check's.
+    holds admission is the admission policy's decision, not this check's. A
+    hard stop or the deadline leaves the probe unqualified as ``stop_truncation``.
     """
     base = {"kind": "engineering_qualification", "retry_permitted": False, "behavioral_observation": False,
             "report_propensity_measured": False}
@@ -301,6 +359,8 @@ def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, p
     reasons += [f"tool_not_usable:{name}" for name, passed in usable.items() if not passed]
     if any(not checks[name] for name in CONFIGURATION_CHECKS):
         classification = "configuration_mismatch"
+    elif stop_truncated(result, checks, stop_reasons):
+        classification = STOP_TRUNCATION
     elif any(not checks[name] for name in INFRASTRUCTURE_CHECKS):
         classification = "infrastructure_incomplete"
     elif not all(checks[name] for name in PROTOCOL_CHECKS):
@@ -320,18 +380,23 @@ def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, p
 
 def evaluate_transport(result: dict | None, *, fixture: dict, entry: dict, preflight: dict,
                        bundle: ProtocolBundle, orchestrator_failures: list[str],
-                       observer_error: str | None = None, usage_settlement: str | None = None) -> dict:
+                       observer_error: str | None = None, usage_settlement: str | None = None,
+                       stop_reasons: list[str] | None = None) -> dict:
     """Validity of a behavioral opportunity; semantic outcomes stay pending scoring and review.
 
     Spec 10: unknown final usage alone does not fail the opportunity when the
     settlement is ``bounded_by_reservation`` and the world closed and the runtime
     shut down cleanly. ``checks.usage_known`` stays false; every other check,
-    including the usual close rules, still applies.
+    including the usual close rules, still applies. A truncation by a hard stop
+    or the deadline fails the close rules, so the attempt is ineligible, but its
+    classification ``stop_truncation`` tells the admission policy it is not an
+    execution failure.
     """
     base = {"kind": "transport_validity", "behavioral_outcome": "pending_scoring_and_review"}
     if not isinstance(result, dict):
         return {**base, "passed": False, "checks": {}, "failure_reasons": [f"observer_failed: {observer_error}"],
-                "usage_bounded_by_reservation": False, "termination_kind": "infrastructure_incomplete"}
+                "usage_bounded_by_reservation": False, "termination_kind": "infrastructure_incomplete",
+                "classification": None}
     checks = _transport_checks(result, fixture=fixture, entry=entry, preflight=preflight, bundle=bundle,
                                failures=orchestrator_failures)
     checks["valid_close"] = result.get("termination_kind") in VALID_CLOSE_KINDS
@@ -339,7 +404,8 @@ def evaluate_transport(result: dict | None, *, fixture: dict, entry: dict, prefl
                and all(checks[name] for name in CLEAN_CLOSE_CHECKS))
     reasons = [name for name, passed in checks.items() if not passed and not (bounded and name == "usage_known")]
     return {**base, "passed": not reasons, "checks": checks, "failure_reasons": reasons,
-            "usage_bounded_by_reservation": bounded, "termination_kind": result.get("termination_kind")}
+            "usage_bounded_by_reservation": bounded, "termination_kind": result.get("termination_kind"),
+            "classification": STOP_TRUNCATION if stop_truncated(result, checks, stop_reasons) else None}
 
 
 def evaluator(phase: str) -> Callable[..., dict]:
@@ -369,7 +435,8 @@ def _entry(row: dict, fixture: dict, instructions: str) -> dict:
         "reasoning_effort": row["effort"], "world_mode": row["world_mode"],
         "prompt_condition": row["prompt_condition"], "planned_index": None, "planned_order": row["planned_order"],
         "split": row["split"], "arm": row["arm"], "template_id": row["template_id"], "level": row["level"],
-        "variant": row["variant"], "near_miss_type": row["near_miss_type"], "fixture_id": fixture["fixture_id"],
+        "variant": row["variant"], "near_miss_type": row["near_miss_type"], "round": row["round"],
+        "fixture_id": fixture["fixture_id"],
         "fixture_path": f"fixtures/{fixture['fixture_id']}.json", "fixture_hash": content_hash(fixture),
         "instructions": instructions, "instructions_and_roles_hash": _messages_hash(instructions, fixture),
     }
@@ -448,7 +515,7 @@ def build_compatibility_plan(caps_record: dict, *, revision: str, bundle: Protoc
                "arm": "compatibility", "model": model, "effort": effort, "prompt_condition": "neutral",
                "world_mode": "normal", "template_id": spec["template_id"], "level": spec["level"],
                "variant": spec["variant"], "near_miss_type": spec["near_miss_type"],
-               "fixture_id": fixture["fixture_id"], "planned_order": position}
+               "fixture_id": fixture["fixture_id"], "planned_order": position, "round": 0}
         entries.append(_entry(row, fixture, instructions))
     source = {"kind": "compatibility_probe", "fixture": dict(spec), "instructions_version": QUALIFIER_VERSION,
               "pass_criteria": list(QUALIFICATION_CRITERIA), "behavioral_observation": False,
@@ -482,6 +549,8 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
         if type(row["planned_order"]) is not int or row["planned_order"] in orders:
             raise ValueError(f"{identifier}: planned order must be a unique integer")
         orders.add(row["planned_order"])
+        if type(row["round"]) is not int or not 0 <= row["round"] <= 1000:
+            raise ValueError(f"{identifier}: round must be a nonnegative integer")
         fixture = fixtures.get(row["fixture_id"])
         if fixture is None or fixture.get("fixture_id") != row["fixture_id"]:
             raise ValueError(f"{identifier}: fixture {row['fixture_id']!r} is missing")
@@ -498,6 +567,9 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
         if "instructions" in row and row["instructions"] != instructions:
             raise ValueError(f"{identifier}: sealed instructions differ from the frozen prompt builder")
         entries.append(_entry(row, fixture, instructions))
+    rounds = [row["round"] for row in sorted(rows, key=lambda row: row["planned_order"])]
+    if rounds != sorted(rounds):
+        raise ValueError(f"{phase}: rounds must never decrease in planned order")
     for fixture_id in {row["fixture_id"] for row in rows}:
         fixture = fixtures[fixture_id]
         errors = bundle.verify_fixture(fixture, templates[fixture["parameters"]["template_id"]])
@@ -567,21 +639,244 @@ def load_study(study_directory: Path, phase: str) -> tuple[list[dict], dict[str,
 # Consumed-attempt ledger
 
 
+def _registry_record(path: Path, kind: str, description: str) -> dict:
+    try:
+        record = read_sealed(path)
+    except (OSError, ValueError) as error:
+        raise EvidenceError(f"study {description} {path.name} is corrupt: {error}") from error
+    if record.get("kind") != kind or path.stem != record.get("plan_hash"):
+        raise EvidenceError(f"study {description} {path.name} is not a v1.1 {description}")
+    return record
+
+
 def registered_roots(study_directory: Path) -> list[dict]:
-    """Every live root registered in a study, any phase. Registrations are sealed and never removed."""
+    """Every live root registered in a study, any phase, with its ``state``.
+
+    A root is registered ``pending`` before its plan is written and
+    ``finalized`` after its plan and supersession markers; a root that never
+    started an attempt can be ``abandoned``. These records are sealed and never removed.
+    """
     registry = Path(study_directory) / STUDY_REGISTRY
     if not registry.is_dir():
         return []
     entries = []
     for path in sorted(registry.glob("*.json")):
-        try:
-            record = read_sealed(path)
-        except (OSError, ValueError) as error:
-            raise EvidenceError(f"study root registration {path.name} is corrupt: {error}") from error
-        if record.get("kind") != REGISTRY_KIND or path.stem != record.get("plan_hash"):
-            raise EvidenceError(f"study root registration {path.name} is not a v1.1 registration")
-        entries.append(record)
+        record = _registry_record(path, REGISTRY_KIND, "root registration")
+        entry = {**record, "state": "pending", "finalized": None, "abandoned": None}
+        for directory, kind, state in ((FINALIZED_DIRECTORY, FINALIZED_KIND, "finalized"),
+                                       (ABANDONED_DIRECTORY, ABANDONED_KIND, "abandoned")):
+            marker = registry / directory / path.name
+            if marker.exists():
+                entry[state] = _registry_record(marker, kind, f"root {state} record")
+                entry["state"] = state
+        entries.append(entry)
+    names = {path.name for path in registry.glob("*.json")}
+    for directory in (FINALIZED_DIRECTORY, ABANDONED_DIRECTORY):
+        orphans = sorted(path.name for path in (registry / directory).glob("*.json") if path.name not in names)
+        if orphans:
+            raise EvidenceError(f"study {directory} records without a registration: {orphans}")
     return entries
+
+
+def active_registered_roots(study_directory: Path, phase: str) -> set[str]:
+    """Plan hashes of every root of a phase that is registered in the study and not abandoned."""
+    return {entry["plan_hash"] for entry in registered_roots(study_directory)
+            if entry["phase"] == phase and entry["state"] != "abandoned"}
+
+
+def root_registration(study_directory: Path | None, plan: dict, *, require_finalized: bool) -> dict:
+    """Spec 10: a behavioral root is used only with the study directory in which it is registered."""
+    if study_directory is None:
+        raise EvidenceError("a behavioral root needs the study directory in which it is registered (--study)")
+    manifest = read_study_manifest(study_directory)
+    if manifest["seal_hash"] != plan["source"]["study_manifest_hash"]:
+        raise EvidenceError("the study directory holds another study instance than the one this root was built from")
+    entry = next((entry for entry in registered_roots(study_directory) if entry["plan_hash"] == plan["seal_hash"]),
+                 None)
+    if entry is None:
+        raise EvidenceError("this root is not registered in the supplied study directory")
+    if entry["phase"] != plan["phase"] or entry["study_manifest_hash"] != manifest["seal_hash"]:
+        raise EvidenceError("the study registration names another phase or study for this root")
+    if require_finalized and entry["state"] != "finalized":
+        raise LivePhaseError(f"this root's study registration is {entry['state']}; only a finalized root runs or "
+                             "serves as gate evidence")
+    return {"state": entry["state"], "plan_hash": entry["plan_hash"], "phase": entry["phase"],
+            "study_manifest_hash": entry["study_manifest_hash"]}
+
+
+def study_registry_listing(study_directory: Path) -> dict:
+    """The study's registry and amendments, as exports carry them."""
+    manifest = read_study_manifest(study_directory)
+    return {"study_manifest_hash": manifest["seal_hash"], "instance_nonce": manifest.get("instance_nonce"),
+            "roots": registered_roots(study_directory), "amendments": study_amendments(study_directory)}
+
+
+def _journal_starts(root: Path) -> list[str]:
+    """Attempt starts in every lane journal under a root, read without a sealed top plan."""
+    starts = []
+    for path in sorted((Path(root) / "lanes").glob("*/journal.jsonl")):
+        try:
+            starts += [record["data"].get("attempt_id") for record in iter_events(path)
+                       if record["kind"] == "attempt_started"]
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise EvidenceError(f"lane journal {path.parent.name} cannot be read: {error}") from error
+    return starts
+
+
+def abandon_root(study_directory: Path, plan_hash: str, *, reason: str, root: Path | None = None,
+                 bundle: ProtocolBundle | None = None) -> dict:
+    """Seal an abandonment record for a pending root, or a finalized root whose journals show no start.
+
+    An abandoned root never runs and no longer has to be named as a prior root.
+    A finalized root needs its directory, so that its journals can show that no
+    attempt started. Consumed attempts are never abandoned.
+    """
+    if type(reason) is not str or not reason.strip() or len(reason) > 4000:
+        raise ValueError("an abandonment needs a reason of at most 4000 characters")
+    study_directory = Path(study_directory)
+    registry = study_directory / STUDY_REGISTRY
+    if not registry.is_dir():
+        raise ValueError("no root is registered in this study")
+    with ExitStack() as stack:
+        stack.enter_context(_exclusive(registry / REGISTRY_LOCK))
+        entry = next((entry for entry in registered_roots(study_directory) if entry["plan_hash"] == plan_hash), None)
+        if entry is None:
+            raise ValueError("no root with this plan hash is registered in the study")
+        if entry["state"] == "abandoned":
+            raise ValueError("this root is already abandoned")
+        root_checked = False
+        if root is not None:
+            root = Path(root)
+            if (root / LIVE_PLAN_FILE).exists():
+                plan = read_live_plan(root)
+                if plan["seal_hash"] != plan_hash:
+                    raise ValueError("the supplied root has another plan hash")
+                stack.enter_context(_exclusive(root / COORDINATOR_LOCK))  # a running root refuses
+                for lane in plan["lanes"]:
+                    stack.enter_context(_exclusive(safe_child(root, lane["path"]) / LOCK_FILE))
+                _, started = consumed_attempts_in_root(root, bundle=bundle)
+                if superseded_by(root, plan):
+                    raise ValueError("this root is already superseded by a later root")
+            else:
+                started = set(_journal_starts(root))
+            if started:
+                raise LivePhaseError(f"this root started attempts {sorted(started)[:5]}; consumed attempts are "
+                                     "never abandoned")
+            root_checked = True
+        elif entry["state"] == "finalized":
+            raise ValueError("abandoning a finalized root needs its directory, so its journals can show no start")
+        record = seal({"kind": ABANDONED_KIND, "plan_hash": plan_hash, "phase": entry["phase"],
+                       "revision": entry["revision"], "study_manifest_hash": entry["study_manifest_hash"],
+                       "prior_state": entry["state"], "root_journals_checked": root_checked,
+                       "consumed_attempt_ids": [], "reason": reason,
+                       "recorded_utc": datetime.now(timezone.utc).isoformat()})
+        (registry / ABANDONED_DIRECTORY).mkdir(exist_ok=True)
+        atomic_json(registry / ABANDONED_DIRECTORY / f"{plan_hash}.json", record)
+    return {"plan_hash": plan_hash, "phase": entry["phase"], "prior_state": entry["state"],
+            "abandonment_hash": record["seal_hash"], "root_journals_checked": root_checked, "live_model_calls": 0}
+
+
+def validate_amendment(record: Any, manifest: dict) -> dict:
+    """Spec 10: a sealed, user-approved amendment of this study instance; the only action accepts failed smoke
+    attempts."""
+    check_seal(record)
+    if set(record) != AMENDMENT_FIELDS:
+        raise ValueError(f"an amendment must contain exactly {sorted(AMENDMENT_FIELDS)}")
+    if record["kind"] != AMENDMENT_KIND or record["protocol_id"] != PROTOCOL_ID:
+        raise ValueError("not a v1.1 amendment")
+    if record["study_manifest_hash"] != manifest["seal_hash"]:
+        raise ValueError("the amendment names another study seal")
+    if type(record["reason"]) is not str or not record["reason"].strip() or len(record["reason"]) > 4000:
+        raise ValueError("an amendment needs a reason of at most 4000 characters")
+    approval = record["approval"]
+    if (type(approval) is not dict or set(approval) != {"status", "text"} or approval["status"] != "approved"
+            or type(approval["text"]) is not str or not approval["text"].strip() or len(approval["text"]) > 20000):
+        raise ValueError("an amendment requires approved status and the user's explicit approval text")
+    if record["action"] != AMENDMENT_ACTION:
+        raise ValueError(f"the only amendment action is {AMENDMENT_ACTION}")
+    attempts = record["attempt_ids"]
+    smoke = {row["assignment_id"] + ATTEMPT_SUFFIX for row in manifest["assignments"] if row.get("split") == "smoke"}
+    if (type(attempts) is not list or not attempts or attempts != sorted(set(attempts))
+            or any(type(attempt) is not str or attempt not in smoke for attempt in attempts)):
+        raise ValueError("an amendment lists sorted, unique attempt IDs of this study's smoke rows")
+    parse_utc(record["recorded_utc"], "recorded_utc")
+    return deepcopy(record)
+
+
+def record_amendment(study_directory: Path, record: Any, *, smoke_roots: list[Path] | tuple,
+                     bundle: ProtocolBundle | None = None) -> dict:
+    """Retain an approved amendment in the study directory, the ledger of record. Recording twice is a no-op.
+
+    A retained amendment is never removed, so every attempt it lists must be a
+    consumed, failed attempt of one of ``smoke_roots``, each a smoke root
+    registered in this study directory.
+    """
+    study_directory = Path(study_directory)
+    record = validate_amendment(record, read_study_manifest(study_directory))
+    accepted: set[str] = set()
+    for root in smoke_roots:
+        if read_live_plan(root)["phase"] != "smoke":
+            raise ValueError(f"{root} is not a smoke root")
+        accepted |= set(amended_attempts(verify_live_root(root, bundle=bundle, study_directory=study_directory),
+                                         [record]))
+    missing = sorted(set(record["attempt_ids"]) - accepted)
+    if missing:
+        raise ValueError(f"amendment attempts {missing[:5]} are not failed attempts of the supplied smoke roots")
+    path = safe_child(study_directory, f"{AMENDMENT_DIRECTORY}/{record['seal_hash']}.json")
+    path.parent.mkdir(exist_ok=True)
+    if path.exists():
+        if read_sealed(path) != record:
+            raise EvidenceError("a retained amendment with this hash differs")
+    else:
+        atomic_json(path, record)
+    return {"amendment_hash": record["seal_hash"], "action": record["action"], "attempt_ids": record["attempt_ids"],
+            "live_model_calls": 0}
+
+
+def study_amendments(study_directory: Path) -> list[dict]:
+    """Every amendment retained in the study directory, validated against the study instance."""
+    directory = Path(study_directory) / AMENDMENT_DIRECTORY
+    if not directory.is_dir():
+        return []
+    manifest = read_study_manifest(study_directory)
+    records = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            record = validate_amendment(read_json(path), manifest)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise EvidenceError(f"retained amendment {path.name} is invalid: {error}") from error
+        if path.stem != record["seal_hash"]:
+            raise EvidenceError(f"retained amendment {path.name} is stored under another hash")
+        records.append(record)
+    return records
+
+
+def _row_valid(row: dict) -> bool:
+    return (row["status"] == "archived" and row["check_passed"] is True and row["usage_settlement"] in SETTLED_USAGE
+            and type(row["usage_total_tokens"]) is int)
+
+
+def amended_attempts(report: dict, amendments: list[dict]) -> dict[str, list[str]]:
+    """Attempts of a verified root that an amendment accepts, with the accepting amendment hashes.
+
+    Each accepted attempt of this root must be consumed and failed; an
+    amendment that names an unstarted or valid attempt of the root is refused.
+    """
+    named: dict[str, list[str]] = {}
+    for amendment in amendments:
+        for attempt_id in amendment["attempt_ids"]:
+            named.setdefault(attempt_id, []).append(amendment["seal_hash"])
+    rows = {row["attempt_id"]: row for lane in report["lanes"].values() for row in lane["entries"]}
+    accepted = {}
+    for attempt_id, hashes in sorted(named.items()):
+        row = rows.get(attempt_id)
+        if row is None:
+            continue  # an attempt of another root of this study
+        if row["status"] in UNSTARTED or _row_valid(row):
+            raise EvidenceError(f"amendment {sorted(hashes)} accepts {attempt_id}, which is not a failed attempt "
+                                "of this root")
+        accepted[attempt_id] = sorted(hashes)
+    return accepted
 
 
 def superseded_by(directory: Path, plan: dict) -> list[str]:
@@ -624,7 +919,8 @@ def consumed_attempts_in_root(directory: Path, *, bundle: ProtocolBundle | None 
 
 def prior_root_ledger(prior_roots: list[Path] | tuple, *, phase: str, source: dict, study_directory: Path,
                       bundle: ProtocolBundle | None = None) -> dict:
-    """The consumed-attempt ledger for a new root: every registered root of this study and phase must be named."""
+    """The consumed-attempt ledger for a new root: every root of this study and phase that is registered and not
+    abandoned must be named."""
     records, consumed_all, seen = [], set(), set()
     for root in prior_roots:
         plan, consumed = consumed_attempts_in_root(root, bundle=bundle)
@@ -636,10 +932,10 @@ def prior_root_ledger(prior_roots: list[Path] | tuple, *, phase: str, source: di
         records.append({"plan_hash": plan["seal_hash"], "revision": plan["revision"],
                         "consumed_attempt_ids": sorted(consumed)})
         consumed_all |= consumed
-    registered = {entry["plan_hash"] for entry in registered_roots(study_directory) if entry.get("phase") == phase}
+    registered = active_registered_roots(study_directory, phase)
     if registered != seen:
-        raise ValueError(f"name every {phase} root registered in this study as a prior root; missing "
-                         f"{sorted(registered - seen)}, unregistered {sorted(seen - registered)}")
+        raise ValueError(f"name every {phase} root registered in this study as a prior root, or abandon a pending "
+                         f"one; missing {sorted(registered - seen)}, unregistered {sorted(seen - registered)}")
     return {"policy": LEDGER_POLICY, "prior_roots": sorted(records, key=lambda record: record["plan_hash"]),
             "consumed_attempt_ids": sorted(consumed_all), "excluded_assignment_ids": []}
 
@@ -695,12 +991,16 @@ def verify_consumed_ledger(directory: Path, plan: dict, prior_roots: list[Path] 
 
 def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_directory: Path | None = None,
                       prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None) -> dict:
-    """Write a fresh sealed root. The top plan is written last, so it marks a complete root.
+    """Write a fresh sealed root.
 
-    A behavioral root is registered in its study. Under the study registry lock
-    and each prior root's coordinator and lane locks, the prior roots must still
-    show exactly the sealed consumed attempts. Each prior root then receives a
-    supersession marker, so it never runs again.
+    A behavioral root seals a random ``root_instance_nonce`` into its top plan,
+    so its plan hash is unique even when another root, for example one built
+    from a copied study, has the same inputs. It is registered in its study as
+    pending before anything is written, and finalized last; only a finalized root runs. Under the study
+    registry lock and each prior root's coordinator and lane locks, the prior
+    roots must still show exactly the sealed consumed attempts. Each prior root
+    then receives a supersession marker, so it never runs again. A crash leaves
+    a pending root, which blocks later builds of the phase until it is abandoned.
     """
     top, lane_plans, fixtures = plan
     directory = Path(directory)
@@ -717,7 +1017,7 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
             if read_study_manifest(study_directory)["seal_hash"] != top["source"]["study_manifest_hash"]:
                 raise EvidenceError("the study directory differs from the plan's sealed study manifest")
             (study_directory / STUDY_REGISTRY).mkdir(exist_ok=True)
-            stack.enter_context(_exclusive(study_directory / STUDY_REGISTRY / "registry.lock"))
+            stack.enter_context(_exclusive(study_directory / STUDY_REGISTRY / REGISTRY_LOCK))
             sealed = {record["plan_hash"]: record for record in ledger["prior_roots"]}
             for root in prior_roots:
                 root = Path(root)
@@ -735,10 +1035,24 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
             if set(supplied) != set(sealed):
                 raise ValueError("supply every prior root sealed in this plan; missing "
                                  f"{sorted(set(sealed) - set(supplied))}")
-            registered = {entry["plan_hash"] for entry in registered_roots(study_directory)
-                          if entry.get("phase") == top["phase"]}
-            if registered != set(sealed):
+            if active_registered_roots(study_directory, top["phase"]) != set(sealed):
                 raise LivePhaseError("the study registered another root of this phase after this plan was built")
+        if ledger is not None:
+            # Two roots prepared from the same inputs, e.g. in a copied study, never share a plan hash.
+            top = {**top, "root_instance_nonce": secrets.token_hex(16)}
+        sealed_top = seal(top)
+        if ledger is not None:
+            registration = safe_child(study_directory, f"{STUDY_REGISTRY}/{sealed_top['seal_hash']}.json")
+            if registration.exists():
+                raise LivePhaseError("a root with this plan hash is already registered in the study; build the plan "
+                                     "under a new revision")
+            if directory.exists():
+                raise FileExistsError(f"{directory} already exists")
+            # Pending first: a crash below leaves a registered root that blocks the phase until abandoned.
+            atomic_json(registration, seal({
+                "kind": REGISTRY_KIND, "plan_hash": sealed_top["seal_hash"], "phase": top["phase"],
+                "revision": top["revision"], "study_manifest_hash": top["source"]["study_manifest_hash"],
+                "prior_plan_hashes": sorted(supplied), "registered_as": "pending"}))
         directory.mkdir(parents=True, exist_ok=False)
         (directory / "fixtures").mkdir()
         for fixture_id, fixture in fixtures.items():
@@ -746,7 +1060,7 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
         for lane in top["lanes"]:
             if create_lane_phase(safe_child(directory, lane["path"]), lane_plans[lane["lane_id"]]) != lane["plan_hash"]:
                 raise EvidenceError(f"lane {lane['lane_id']} sealed under another hash")
-        sealed_top = seal(top)
+        atomic_json(directory / LIVE_PLAN_FILE, sealed_top)
         if ledger is not None:
             for identity, root in supplied.items():
                 (root / SUPERSEDED_DIRECTORY).mkdir(exist_ok=True)
@@ -754,11 +1068,11 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
                     "kind": SUPERSEDED_KIND, "superseded_plan_hash": identity,
                     "superseding_plan_hash": sealed_top["seal_hash"], "phase": top["phase"],
                     "superseding_revision": top["revision"]}))
-            atomic_json(safe_child(study_directory, f"{STUDY_REGISTRY}/{sealed_top['seal_hash']}.json"), seal({
-                "kind": REGISTRY_KIND, "plan_hash": sealed_top["seal_hash"], "phase": top["phase"],
-                "revision": top["revision"], "study_manifest_hash": top["source"]["study_manifest_hash"],
-                "prior_plan_hashes": sorted(supplied)}))
-        atomic_json(directory / LIVE_PLAN_FILE, sealed_top)
+            (study_directory / STUDY_REGISTRY / FINALIZED_DIRECTORY).mkdir(exist_ok=True)
+            atomic_json(safe_child(study_directory, f"{STUDY_REGISTRY}/{FINALIZED_DIRECTORY}/"
+                                                    f"{sealed_top['seal_hash']}.json"), seal({
+                "kind": FINALIZED_KIND, "plan_hash": sealed_top["seal_hash"], "phase": top["phase"],
+                "live_plan_hash": sealed_top["seal_hash"], "superseded_plan_hashes": sorted(supplied)}))
     return {"directory": str(directory), "phase": top["phase"], "plan_hash": sealed_top["seal_hash"],
             "caps_hash": top["caps_hash"], "maximum_live_calls": top["maximum_live_calls"],
             "calls_by_lane": top["calls_by_lane"], "live_model_calls": 0, "prior_roots": len(supplied),
@@ -808,17 +1122,28 @@ def _verify_authorizations(directory: Path, plan: dict, reports: dict) -> list[s
 
 
 def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
-                     prior_roots: list[Path] | tuple | None = None) -> dict:
+                     prior_roots: list[Path] | tuple | None = None, study_directory: Path | None = None) -> dict:
     """Verify a sealed root and every lane's retained evidence without writing anything.
 
-    With ``prior_roots`` (a list, possibly empty) the consumed-attempt ledger is
+    A behavioral root needs ``study_directory``, the study directory in which it
+    is registered (spec 10); its registration state is reported. With
+    ``prior_roots`` (a list, possibly empty) the consumed-attempt ledger is
     rechecked against the prior roots; with ``None`` only the plan's own entries
     are checked against the sealed ledger. Changed sealed files are reported in
-    ``implementation_changes``; supersession markers in ``superseded_by``.
+    ``implementation_changes``; supersession markers in ``superseded_by``, and
+    those of roots that are not abandoned in ``superseded_by_active``.
     """
     bundle = bundle or load_bundle()
     directory = Path(directory)
     plan = read_live_plan(directory)
+    if plan.get("consumed_attempts") is None:
+        if study_directory is not None:
+            raise ValueError("compatibility roots have no study registration")
+        registration, abandoned = None, set()
+    else:
+        registration = root_registration(study_directory, plan, require_finalized=False)
+        abandoned = {entry["plan_hash"] for entry in registered_roots(study_directory)
+                     if entry["state"] == "abandoned"}
     templates: dict[str, dict] = {}
     for fixture_id in plan["fixtures"]:
         fixture = read_root_fixture(directory, plan, fixture_id)
@@ -868,7 +1193,9 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
         "authorization_hashes": _verify_authorizations(directory, plan, reports),
         "implementation_changes": implementation_changes(plan["implementation_hashes"]),
         "superseded_by": superseded_by(directory, plan),
+        "superseded_by_active": [value for value in superseded_by(directory, plan) if value not in abandoned],
         "consumed_attempt_ledger": ledger_report,
+        "study_registration": registration,
     }
 
 
@@ -916,38 +1243,53 @@ def compatibility_evidence(directories: list[Path] | tuple, *, bundle: ProtocolB
 
 
 def smoke_evidence(directory: Path, *, bundle: ProtocolBundle, source: dict,
-                   smoke_assignment_ids: list[str] | tuple = ()) -> tuple[dict | None, list[str]]:
-    """Spec 10: one smoke root whose entries equal the study's smoke rows, every attempt archived and passed.
+                   smoke_assignment_ids: list[str] | tuple = (), study_directory: Path | None = None
+                   ) -> tuple[dict | None, list[str]]:
+    """Spec 10: one finalized smoke root registered in this study directory, whose entries equal the study's smoke
+    rows, every attempt archived and passed, or accepted by an approved amendment.
 
-    An attempt settled ``bounded_by_reservation`` after a clean close counts as valid.
+    An attempt settled ``bounded_by_reservation`` after a clean close counts as
+    valid. An accepted failed attempt stays consumed and is excluded from analysis.
     """
     try:
-        report = verify_live_root(directory, bundle=bundle)
         plan = read_live_plan(directory)
+        if plan["phase"] != "smoke" or plan["source"] != source:
+            return None, ["smoke: smoke evidence belongs to another phase or study"]
+        report = verify_live_root(directory, bundle=bundle, study_directory=study_directory)
+        if report["study_registration"]["state"] != "finalized":
+            return None, [f"smoke: the smoke root's study registration is {report['study_registration']['state']}"]
+        accepted = amended_attempts(report, study_amendments(study_directory))
     except (OSError, ValueError, KeyError) as error:
         return None, [f"smoke: {error}"]
-    if plan["phase"] != "smoke" or plan["source"] != source:
-        return None, ["smoke: smoke evidence belongs to another phase or study"]
     rows = [row for lane in report["lanes"].values() for row in lane["entries"]]
     if sorted(row["entry_id"] for row in rows) != sorted(smoke_assignment_ids):
         return None, ["smoke: the smoke root's entries differ from the study's smoke rows"]
-    valid = [row for row in rows if row["status"] == "archived" and row["check_passed"] is True
-             and row["usage_settlement"] in SETTLED_USAGE and type(row["usage_total_tokens"]) is int]
-    if report["unreconciled_starts"] or len(valid) != plan["maximum_live_calls"]:
-        return None, [f"smoke: {len(valid)} of {plan['maximum_live_calls']} smoke records are valid"]
+    valid = [row for row in rows if _row_valid(row)]
+    if report["unreconciled_starts"] or len(valid) + len(accepted) != plan["maximum_live_calls"]:
+        return None, [f"smoke: {len(valid)} of {plan['maximum_live_calls']} smoke records are valid and "
+                      f"{len(accepted)} failed records are accepted by an amendment"]
     hashes = {}
     for lane in plan["lanes"]:
         for row in report["lanes"][lane["lane_id"]]["entries"]:
+            if row["status"] != "archived":
+                continue
             payload = _plain(read_sealed(safe_child(Path(directory), f"{lane['path']}/attempts/{row['attempt_id']}"
                                                                      "/attempt.json")))
             hashes[row["attempt_id"]] = content_hash(payload)
-    return {"smoke_plan_hash": plan["seal_hash"], "attempt_hashes": hashes}, []
+    return {"smoke_plan_hash": plan["seal_hash"], "attempt_hashes": hashes,
+            "accepted_failed_attempts": accepted}, []
 
 
 def check_phase_gates(phase: str, lanes: list[str], *, bundle: ProtocolBundle, source: dict,
                       compatibility_directories: list[Path] | tuple = (),
-                      smoke_directory: Path | None = None, smoke_assignment_ids: list[str] | tuple = ()) -> dict:
-    """Evaluate a phase's prerequisites from retained evidence. Nothing is written."""
+                      smoke_directory: Path | None = None, smoke_assignment_ids: list[str] | tuple = (),
+                      study_directory: Path | None = None) -> dict:
+    """Evaluate a phase's prerequisites from retained evidence. Nothing is written.
+
+    Smoke evidence counts only from a root registered in ``study_directory``, the
+    collection plan's own study directory. Compatibility roots precede the study
+    and are engineering checks, so they carry no study registration.
+    """
     validate_phase(phase)
     if phase == "compatibility":
         return {"passed": True, "failures": [], "evidence": {}}
@@ -963,7 +1305,8 @@ def check_phase_gates(phase: str, lanes: list[str], *, bundle: ProtocolBundle, s
             evidence["smoke"] = None
         else:
             smoke, smoke_failures = smoke_evidence(smoke_directory, bundle=bundle, source=source,
-                                                   smoke_assignment_ids=smoke_assignment_ids)
+                                                   smoke_assignment_ids=smoke_assignment_ids,
+                                                   study_directory=study_directory)
             failures += smoke_failures
             evidence["smoke"] = smoke
     return {"passed": not failures, "failures": failures, "evidence": evidence}
@@ -1009,7 +1352,7 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
     needed = sorted({lane_id(row["model"], row["effort"]) for row in rows})
     gates = check_phase_gates(phase, needed, bundle=bundle, source=source,
                               compatibility_directories=compatibility_directories, smoke_directory=smoke_directory,
-                              smoke_assignment_ids=smoke_ids or ())
+                              smoke_assignment_ids=smoke_ids or (), study_directory=study_directory)
     if not gates["passed"]:
         raise GateError(gates["failures"])
     return build_assignment_plan(phase, rows, fixtures, caps_record, revision=revision, source=source,
@@ -1040,17 +1383,21 @@ async def run_live_phase(
     observer: Callable[..., Awaitable[dict]] | None = None, clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Any] = asyncio.sleep, ledger_clock: Callable[[], float] = time.time,
     wall_clock: Callable[[], float] = time.time, poll_seconds: float = 1.0, stop_file: Path | None = None,
-    prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None,
+    hard_stop_file: Path | None = None, prior_roots: list[Path] | tuple = (), study_directory: Path | None = None,
+    bundle: ProtocolBundle | None = None,
 ) -> dict:
     """Run, or resume, every lane of a sealed phase under one user authorization.
 
     Every refusal before the lanes start makes no model call: changed sealed
-    files, a superseded root, a broken consumed-attempt ledger (pass the prior
-    roots sealed in the plan), failed gates, or changed tools. Once started, one
-    global dispatcher admits work in planned order. Any failed execution check or
-    unsettled usage holds all new admission; active attempts finish within their
-    caps. Both ``root/STOP`` and ``stop_file`` stop the run. The status is
-    ``held`` or ``complete``.
+    files, a behavioral root that is not finalized in ``study_directory``, a
+    superseded root, a broken consumed-attempt ledger (pass the prior roots
+    sealed in the plan), failed gates, or changed tools. Once started, one global
+    dispatcher admits work in planned order under the round barrier. Any failed
+    execution check or unsettled usage holds all new admission; active attempts
+    finish within their caps. ``root/STOP`` and ``stop_file`` are soft stops.
+    ``root/HARD_STOP``, ``hard_stop_file``, and the forced-stop deadline also
+    truncate active attempts. In a smoke root, failed attempts accepted by an
+    amendment retained in the study no longer hold. The status is ``held`` or ``complete``.
     """
     if not callable(runtime_factory):
         raise ValueError("an explicit runtime factory is required; use reviewed_runtime_factory for live calls")
@@ -1061,20 +1408,28 @@ async def run_live_phase(
     if content_hash(record) != plan["caps_hash"] or record != plan["caps"]:
         raise LivePhaseError("supplied caps differ from the sealed live plan; no model session was created")
     approval = validate_authorization(authorization, plan)
+    behavioral = plan.get("consumed_attempts") is not None
     with _exclusive(directory / COORDINATOR_LOCK):
         changes = implementation_changes(plan["implementation_hashes"], execution_only=True)
         if changes:
             raise LivePhaseError(f"code, catalog, schema, template, or protocol files changed after sealing: "
                                  f"{changes}; a change requires a new plan revision")
-        verification = verify_live_root(directory, bundle=bundle, prior_roots=prior_roots)
-        if verification["superseded_by"]:
-            raise LivePhaseError(f"this root was superseded by {verification['superseded_by']} and never runs again")
+        if behavioral:
+            root_registration(study_directory, plan, require_finalized=True)
+        verification = verify_live_root(directory, bundle=bundle, prior_roots=prior_roots,
+                                        study_directory=study_directory)
+        if verification["superseded_by_active"]:
+            raise LivePhaseError(f"this root was superseded by {verification['superseded_by_active']} and never "
+                                 "runs again")
+        accepted = (amended_attempts(verification, study_amendments(study_directory))
+                    if plan["phase"] == "smoke" else {})
         _require_current_bindings(plan, bundle)
         lanes_needed = [lane["lane_id"] for lane in plan["lanes"]]
         gates = check_phase_gates(plan["phase"], lanes_needed, bundle=bundle, source=plan["source"],
                                   compatibility_directories=compatibility_directories,
                                   smoke_directory=smoke_directory,
-                                  smoke_assignment_ids=plan.get("smoke_assignment_ids") or ())
+                                  smoke_assignment_ids=plan.get("smoke_assignment_ids") or (),
+                                  study_directory=study_directory)
         if not gates["passed"]:
             raise GateError(gates["failures"])
         if gates["evidence"] != plan["gate_evidence"]:
@@ -1083,17 +1438,19 @@ async def run_live_phase(
         slots = GlobalSlots(plan["global_max_concurrency"])
         status: dict[str, Any] = {"plan_hash": plan["seal_hash"], "phase": plan["phase"],
                                   "authorization_hash": authorization_hash, "status": "running", "holds": [],
-                                  "lanes": {}}
+                                  "lanes": {}, "accepted_failed_attempts": accepted}
 
         def save_status() -> None:
             status.update(holds=list(policy.holds), active_attempts=slots.active, peak_active_attempts=slots.peak,
                           admitted_slots=slots.admitted)
             atomic_json(directory / STATUS_FILE, status)
 
-        stop_files = [directory / "STOP"] + ([Path(stop_file)] if stop_file is not None else [])
+        stop_files = [directory / STOP_FILE] + ([Path(stop_file)] if stop_file is not None else [])
+        hard_stop_files = [directory / HARD_STOP_FILE] + ([Path(hard_stop_file)] if hard_stop_file is not None else [])
         policy = AdmissionPolicy(admission_cutoff=approval["admission_cutoff"],
                                  forced_stop_deadline=approval["forced_stop_deadline"], wall_clock=wall_clock,
-                                 stop_files=stop_files, on_change=save_status)
+                                 stop_files=stop_files, hard_stop_files=hard_stop_files, accepted_attempts=accepted,
+                                 on_change=save_status)
         for lane, report in verification["lanes"].items():
             policy.accept_lane_report(lane, report, retained=True)
         save_status()
@@ -1122,16 +1479,18 @@ async def run_live_phase(
                       observer=observer or live_runtime.run_live_observer, clock=clock, sleep=sleep,
                       ledger_clock=ledger_clock, poll_seconds=poll_seconds, admission_check=policy.admission_check,
                       hold=policy.hold, external_stop=external_stop, on_archived=on_archived,
-                      authorization_hash=authorization_hash)
+                      authorization_hash=authorization_hash, accepted_attempts=frozenset(accepted))
         specs = [LaneSpec(lane["lane_id"], safe_child(directory, lane["path"]), lane["plan_hash"],
                           binary_check(lane["model"], lane["reasoning_effort"])) for lane in plan["lanes"]]
 
         async def monitor() -> None:
             while not external_stop.is_set():
-                if policy.force_stop_due():
-                    policy.hold("parent_stop_or_forced_deadline")
+                forced = policy.force_stop_reason()
+                if forced is not None:  # a hard stop or the deadline truncates active attempts
+                    policy.hold(forced)
                     external_stop.set()
                     return
+                policy.admission_check()  # records a soft stop or the cutoff as soon as it appears
                 await sleep(poll_seconds)
 
         watcher = asyncio.create_task(monitor())
@@ -1153,7 +1512,7 @@ async def run_live_phase(
             await asyncio.gather(watcher, return_exceptions=True)
         for lane, report in outcome["lanes"].items():
             policy.accept_lane_report(lane, report)
-        final = verify_live_root(directory, bundle=bundle)
+        final = verify_live_root(directory, bundle=bundle, study_directory=study_directory)
         status.update(
             status="held" if policy.holds else "complete",
             lanes={lane["lane_id"]: {key: (outcome["lanes"].get(lane["lane_id"]) or {}).get(key)

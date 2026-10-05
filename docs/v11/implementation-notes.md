@@ -19,6 +19,9 @@ fixtures; L3 and L4 use WP5's first assigned calibration type.
 
 `collection.build_study` requires WP1's frozen caps record and writes a fresh
 directory containing 135 sealed fixture files and `collection-manifest.json`.
+Each build seals a fresh random `instance_nonce` into the manifest (W09 R2-M3),
+so a rebuild from the same inputs is a new study instance with another seal;
+`verify_study` recomputes the manifest under the recorded nonce.
 The manifest uses WP1's fixture path/content-hash index and assignment row
 fields. It archives the protocol, caps, tool manifest, prompt strings and hashes,
 and the deterministic order. Counts are collection 936, channel failure 72,
@@ -30,7 +33,8 @@ prompt, world mode, instruction hash, tool manifest hash, and entire caps hash.
 Each split groups rows by fixture, world mode, and effort. A group with `c`
 cells puts its seeded cell `i` in round `floor(i * R / c)`, where `R` is the
 largest group size in the split. A separate seeded hash orders entries within
-each round. `planned_order` starts at zero in every split.
+each round. `planned_order` starts at zero in every split. Every row also
+carries its spec 9 `round`, which the live dispatcher's round barrier reads.
 
 `collection.verify_study` rebuilds the complete manifest and fixtures, checks
 the seals, counts, identities, instructions and order, and runs WP5's real
@@ -129,12 +133,13 @@ A lane is one model at one effort. There are six lanes: every model at `xhigh`,
 then every model at `low`. Each lane is a P1-style sealed phase directory with
 its own plan, index, journal, budget ledger, and attempts. A lane runs its
 entries one at a time, in the global planned order. Its ledger has
-`max_concurrency` 1 and a token target of one reservation per planned trial, as
-in P1.
+`max_concurrency` 1 and a token target of one reservation per planned trial
+plus one reservation of headroom (W09 N-c; P1 had no headroom).
 
 The coordinator opens every lane under its own lock and admits work through one
 global dispatcher (spec 9, W09 M6). When a slot is free, the dispatcher starts
-the lowest unstarted `planned_order` whose lane is idle. Each attempt holds a
+the lowest unstarted `planned_order` whose lane is idle and that the round
+barrier allows (W09 R2-m4, below). Each attempt holds a
 global slot from preflight to archive. At most `global_max_concurrency` attempts
 hold a slot, and the caps record limits this to 6. With one slot the realized
 start order is the planned order; with more, a lane never runs ahead of a lower
@@ -144,24 +149,28 @@ and `planned_order`, and `status.json` keeps `realized_order`.
 The admission policy is that study's policy, amended by spec 10. These events
 hold all new admission for the rest of the run:
 
-- an archived attempt whose execution check failed;
+- an archived attempt whose execution check failed, unless its classification
+  is `stop_truncation` (W09 R2-M2) or an approved amendment accepts it;
 - an archived attempt whose usage settlement is not `settled` or
-  `bounded_by_reservation` (unknown usage after an unclean close, or a
-  settlement conflict, which is also recorded as an orchestrator failure);
+  `bounded_by_reservation` (unknown usage after an unclean close, usage never
+  observed, a notification without a total, or a settlement conflict, which is
+  also recorded as an orchestrator failure);
 - a halted lane, a lane error, a crashed lane, or a retained lane ledger stop on
   a lane that still has unstarted work;
-- the admission cutoff, the forced-stop deadline, `root/STOP`, or the
-  `--stop-file` (both are watched).
+- the admission cutoff, a soft stop (`root/STOP`, `--stop-file`), a hard stop
+  (`root/HARD_STOP`, `--hard-stop-file`), or the forced-stop deadline. All four
+  stop files are watched.
 
 The lane checks the hold before preflight and again after preflight, with no
 `await` before the durable `attempt_started` record. After an observer returns,
 nothing awaits until the attempt is settled, evaluated, archived, and its holds
 are set. A provisional hold is set from the observer result before the archive
-(W09 m1). Active attempts finish within their own caps. At the forced-stop
-deadline or on a stop file, the coordinator sets a stop event, and each active
-attempt is truncated and drained. A failed archived attempt also holds every
-later run of the same plan. WP1 has no usage reconciliation command and no
-admission amendment.
+(W09 m1). Active attempts finish within their own caps, including after a
+soft stop. On a hard stop or at the forced-stop deadline, the coordinator sets a
+stop event, and each active attempt is truncated and drained. A failed archived
+attempt also holds every later run of the same plan unless an approved
+amendment accepts it (W09 R2-M3, below). There is no usage reconciliation
+command.
 
 Each assignment has one attempt ID, `<assignment_id>-live-1`. A start consumes
 it. A crash leaves the attempt consumed and reconciled as incomplete, and it never
@@ -202,9 +211,10 @@ compatibility directories in the same order.
 
 A consequence of the consumed-attempt ledger: a second smoke root can only
 satisfy the collection gate if the first one consumed no smoke row. A smoke root
-interrupted by the cutoff or a stop file is resumed under a new authorization of
-the same plan instead. A failed smoke attempt can never be replaced, so the
-collection gate then fails for that study.
+interrupted by the cutoff, a soft stop, or a hard stop is resumed under a new
+authorization of the same plan instead. A failed smoke attempt, including one
+truncated by a hard stop, can never be replaced; the collection gate fails for
+that study until the user approves an amendment that accepts it (W09 R2-M3).
 
 ### W09 live-layer rules (spec revision 2, section 10)
 
@@ -225,18 +235,19 @@ and the excluded assignment IDs). A plan whose attempt IDs overlap the ledger is
 refused. `prepare_live_root` then takes the study registry lock and each prior
 root's coordinator and lane locks, refuses if a prior root is running or started
 attempts since the build, and writes `superseded/<new_plan_hash>.json` into each
-prior root. A superseded root never runs again. `run`, `verify --prior-root`, and
+prior root. A superseded root never runs again, unless every root that
+superseded it was abandoned. `run`, `verify --prior-root`, and
 `export-review --prior-root` recheck the ledger: exactly the sealed prior roots,
 each still showing exactly its sealed starts and carrying the marker, and no
-planned attempt among the consumed ones. An interrupted `prepare` can leave a
-registered root without a top plan; recovering from that is an explicit manual
-step. Compatibility roots have no ledger.
+planned attempt among the consumed ones. An interrupted `prepare` leaves a
+pending registration, which is abandoned explicitly (W09 R2-m2, below).
+Compatibility roots have no ledger.
 
-Unknown final usage (M1, m2). When an attempt's usage total is unknown but the
-world closed and the runtime shut down cleanly (no observer error, no
+Unknown final usage (M1, m2, R2-M1). When an attempt's usage total is unknown
+but the world closed and the runtime shut down cleanly (no observer error, no
 orchestrator or infrastructure failure, runtime closed, queue reconciled, world
-checkpoint present), the reservation settles at the larger of the observed usage
-and the ledger reservation. The settlement is labeled `bounded_by_reservation`
+checkpoint present), and usage was observed during the attempt, the reservation
+settles at the larger of the observed usage and the ledger reservation. The settlement is labeled `bounded_by_reservation`
 in the payload, the archive summary, the journal (`usage_settled` keeps
 `status: "settled"` for the ledger-history check and adds `usage_settlement`),
 and the export (`usage.settlement`). The transport check keeps
@@ -258,6 +269,124 @@ The fake world records `world_mode` like the real `V11World`.
 Run start (m3). Before any dispatch, every lane with unstarted work checks its
 environment and refreshes its ledger; a stopped ledger halts the lane and holds
 every lane.
+
+### W09 round 2 (spec revision 2, sections 9 and 10)
+
+Observed usage (R2-M1). The bounded settlement now also needs usage observed
+during the attempt: the adapter's `usage.observed_total_tokens` is an integer,
+the orchestrator persisted at least one usage notification with a total, and no
+notification lacked a total except the adapter's closing one (`source:
+"final"`), which it sends whenever the final total is unknown. Otherwise the
+reservation settles `unresolved` with `reason` `usage_never_observed` or
+`usage_notification_without_total`, and every new admission holds. An unclean
+close settles `unresolved` with `reason: "unclean_close"`. The adapter is
+unchanged; the orchestrator counts notifications in its usage callback
+(`phase.usage_unobserved`). The limit-hit trials of the M1 test observe usage
+first, so they still settle as bounded. A hard stop that lands before the first
+usage notification therefore still holds, through unresolved usage.
+
+Stops (R2-M2). `root/STOP` and `--stop-file` are soft stops: the policy holds
+`soft_stop`, nothing new is admitted, and active attempts finish within their
+caps. `root/HARD_STOP` and `--hard-stop-file` hold `hard_stop` and, like the
+forced-stop deadline (`forced_stop_deadline`), set the coordinator's stop event,
+so each active attempt records the collection stop reason
+`hard_stop_or_forced_deadline` and is truncated. Its transport check fails the
+close rules, so it is consumed and behaviorally ineligible, but the evaluator
+classifies it `stop_truncation` when the truncation was the only stop reason
+and the configuration and clean-close checks passed. `attempt_hold_kinds` does
+not count a `stop_truncation` as an execution failure, during the run or in
+later runs; its usage settlement still applies. Compatibility probes get the
+same classification. A truncated smoke attempt is not valid smoke evidence, so
+the collection gate needs an amendment for it.
+
+Lane walls (R2-M2). The lane budget ledger's clock is a `LaneClock`: lane time
+already spent plus the real time since this run opened the lane. The time
+already spent is the largest of the `lane_clock_seconds` journaled by
+`run_opened`, `attempt_started`, and `run_closed`, and the ledger's own
+timestamps. The P1 ledger measures its wall from the first reservation, so a
+lane's wall now counts open-run time after its first reservation, summed across
+runs; a pause between runs costs nothing. A crash loses at most the lane time
+since the last journaled value. Older ledgers keep their epoch-based timestamps
+and simply continue from them.
+
+Study instance and registration (R2-M3). `build-study` seals `instance_nonce`.
+Building, running, verifying, and exporting a behavioral root need the study
+directory in which the root is registered (`--study`; `run_live_phase`,
+`verify_live_root`, and `export_live_review` take `study_directory`), and refuse
+otherwise: the study's manifest seal must equal the root's sealed source, and
+the study's registry must hold the root's plan hash. A run needs a finalized
+registration. `prepare_live_root` seals a random `root_instance_nonce` into
+every behavioral top plan. Without it, a root built from a copied study with the
+same inputs had the same plan hash as the original root and passed the original
+study's registration check; with it, no two prepared roots share a plan hash.
+The smoke gate (`smoke_evidence`, `check_phase_gates`) verifies the smoke root
+against the collection plan's own study directory and needs a finalized
+registration there. Compatibility roots precede the study and stay unregistered;
+the compatibility gate is an engineering check of the tools, catalogs, client,
+and adapter. Exports carry `study_registration` and `study_registry` (the
+registry listing with each root's state, and the study's amendments). A local
+file system cannot stop a deliberate copy of the study together with its
+registry and roots; the study directory is the ledger of record and must be
+moved, never copied.
+
+Amendments (R2-M3, spec 10). `record_amendment(study, record, smoke_roots=...)`
+validates a sealed `peer_reporting_v11_amendment` (exact fields `kind`,
+`protocol_id`, `study_manifest_hash`, `reason`, `approval` `{status: "approved",
+text}`, `action: "accept_failed_smoke_attempts"`, sorted unique `attempt_ids` of
+the study's smoke rows, `recorded_utc`) and requires every listed attempt to be a
+consumed, failed attempt of a supplied smoke root registered in the study. A
+retained amendment is never removed, so this is checked before it is written to
+`amendments/<seal_hash>.json`. The CLI flag `--amendment` (repeatable, on
+`build` and the live commands) records amendments first, against the smoke
+command's root or the `--smoke` root. A smoke run treats the accepted attempts,
+and their unresolved reservations, as resolved: they stay consumed and charged
+and are never rerun, but they no longer hold, so the smoke root can resume and
+finish its other rows. The collection gate counts them as resolved and seals
+them in `gate_evidence.smoke.accepted_failed_attempts`. An export of the smoke
+root marks them `excluded_from_analysis` (and not `eligible`) and lists them in
+`analysis_exclusions`. An amendment that names a valid or unstarted attempt of a
+root is refused wherever it is used. Rebuilding the study is not an amendment.
+
+Pending registration and abandonment (R2-m2). `prepare_live_root` writes the
+registration (`registered_as: "pending"`) first, then the fixtures, lanes, and
+top plan, then the supersession markers, and last
+`live-roots/finalized/<hash>.json`. A crash leaves a pending root, which still
+blocks later builds of the phase. `abandon_root` (CLI `abandon-root STUDY
+--plan-hash H [--root DIR] --reason TEXT`) seals
+`live-roots/abandoned/<hash>.json` for a pending root, or for a finalized root
+whose journals show no start (its directory is required, and its coordinator
+and lane locks are taken). A started or superseded root is never abandoned. An
+abandoned root never runs and no longer has to be named as a prior root; a
+plan hash that is registered once is never registered again. Supersession
+markers written by an abandoned root no longer stop the prior root.
+
+Round barrier (R2-m4). Every lane entry carries its `round` (compatibility
+entries use round 0). `next_dispatch` skips an item of round `r` when another
+lane of the same effort still has an unstarted item of round `r - 2` or
+earlier, so each round's slack is two rounds, as spec 9 states; the lane with
+the lowest unstarted round is never blocked, so the barrier cannot deadlock,
+and a run never ends `complete` with unstarted work (`dispatch_blocked`). In the
+reviewer's speed simulation over the real collection order (luna twice and sol
+1.5 times as fast as astra, low effort twice as fast as xhigh, six slots), the
+xhigh started counts when astra has finished 25% of its rows are 168, 126, and
+84 without the barrier and 136, 126, and 84 with it; at 60% they are 336, 304,
+and 202 without and 260, 252, and 202 with it. The barrier caps the gap at about
+two rounds (37 rows per lane and round) instead of letting it grow, and at most
+one violation and twin pair per lane is open at a stop.
+
+Resource labels (N-a, N-c). `lane_report.resource_observations` carry
+`usage_settlement`, and the lane `ledger` summary adds
+`settled_tokens_by_usage_settlement` (`settled` and `bounded_by_reservation`).
+The resource-proposal tool (N11, still pending) must ignore bounded totals.
+`lanes.lane_caps` sets each lane's token target to one reservation more than its
+planned reservations, and `validate_lane_plan` refuses a lane plan without that
+headroom. The test caps record needed no change.
+
+Unchanged bindings. `LIVE_VERSION`, `ADAPTER_VERSION`, the tools, catalogs,
+client, and `live_runtime.py` are unchanged, so compatibility roots built before
+this round still verify and still serve as gate evidence. Calibration, smoke,
+and collection roots, and the study itself, must be rebuilt: studies now need
+`instance_nonce` and row `round`, and plans carry the new execution policy.
 
 ### Compatibility probe
 
@@ -350,4 +479,9 @@ smoke-v1/smoke-v2 consumed-attempt scenario, token-stop, tool-cap, wall-limit,
 and overshoot trials settled at the reservation bound, the provisional hold race,
 dispatch order, study binding against the real study, settlement conflicts,
 retained ledger stops, the freeze, world-mode binding, authorization hashes, and
-both stop files.
+all four stop files. `test_live_r2.py` covers the round-2 findings: the
+reviewer's usage-without-total smoke run, soft and hard stops mid-attempt with
+their resumes, a resume after a ten-hour pause, the copied-study and rebuilt-study
+scenarios, the amendment path, a crash between registration and plan write,
+abandonment, the round barrier in the reviewer's speed simulation and in a live
+fake run, bounded-settlement labels, lane token headroom, and the new CLI flags.

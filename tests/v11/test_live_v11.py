@@ -123,7 +123,8 @@ async def test_global_concurrency_limit_bounds_active_attempts(tmp_path):
     assert tracker.peak == 2 and status["peak_active_attempts"] == 2
 
 
-async def test_unknown_final_usage_after_a_clean_close_settles_at_the_reservation_and_holds_nothing(tmp_path):
+async def test_usage_never_observed_is_unresolved_and_holds_even_after_a_clean_close(tmp_path):
+    # W09 R2-M1: without any observed usage the token stop was blind, so the reservation is no bound.
     root, plan = compat_root(tmp_path / "compat", caps=caps_record(global_max_concurrency=1))
     sample = compat_fixture(root, plan)
 
@@ -132,19 +133,20 @@ async def test_unknown_final_usage_after_a_clean_close_settles_at_the_reservatio
 
     harness = Harness(tmp_path / "homes", script)
     status = await run(root, plan, harness)
-    assert len(harness.created) == 6 and status["status"] == "complete" and status["holds"] == []
-    assert "gpt-6-luna-xhigh" not in status["qualified_lanes"] and len(status["qualified_lanes"]) == 5
+    attempt = "compat-v1-gpt-6-luna-xhigh-live-1"
+    assert len(harness.created) == 1 and status["status"] == "held"
+    assert f"unknown_final_usage:{attempt}" in status["holds"]
     lane_dir = root / "lanes" / "gpt-6-luna-xhigh"
     payload = read_sealed(next((lane_dir / "attempts").iterdir()) / "attempt.json")
-    assert payload["orchestrator"]["usage_settlement"] == {
-        "status": "bounded_by_reservation", "actual_tokens": 75000, "observed_tokens": 0, "reservation_tokens": 75000}
-    assert payload["check"]["classification"] == "usage_unavailable" and payload["check"]["failure_reasons"] == [
-        "usage_known"]
+    assert payload["observer_result"]["termination_kind"] == "natural_end"
+    assert payload["orchestrator"]["usage_settlement"] == {"status": "unresolved", "actual_tokens": None,
+                                                           "reason": "usage_never_observed"}
     (settled,) = [record["data"] for record in journal(lane_dir) if record["kind"] == "usage_settled"]
-    assert settled["status"] == "settled" and settled["usage_settlement"] == "bounded_by_reservation"
+    assert settled["status"] == "unresolved" and settled["usage_settlement"] == "unresolved"
     again = Harness(tmp_path / "homes-2", script)
     status = await run(root, plan, again)
-    assert again.created == [] and status["status"] == "complete" and status["holds"] == []
+    assert again.created == [] and status["status"] == "held"
+    assert f"retained_failed_or_unknown_attempt:{attempt}" in status["holds"]
 
 
 async def test_unknown_final_usage_after_an_unclean_close_holds_all_new_admission_and_every_later_run(tmp_path):
@@ -200,11 +202,11 @@ async def test_admission_cutoff_and_parent_stop_file_admit_nothing(tmp_path):
     other, other_plan = compat_root(tmp_path / "compat-2")
     (other / "STOP").touch()
     status = await run(other, other_plan, harness)
-    assert harness.created == [] and status["holds"] == ["parent_stop_or_forced_deadline"]
+    assert harness.created == [] and status["holds"] == ["soft_stop"]
     assert status["live_model_call_starts"] == 0
 
 
-async def test_forced_stop_deadline_truncates_the_active_attempt_and_holds(tmp_path):
+async def test_forced_stop_deadline_truncates_the_active_attempt_and_stops_admission(tmp_path):
     root, plan = compat_root(tmp_path / "compat", caps=caps_record(global_max_concurrency=1))
     sample = compat_fixture(root, plan)
     now = [time.time()]
@@ -219,11 +221,15 @@ async def test_forced_stop_deadline_truncates_the_active_attempt_and_holds(tmp_p
     harness = Harness(tmp_path / "homes", script)
     status = await run(root, plan, harness, wall_clock=lambda: now[0])
     assert len(harness.created) == 1 and "turn/interrupt" in harness.created[0].methods
-    assert "parent_stop_or_forced_deadline" in status["holds"] and status["status"] == "held"
+    assert "forced_stop_deadline" in status["holds"] and status["status"] == "held"
     lane_dir = root / "lanes" / "gpt-6-luna-xhigh"
     payload = read_sealed(next((lane_dir / "attempts").iterdir()) / "attempt.json")
     assert payload["observer_result"]["termination_kind"] == "collection_forced_truncation"
-    assert payload["orchestrator"]["collection_stop_reasons"] == ["parent_stop_or_forced_deadline"]
+    assert payload["orchestrator"]["collection_stop_reasons"] == ["hard_stop_or_forced_deadline"]
+    assert payload["check"]["classification"] == "stop_truncation" and payload["check"]["passed"] is False
+    # No usage was observed before the truncation, so usage is unresolved and still holds (R2-M1).
+    assert "unknown_final_usage:compat-v1-gpt-6-luna-xhigh-live-1" in status["holds"]
+    assert "execution_check_failure:compat-v1-gpt-6-luna-xhigh-live-1" not in status["holds"]
 
 
 async def test_refusals_before_any_runtime_is_created(tmp_path):
@@ -363,7 +369,8 @@ async def test_collection_gate_requires_valid_smoke_evidence_from_the_same_study
     assert plan["gate_evidence"]["smoke"]["smoke_plan_hash"] == smoked["plan"]["seal_hash"]
     assert len(plan["gate_evidence"]["smoke"]["attempt_hashes"]) == 12 and plan["count_in_collection_denominator"]
     assert plan["smoke_assignment_ids"] == sorted(row["entry_id"] for lane in v11_live.verify_live_root(
-        smoked["root"], bundle=fake_bundle())["lanes"].values() for row in lane["entries"])
+        smoked["root"], bundle=fake_bundle(), study_directory=smoked["study"])["lanes"].values()
+        for row in lane["entries"])
     other_rows, other_fixtures = study_rows("collection", template_id="release-request", seed=1101)
     other = write_study(tmp_path / "other-study", other_rows, other_fixtures)
     with pytest.raises(v11_live.GateError, match="another phase or study"):
@@ -373,5 +380,7 @@ async def test_collection_gate_requires_valid_smoke_evidence_from_the_same_study
     sealed = v11_live.read_live_plan(root)
     harness = Harness(tmp_path / "homes", lambda model, effort: [])
     with pytest.raises(v11_live.GateError, match="smoke"):
-        await run(root, sealed, harness, compatibility_directories=[qualified[0]])
+        await run(root, sealed, harness, compatibility_directories=[qualified[0]], study_directory=smoked["study"])
+    with pytest.raises(v11_live.EvidenceError, match="study directory"):
+        await run(root, sealed, harness, compatibility_directories=[qualified[0]], smoke_directory=smoked["root"])
     assert harness.created == []

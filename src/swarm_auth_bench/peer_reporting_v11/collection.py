@@ -1,7 +1,15 @@
-"""Deterministic study expansion, paired round order, and sealed offline artifacts."""
+"""Deterministic study expansion, paired round order, and sealed offline artifacts.
+
+Each build seals a fresh random ``instance_nonce`` into the manifest (spec 10),
+so a rebuild is a different study instance with a different seal, even from the
+same inputs. Fixtures, assignment IDs, and the order stay deterministic.
+``verify_study`` recomputes everything from the inputs and the recorded nonce.
+"""
 
 from __future__ import annotations
 
+import re
+import secrets
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -18,6 +26,7 @@ from .prompts import build_instructions, prompt_manifest
 STUDY_MANIFEST = "collection-manifest.json"
 ORDER_VERSION = "peer-reporting-v11-paired-rounds-v3"
 ORDER_OFFSETS = ((0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0), (0, 2), (1, 0), (2, 1))
+INSTANCE_NONCE = re.compile(r"[0-9a-f]{32}")
 
 
 def assignment_identity(row: dict, *, protocol_id: str, tool_manifest_hash: str, caps_hash: str) -> str:
@@ -84,13 +93,17 @@ def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
                 for fixture_index, fixture_id in enumerate(block):
                     row = cells[arm, fixture_id, model, prompt, definition["effort"], definition["world_mode"]]
                     scheduled.append((round_index, arm_index, block_index, fixture_index, row))
-    ordered = [item[-1] for item in sorted(scheduled, key=lambda item: item[:-1])]
+    ordered = sorted(scheduled, key=lambda item: item[:-1])
     if len(ordered) != len(rows):
         raise ValueError("round order does not cover every assignment cell")
-    return [{**row, "planned_order": position} for position, row in enumerate(ordered)]
+    # The round is explicit so the live dispatcher can apply the spec 9 round barrier.
+    return [{**item[-1], "planned_order": position, "round": item[0]} for position, item in enumerate(ordered)]
 
 
-def _study(protocol: dict, templates: dict[str, dict], caps_record: dict) -> tuple[dict, dict]:
+def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, instance_nonce: str
+           ) -> tuple[dict, dict]:
+    if type(instance_nonce) is not str or not INSTANCE_NONCE.fullmatch(instance_nonce):
+        raise ValueError("the study instance nonce must be 32 lowercase hexadecimal characters")
     allocation = validate_protocol(protocol)
     caps = validate_caps_record(caps_record)
     ids = [template_id for split in SPLITS for template_id in protocol["templates"][split]]
@@ -141,7 +154,8 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict) -> tup
     if counts != allocation["counts"] or len({row["assignment_id"] for row in rows}) != len(rows):
         raise ValueError("expanded assignment counts or identities differ from the protocol")
     manifest = seal({
-        "kind": "peer_reporting_v11_study", "protocol_id": protocol["protocol_id"], "protocol": protocol,
+        "kind": "peer_reporting_v11_study", "protocol_id": protocol["protocol_id"], "instance_nonce": instance_nonce,
+        "protocol": protocol,
         "caps": caps, "caps_hash": caps_hash, "tool_manifest": tools, "tool_manifest_hash": tools_hash,
         "prompt_manifests": {template_id: prompt_manifest(templates[template_id], policy) for template_id in ids},
         "fixtures": {key: {"path": f"fixtures/{key}.json", "content_hash": content_hash(value)}
@@ -153,8 +167,12 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict) -> tup
 
 
 def build_study(directory: Path, *, protocol: dict, templates: dict[str, dict], caps_record: dict) -> dict:
-    """Write a fresh study with frozen caps. This operation never starts a model session."""
-    manifest, fixtures = _study(protocol, templates, caps_record)
+    """Write a fresh study instance with frozen caps. This operation never starts a model session.
+
+    The manifest seals a new random instance nonce, so every build is a new
+    study with its own consumed-attempt ledger and its own smoke.
+    """
+    manifest, fixtures = _study(protocol, templates, caps_record, instance_nonce=secrets.token_hex(16))
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
     (directory / "fixtures").mkdir()
@@ -162,20 +180,24 @@ def build_study(directory: Path, *, protocol: dict, templates: dict[str, dict], 
         atomic_json(directory / f"fixtures/{fixture_id}.json", seal(fixture))
     atomic_json(directory / STUDY_MANIFEST, manifest)
     return {"directory": str(directory), "seal_hash": manifest["seal_hash"], "plan_hash": manifest["seal_hash"],
-            "counts": manifest["counts"], "split_counts": manifest["split_counts"],
+            "instance_nonce": manifest["instance_nonce"], "counts": manifest["counts"],
+            "split_counts": manifest["split_counts"],
             "total_trials": manifest["total_trials"], "fixtures": len(fixtures), "live_model_calls": 0}
 
 
 def verify_study(directory: Path, *, protocol: dict, templates: dict[str, dict], caps_record: dict) -> dict:
-    """Recompute the Latin-square order and sealed inputs; independently verify fixtures."""
+    """Recompute the Latin-square order and sealed inputs under the recorded instance nonce; independently verify
+    fixtures."""
     directory, errors = Path(directory), []
     report = {"valid": False, "errors": errors, "counts": {}, "split_counts": {}, "total_trials": 0,
-              "fixtures": 0, "seal_hash": None, "live_model_calls": 0}
+              "fixtures": 0, "seal_hash": None, "instance_nonce": None, "live_model_calls": 0}
     try:
-        expected, expected_fixtures = _study(protocol, templates, caps_record)
         manifest = read_json(directory / STUDY_MANIFEST)
         if type(manifest) is not dict:
             raise ValueError("study manifest must be an object")
+        report["instance_nonce"] = manifest.get("instance_nonce")
+        expected, expected_fixtures = _study(protocol, templates, caps_record,
+                                             instance_nonce=manifest.get("instance_nonce"))
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
         errors.append(f"study inputs or manifest: {error}")
         return report
