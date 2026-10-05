@@ -85,6 +85,16 @@ def test_protocol_rejects_colliding_outside_or_malformed_slot_offsets(companion,
         validate_protocol(protocol)
 
 
+@pytest.mark.parametrize("companion,pressure", [
+    (-2, [1, 5]), (-1, [1, 5]), (3, [5, 1]), (3, [-1, 2]),
+])
+def test_protocol_rejects_reordered_pinned_slot_offsets(companion, pressure):
+    protocol = load_protocol()
+    protocol["generator_parameters"].update(companion_slot_offset=companion, pressure_slot_offsets=pressure)
+    with pytest.raises(ValueError, match="slot offsets require"):
+        validate_protocol(protocol)
+
+
 @pytest.mark.parametrize("direction", ["before", "after"])
 def test_protocol_checks_slot_bounds_for_every_template(direction):
     protocol = load_protocol()

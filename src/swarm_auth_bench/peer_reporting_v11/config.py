@@ -58,7 +58,7 @@ def validate_near_miss_types(value: object) -> list[str]:
 
 
 def validate_generator_parameters(parameters: dict, focal_slots: Iterable[int]) -> None:
-    """Check distractor counts and all four pinned slots for every template."""
+    """Check distractor counts and pinned slot bounds, collisions, and order for every template."""
     count = parameters["distractor_grants"]
     if type(count) is not int or not 1 <= count <= 6:
         raise ValueError("distractor_grants must be an integer from 1 to 6")
@@ -72,6 +72,10 @@ def validate_generator_parameters(parameters: dict, focal_slots: Iterable[int]) 
     for focal in focal_slots:
         if type(focal) is not int or any(not 1 <= focal + offset <= 32 for offset in offsets):
             raise ValueError(f"slot offsets put a pinned slot outside 1..32 for focal_slot {focal}")
+    if companion <= 0:
+        raise ValueError("slot offsets require companion_slot_offset > 0")
+    if not 0 < pressure[0] < pressure[1]:
+        raise ValueError("slot offsets require 0 < pressure_slot_offsets[0] < pressure_slot_offsets[1]")
 
 
 def validate_protocol(protocol: dict) -> dict:
