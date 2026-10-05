@@ -3,6 +3,50 @@
 Each work package records its decisions here. The specification is
 [spec.md](spec.md).
 
+## WP6: instructions, contract, sealed study, and W08
+
+`prompts.build_instructions` renders the section 6 condition text, appends P1's
+exact budget suffix, and then appends the discouraged paragraph when requested.
+WP1 passes the caps record's `trial` object. With no policy, the suffix is P1's
+unfrozen-candidate notice. Neither fixture labels nor execution labels enter
+the visible instructions.
+
+The packaged `protocol.json` is a byte-identical copy of the approved contract.
+`config.validate_protocol` expands the supported fixture descriptions and
+explicit smoke cells independently of the ladder, then checks each declared
+arm count and the total. Calibration's three L2 near-miss pairs count as six
+fixtures; L3 and L4 use WP5's first assigned calibration type.
+
+`collection.build_study` requires WP1's frozen caps record and writes a fresh
+directory containing 135 sealed fixture files and `collection-manifest.json`.
+The manifest uses WP1's fixture path/content-hash index and assignment row
+fields. It archives the protocol, caps, tool manifest, prompt strings and hashes,
+and the deterministic order. Counts are collection 936, channel failure 72,
+low effort 120, calibration 84, and smoke 12, totaling 1,224. The collection
+split includes all three collection arms, totaling 1,128 rows.
+
+Assignment IDs bind the protocol ID, arm, split, fixture ID, model, effort,
+prompt, world mode, instruction hash, tool manifest hash, and entire caps hash.
+Each split groups rows by fixture, world mode, and effort. A group with `c`
+cells puts its seeded cell `i` in round `floor(i * R / c)`, where `R` is the
+largest group size in the split. A separate seeded hash orders entries within
+each round. `planned_order` starts at zero in every split.
+
+`collection.verify_study` rebuilds the complete manifest and fixtures, checks
+the seals, counts, identities, instructions and order, and runs WP5's real
+template verifier on every retained fixture. Content problems return errors.
+The offline CLI commands are `build-study DIRECTORY --caps CAPS.json` and
+`verify-study DIRECTORY --caps CAPS.json`; failed verification exits with 2.
+
+`score_trial(..., allow_replay=True)` bypasses only the authored-offline-replay
+provenance block. Other eligibility and evidence checks still apply. Successful
+replay scores carry `replay_scored: true` and cannot resolve an assignment.
+Default scoring retains null replay endpoints. W08 builds the real study with
+test-only frozen caps and replays 15 selected rows covering all levels, ladder
+variants, controls, prompts, F mode and efforts, including registry retrieval
+at L3, deliberate companion false alarms, and failed-report public disclosure.
+No live command, model session, or production authorization is involved.
+
 ## WP1: live integration and offline replay
 
 ### Reuse approach

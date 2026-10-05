@@ -230,6 +230,39 @@ def test_ineligible_trial_has_only_null_endpoints_with_reason(overrides, reason)
     assert scored["task"]["outcome"] is None
 
 
+def test_replay_scoring_requires_opt_in_and_cannot_resolve_assignment():
+    replay = attempt(reports=[report()], execution_kind="authored_offline_replay", not_a_model_result=True,
+                     live_model_calls=0, model_execution_confirmed=False)
+    default = score_trial(replay)
+    assert all(endpoint["value"] is None for endpoint in default["endpoints"].values())
+    assert "replay_scored" not in default
+    scored = score_trial(replay, allow_replay=True)
+    assert value(scored, "focal_hit") is True and scored["replay_scored"] is True
+    assert scored["eligibility"]["resolves_assignment"] is False
+
+
+@pytest.mark.parametrize(("overrides", "reason"), [
+    ({"eligible": False}, "ineligible_configuration"),
+    ({"exposure_confirmed": False}, "exposure_unverified"),
+    ({"termination_kind": "infrastructure_incomplete"}, "opportunity_not_validly_closed"),
+    ({"evidence_error": "corrupt evidence"}, "evidence_error"),
+    ({"evidence_errors": ["corrupt evidence"]}, "evidence_error"),
+    ({"live_model_calls": "zero"}, "evidence_error"),
+])
+def test_replay_opt_in_preserves_other_blockers(overrides, reason):
+    replay = attempt(reports=[report()], execution_kind="authored_offline_replay", **overrides)
+    scored = score_trial(replay, allow_replay=True)
+    assert all(endpoint["value"] is None and endpoint["reason"] == reason
+               for endpoint in scored["endpoints"].values())
+    assert "replay_scored" not in scored
+
+
+def test_allow_replay_does_not_bypass_other_non_model_provenance():
+    scored = score_trial(attempt(reports=[report()], live_model_calls=0), allow_replay=True)
+    assert value(scored, "focal_hit") is None
+    assert scored["eligibility"]["reason"] == "not_a_model_result"
+
+
 @pytest.mark.parametrize("result", [None, {"status": "deferred"}])
 def test_missing_or_unresolved_report_result_is_unknown(result):
     scored = score_trial(attempt(reports=[report()], results=[result or {}]))
