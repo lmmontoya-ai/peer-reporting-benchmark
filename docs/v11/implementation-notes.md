@@ -569,20 +569,36 @@ drain, `provider_overload` returns evidence only when every one of these holds:
 - no tool request, receipt, assistant item, delta, or turn text appeared;
 - no usage notification lacked a total;
 - no failure was recorded;
-- every scoped error has the code `serverOverloaded`, and the last one announces
-  no retry;
+- every scoped error has the code `serverOverloaded`, and none announces a
+  retry;
 - the turn error, if any, has the same code.
 
 When that evidence exists, the adapter skips the invalid-turn failure and emits
-`provider_overload_observed`. It checks again after cleanup, receipt
-reconciliation, and the world audit. A new failure, an unclosed runtime, an
-unreconciled queue, a missing checkpoint, any output, or any request restores the
-original `turn result identity, status, or error invalid` failure. Otherwise the
-termination kind is `provider_unavailable`, and the result carries
-`provider_overload`, which is null in every other case. A `runtime/disconnected`
-while the runtime closes is ignored, as before. Other error codes, an overload
-after a tool request or output, a missing or mismatched packet delivery, and an
-announced retry remain execution failures. The tests cover each of these cases.
+`provider_overload_observed`. That decision becomes final only after shutdown.
+After `runtime.close()`, the last event drain, receipt reconciliation, and the
+world audit, the adapter runs the same check again over every reconciled event.
+Any of these restores the original `turn result identity, status, or error
+invalid` failure: an error with another code or an announced retry that arrived
+while the runtime closed, a new failure, an unclosed runtime, an unreconciled
+queue, a missing checkpoint, any output, or any request. Otherwise the
+termination kind is `provider_unavailable`. The result carries `provider_overload`
+from that final check, so its `error_notifications` list every reconciled error
+notification; it is null in every other case. A `runtime/disconnected` while the
+runtime closes is ignored, as before. Other error codes, an overload after a tool
+request or output, a missing or mismatched packet delivery, and an announced
+retry anywhere in the turn remain execution failures. The tests cover each of
+these cases.
+
+Outside that exception, a non-retryable error notification (`willRetry` not
+`true`) is an execution failure whatever the final turn status. After the final
+overload decision, the adapter records the failure `non-retryable provider error
+notification` for any such notification. A hard stop that interrupts the turn,
+which would otherwise be a `stop_truncation`, cannot hide it, and neither can a
+contradictory `completed` status. The termination kind becomes
+`infrastructure_incomplete` and the check fails `no_infrastructure_failure`. The
+attempt therefore holds admission, a resumed run holds on the retained failure,
+and the export scores the row as not validly closed. An error that announces a
+retry, followed by a normally completed turn, is not a failure by itself.
 
 Classification and settlement. `evaluate_transport` and `evaluate_qualification`
 classify an attempt `provider_unavailable` when all of these hold:
@@ -618,12 +634,21 @@ the payload as `orchestrator.provider_pause`, null for every other attempt, and
 journaled as `provider_pause_started` right after `attempt_archived`. The third
 refusal in a window holds with `provider_unavailable_limit:<attempt>`.
 
+In a study, pauses and their counts are recorded at study level. Before it seals
+the attempt, a behavioral root writes the pause, once, to
+`STUDY/provider-pauses/<attempt_id>.json` (`record_study_pause`). The sealed
+record names the study, the root's plan hash and path, and the phase. The root
+reads the study's records just before it computes the pause, so the window count
+includes the refusals of every root of the study. A compatibility root has no
+study and keeps its pauses in its own lanes.
+
 While a pause is active, the dispatcher starts nothing new and active attempts
 finish within their caps. With nothing active, it polls with
 `pause_sleep(min(remaining, poll_seconds))` and rechecks holds and stop files
 after each poll. A stop, the cutoff, or the deadline therefore still applies
 during a pause. When a pause's time is over, the dispatcher journals
-`provider_pause_ended` in that attempt's lane. A pause that began during another
+`provider_pause_ended` in the lane that journaled the pause; a pause of another
+root ends without a record in this root. A pause that began during another
 lane's preflight refuses that start at the post-preflight check
 (`admission_paused`, naming `paused_by_attempt_id`). That entry has no start, no
 reservation, and no session, and its runtime is closed. The dispatcher offers it
@@ -632,22 +657,37 @@ again after the pause, so it runs once. This refusal does not halt the lane.
 `pause_sleep` (default `sleep`). `Hooks` gains `wall_clock`, `pause_sleep`, and
 `provider_pause`, and `status.json` carries `provider_pauses`.
 
-Restart. `run_lanes` restores the pauses from every lane journal after
-reconciling the lanes. If a crash fell between an archive and its pause record,
+Restart and other roots. `run_lanes` restores the pauses from every lane journal
+after reconciling the lanes, and then every pause recorded in the study. A
+restarted root, a replacement root, and a root that selects other arms therefore
+all respect a pause and a window count that another root recorded. The
+dispatcher and the post-preflight check read the study's records again before
+each admission. If a crash fell between an archive and its pause record,
 `reconcile_lane` journals the pause sealed in the attempt (`recovered: true`).
 An active pause delays the first dispatch, and the window count continues. If
 the window ending at run start still holds three refusals, the run holds with
 `retained_provider_unavailable_limit:<attempt>`. Once that window has passed, a
 later run proceeds. Verify requires each journaled pause to equal the pause
 sealed in its attempt, and it requires a sealed pause exactly for each
-`provider_unavailable` attempt.
+`provider_unavailable` attempt. For a behavioral root, verify
+(`check_study_pauses`) also requires each study pause record to name this study
+and a start that the same root and lane claimed in it. Each journaled pause and
+each `provider_unavailable` attempt of the root needs an equal study record. The
+report lists the study's pauses in `study_provider_pauses`. A crash before the
+study record leaves no archive: the start is reconciled as incomplete, stays
+consumed, and holds its root. A crash after the record but before the archive
+leaves the pause in force for every root of the study.
 
 Export and other consumers. An exported `provider_unavailable` attempt has
 `eligible: false` and `excluded_from_analysis: true`. Its row is archived, not
 quarantined, carries `exclusion_reason: "provider_unavailable"`, and is listed in
 `analysis_exclusions`. The scorer blocks it as ineligible, and review packets
-skip it. Rows excluded by an amendment now also carry `exclusion_reason:
-"accepted_by_amendment"`. Resource proposals ignore the attempt with the reason
+skip it. A scored export leaves every row excluded from analysis, whether by an
+overload or by an amendment, out of the summary's counts and cells (spec 12). The
+row keeps its score, and the index counts the excluded rows in
+`analysis_exclusion_count`. Rows excluded by an amendment now also carry
+`exclusion_reason: "accepted_by_amendment"`. Resource proposals ignore the
+attempt with the reason
 `classification:provider_unavailable`. A `provider_unavailable` smoke attempt is
 not valid smoke evidence. As with a stop truncation, the collection gate needs an
 approved amendment for it, and `record_amendment` accepts one. Pause time counts
@@ -669,24 +709,54 @@ sealed lane plans), require the planned rows' arms to equal the selection.
 Verify reports carry `selected_arms`, and so do export indexes. Gates are
 unchanged: the needed lanes come from the selected rows, so the low-effort
 extension arm needs a qualified compatibility attempt for every low lane. The
-consumed-attempt ledger is unchanged. An extension root names the held
-calibration root with `--prior-root`, excludes its consumed starts, and
-supersedes it. A later `--arm calibration` root that names both earlier roots
-finishes the original arm without repeating any start.
+consumed-attempt ledger is unchanged: within one study, a later calibration root
+names every earlier one with `--prior-root`, as in any phase.
+
+Revision 3 live evidence starts fresh (spec 9). Fixture provenance records the
+specification revision, so revision 2 roots do not verify under revision 3 code.
+The revision 2 calibration study and its held calibration root are closed and
+kept as historical evidence: 44 starts and 43 valid trials, reported separately
+as the first calibration run. Revision 3 re-qualifies compatibility under
+revision 3 code and builds a new revision 3 study. Its calibration root selects
+only `calibration_extension_xhigh` and `calibration_extension_low`. The original
+calibration arm is never run again, in any study, because its assignment IDs do
+not depend on the study instance. No root of the revision 2 study is named as a
+prior root of a revision 3 root, and no migration between the two studies exists.
 
 New CLI argument: `build --arm NAME` (calibration only, repeatable).
 
 Bindings. Tool schemas, descriptions, wire specs, catalogs, the client,
-`LIVE_VERSION`, and `ADAPTER_VERSION` are unchanged, so retained compatibility
-roots still serve as gate evidence. The adapter now returns the new
-`provider_overload` key, and the overload case returns the new termination kind,
-both without a version bump. Every other attempt's adapter behavior is unchanged.
-`live_runtime.py`, `phase.py`, `live.py`, `lanes.py`, `live_review.py`,
-`resources.py`, and `cli.py` changed, so implementation hashes change, and
-calibration, smoke, and collection roots must be built under this code. Plans
-gain `selected_arms` and the `provider_overload_policy` execution-policy key. The
-held calibration root ran under revision 2 code, so the freeze already prevents
-it from running again.
+`LIVE_VERSION`, and `ADAPTER_VERSION` are unchanged. Even so, revision 2
+compatibility roots do not serve as gate evidence under this code, because their
+fixture provenance names revision 2; compatibility is qualified again. The
+adapter now returns the new `provider_overload` key, and the overload case
+returns the new termination kind, both without a version bump. The Astra review
+fixes (below) also change, without a version bump, how the adapter classifies a
+turn with a non-retryable error notification. `live_runtime.py`, `phase.py`,
+`live.py`, `lanes.py`, `live_review.py`, `resources.py`, and `cli.py` changed, so
+implementation hashes change, and calibration, smoke, and collection roots must
+be built under this code. Plans gain `selected_arms` and the
+`provider_overload_policy` execution-policy key.
+
+### Astra review of revision 3 (spec sections 9, 10, and 12)
+
+The review (`review-astra-r3.md`) found one blocker, four major findings, and one
+minor finding. The specification settles B1 and M4: revision 3 starts fresh, as
+described above, so neither needs code. The other four are fixed, and each
+reproduction is kept in `test_live_astra_r3.py`:
+
+- M1. A late error notification no longer leaves a stale overload exception in
+  force. The adapter decides the exception after the last drain and recomputes
+  its evidence; any announced retry in the turn now removes it.
+- M2. A non-retryable error notification outside the exception is an execution
+  failure, even when a hard stop interrupts the turn or the turn completes.
+- M3. Provider pauses and their window are recorded at study level, and every
+  root of the study restores them before any dispatch.
+- m1. A scored export leaves excluded rows out of its summary and counts them
+  separately.
+
+Plans record the M1 to M3 rules in the `transport_contradictions` and
+`provider_overload_policy` execution-policy values.
 
 ### Compatibility probe
 
@@ -792,7 +862,16 @@ non-qualifying overload or error remains an execution failure. The remaining
 cases are a restart after a soft stop or a crash during a pause, a crash before
 the pause record is journaled, a pause that begins during preflight, the window
 rule, the export exclusion, and calibration arm selection with its ledger
-workflow and CLI refusal.
+workflow and CLI refusal. `test_live_astra_r3.py` covers the Astra review of
+revision 3. Its M1 cases add another error code, or a retry announcement, inside
+the turn, at the first drain, or at the last drain; each run holds, its resume
+holds, and its export scores the row as ineligible. Its M2 cases place a
+non-retryable `serverOverloaded` or `streamDisconnected` error before a hard stop
+or before a completed status, and check that a retry that recovers stays valid.
+The M3 cases are three roots that select different arms and each wait out the
+previous root's pause until the third refusal within 60 minutes holds, a fourth
+root that holds at its start, and a crash just before or just after the study
+pause record. The m1 case is a scored export with one excluded refusal.
 
 ## WP10: resource proposals and caps approval
 
