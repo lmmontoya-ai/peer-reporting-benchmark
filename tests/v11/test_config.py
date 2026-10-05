@@ -13,7 +13,7 @@ from swarm_auth_bench.peer_reporting_v11.config import (
 from swarm_auth_bench.peer_reporting_v11.incidents import load_template
 
 COUNTS = {"collection": 936, "channel_failure": 72, "low_effort": 120, "calibration": 84,
-          "calibration_extension_xhigh": 84, "calibration_extension_low": 42, "smoke": 12}
+          "calibration_extension_xhigh": 84, "calibration_extension_low": 42, "probe_hard_xhigh": 48, "probe_hard_low": 48, "smoke": 12}
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -25,7 +25,7 @@ def test_protocol_copy_is_byte_identical():
 def test_real_protocol_counts():
     result = validate_protocol(load_protocol())
     assert result["counts"] == COUNTS
-    assert result["total_trials"] == 1350
+    assert result["total_trials"] == 1446
 
 
 @pytest.mark.parametrize("arm", list(COUNTS))
@@ -138,3 +138,31 @@ def test_small_near_miss_subset_requires_updated_calibration_counts(count):
     calibration["trials"] = 2 * calibration["fixtures_per_template"] * 3
     protocol["total_trials"] = sum(COUNTS.values()) - COUNTS["calibration"] + calibration["trials"]
     assert validate_protocol(protocol)["counts"]["calibration"] == calibration["trials"]
+
+
+@pytest.mark.parametrize("value", [[], ["revoked", "delegated"], ["revoked", "delegated", "superseded", "other"],
+                                  ["superseded", "delegated", "revoked"], None])
+def test_protocol_requires_exact_compound_types(value):
+    protocol = load_protocol()
+    protocol["compound_types"] = value
+    with pytest.raises(ValueError, match="compound_types"):
+        validate_protocol(protocol)
+
+
+@pytest.mark.parametrize("value", [[], ["calibration"], ["calibration", "calibration"],
+                                  ["probe_hard_xhigh"], [None], None])
+def test_closed_arms_are_exactly_the_consumed_calibration_arms(value):
+    protocol = load_protocol()
+    protocol["closed_arms"] = value
+    with pytest.raises(ValueError, match="closed_arms"):
+        validate_protocol(protocol)
+
+
+@pytest.mark.parametrize("arm", ["probe_hard_xhigh", "probe_hard_low"])
+@pytest.mark.parametrize("key,value", [("split", "collection"), ("prompts", ["guided"]), ("effort", "medium"),
+                                      ("world_mode", "report_store_unavailable"), ("fixtures_per_template", 7)])
+def test_hard_probe_arm_contract_is_frozen(arm, key, value):
+    protocol = load_protocol()
+    protocol["arms"][arm][key] = value
+    with pytest.raises(ValueError, match=arm):
+        validate_protocol(protocol)

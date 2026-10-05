@@ -13,22 +13,27 @@ from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, se
 from swarm_auth_bench.peer_reporting_v11 import collection
 from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
 from swarm_auth_bench.peer_reporting_v11.collection import STUDY_MANIFEST, build_study, verify_study
-from swarm_auth_bench.peer_reporting_v11.config import CALIBRATION_EXTENSION_ARMS, SPLITS, arm_fixture_cells
+from swarm_auth_bench.peer_reporting_v11.config import (
+    CALIBRATION_EXTENSION_ARMS,
+    HARD_PROBE_ARMS,
+    SPLITS,
+    arm_fixture_cells,
+)
 from swarm_auth_bench.peer_reporting_v11.ladder import calibration_near_miss_types
 from swarm_auth_bench.peer_reporting_v11.live import load_study, validate_assignment_rows
 
 from .test_config import COUNTS
 
-PAIRED_ARMS = ("collection", "calibration", "low_effort", *CALIBRATION_EXTENSION_ARMS)
+PAIRED_ARMS = ("collection", "calibration", "low_effort", *CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS)
 
 
 def test_real_counts_and_all_fixtures_verify(wp6_study, wp6_inputs, monkeypatch):
     directory, manifest, result = wp6_study
     assert result["counts"] == COUNTS
-    assert result["total_trials"] == len(manifest["assignments"]) == 1350
+    assert result["total_trials"] == len(manifest["assignments"]) == 1446
     assert Counter(row["arm"] for row in manifest["assignments"]) == COUNTS
-    assert result["split_counts"] == {"collection": 1128, "calibration": 210, "smoke": 12}
-    assert result["fixtures"] == len(manifest["fixtures"]) == 137
+    assert result["split_counts"] == {"collection": 1128, "calibration": 306, "smoke": 12}
+    assert result["fixtures"] == len(manifest["fixtures"]) == 153
     seen = set()
     original = collection.verify_fixture
 
@@ -95,14 +100,14 @@ def test_existing_assignments_keep_their_content_and_relative_order(split, expec
     _, manifest, _ = wp6_study
     rows = [{key: value for key, value in row.items() if key != "planned_order"}
             for row in manifest["assignments"]
-            if row["split"] == split and row["arm"] not in CALIBRATION_EXTENSION_ARMS]
+            if row["split"] == split and row["arm"] not in (*CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS)]
     assert content_hash(rows) == expected_hash
 
 
 def test_identities_bind_all_inputs_and_stay_bounded(wp6_study):
     _, manifest, _ = wp6_study
     rows = manifest["assignments"]
-    assert len({row["assignment_id"] for row in rows}) == 1350
+    assert len({row["assignment_id"] for row in rows}) == 1446
     assert all(len(row["assignment_id"]) <= 90 for row in rows)
     bindings = {"protocol_id": manifest["protocol_id"], "caps_hash": manifest["caps_hash"],
                 "tool_manifest_hash": manifest["tool_manifest_hash"]}
@@ -146,7 +151,7 @@ def _round_chunks(manifest, split, protocol):
 
 def _pair_key(row):
     return tuple(row[key] for key in ("arm", "template_id", "level", "near_miss_type", "model",
-                                     "prompt_condition", "effort", "world_mode", "round"))
+                                     "prompt_condition", "effort", "world_mode", "round")) + (row.get("compound_type"),)
 
 
 def test_every_fixture_model_prompt_effort_world_cell_appears_once(wp6_study):
@@ -258,7 +263,7 @@ def _assert_protocol_round_sequence(manifest, protocol, split):
             if arm == "channel_failure" or row["variant"] not in ("violation", "twin"):
                 key = (row["fixture_id"],)
             else:
-                key = (row["template_id"], row["level"], row["near_miss_type"])
+                key = (row["template_id"], row["level"], row["near_miss_type"], row.get("compound_type"))
             blocks[key].append(row)
         ordered = [sorted(block, key=lambda row: (row["variant"] != "violation", row["fixture_id"]))
                    for block in blocks.values()]
@@ -472,3 +477,23 @@ def test_build_refuses_unfrozen_caps_without_writing(tmp_path, wp6_inputs):
 
 def test_verify_missing_manifest_returns_errors(tmp_path, wp6_inputs):
     assert verify_study(tmp_path / "missing", **wp6_inputs)["valid"] is False
+
+
+@pytest.mark.parametrize("arm", HARD_PROBE_ARMS)
+def test_hard_probe_cells_pairs_and_one_prompt_rounds(arm, wp6_study, wp6_inputs):
+    _, manifest, _ = wp6_study
+    protocol = wp6_inputs["protocol"]
+    rows = [row for row in manifest["assignments"] if row["arm"] == arm]
+    assert len(rows) == 48
+    assert {row["round"] for row in rows} == {0, 3, 6}
+    assert {row["prompt_condition"] for row in rows} == {"neutral"}
+    assert {row["effort"] for row in rows} == {"xhigh" if arm.endswith("xhigh") else "low"}
+    assert {row["world_mode"] for row in rows} == {"normal"}
+    assert len({row["fixture_id"] for row in rows}) == 16
+    for template_id, compounds in zip(protocol["templates"]["calibration"],
+                                      [("revoked", "delegated"), ("superseded", "revoked")], strict=True):
+        template_rows = [row for row in rows if row["template_id"] == template_id]
+        assert {row["compound_type"] for row in template_rows if row["level"] == "H2"} == set(compounds)
+        assert Counter(row["level"] for row in template_rows) == {"H1": 6, "H2": 12, "H3": 6}
+        for fixture_id in {row["fixture_id"] for row in template_rows}:
+            assert {row["model"] for row in template_rows if row["fixture_id"] == fixture_id} == set(protocol["models"])

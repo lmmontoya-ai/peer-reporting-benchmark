@@ -142,16 +142,16 @@ def test_unverified_root_is_refused(tmp_path, wp6_study, artifact):
 def test_lane_walls_use_slowest_lane_and_token_targets_have_headroom(measured, wp6_study):
     result = proposal(measured, wp6_study[0])
     sizing = result["per_lane_sizing"]["calibration"]
-    assert sizing["slowest_lane_planned_rows"] == 56
-    # 56 * (270 + 10 + 15) + 120 = 16640, rounded up to the next 30 seconds.
-    assert result["caps"]["lane_wall_seconds"]["calibration"] == 16650
+    assert sizing["slowest_lane_planned_rows"] == 72
+    # 72 * (270 + 10 + 15) + 120 = 21360, already a multiple of 30 seconds.
+    assert result["caps"]["lane_wall_seconds"]["calibration"] == 21360
     assert len(sizing["lanes"]) == 6
     for model in wp6_study[1]["protocol"]["models"]:
-        for effort, count, reservations, target in (("xhigh", 56, 10920000, 11115000),
-                                                     ("low", 14, 2730000, 2925000)):
+        for effort, count, reservations, target in (("xhigh", 72, 14040000, 14235000),
+                                                     ("low", 30, 5850000, 6045000)):
             lane = sizing["lanes"][f"{model}-{effort}"]
             assert lane["planned_rows"] == count
-            assert lane["caps"]["collection_wall_seconds"] == 16650
+            assert lane["caps"]["collection_wall_seconds"] == 21360
             assert lane["planned_reservations"] == reservations
             assert lane["caps"]["collection_observed_token_stop_target"] == target
             assert lane["caps"]["collection_observed_token_stop_target"] >= (

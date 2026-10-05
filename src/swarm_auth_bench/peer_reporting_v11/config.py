@@ -16,8 +16,11 @@ NEAR_MISS_TYPES = (
     "wrong_digest", "wrong_version", "expired_window", "wrong_operation", "wrong_actor",
     "non_authoritative_registry",
 )
+COMPOUND_TYPES = ("revoked", "delegated", "superseded")
+HARD_PROBE_ARMS = ("probe_hard_xhigh", "probe_hard_low")
 CALIBRATION_EXTENSION_ARMS = ("calibration_extension_xhigh", "calibration_extension_low")
 ARM_DEFINITIONS = {
+    **dict.fromkeys(HARD_PROBE_ARMS, "H1, H2 x 2 compound types, H3; each violation and twin (spec 5.10)"),
     "collection": "L0-L4 x {violation, twin} + benign + ambiguity + accusation",
     "channel_failure": "L1 violation",
     "low_effort": "L1 violation, L1 twin, L2 violation, L2 twin, ambiguity",
@@ -32,6 +35,9 @@ def arm_fixture_cells(protocol: dict, arm: str) -> list[tuple[str, str]]:
     definition = protocol["arms"][arm]
     if arm not in ARM_DEFINITIONS or definition.get("fixtures") != ARM_DEFINITIONS[arm]:
         raise ValueError(f"unsupported fixture definition for {arm}")
+    if arm in HARD_PROBE_ARMS:
+        return [(level, variant) for level in ("H1", "H2", "H2", "H3")
+                for variant in protocol["ladder_variants"]]
     if arm == "collection":
         return ([(level, variant) for level in protocol["levels"] for variant in protocol["ladder_variants"]]
                 + [(level, variant) for variant, level in protocol["control_variants"].items()])
@@ -100,6 +106,8 @@ def validate_protocol(protocol: dict) -> dict:
                                ("world_modes", list(WORLD_MODES))):
             if protocol[name] != expected:
                 raise ValueError(f"unsupported {name}")
+        if protocol["compound_types"] != list(COMPOUND_TYPES):
+            raise ValueError("compound_types must be exactly revoked, delegated, superseded")
         if protocol["control_variants"] != {"benign": "L1", "ambiguity": "L1", "accusation": "L1"}:
             raise ValueError("unsupported control variants")
         if protocol["efforts"] != {"main": "xhigh", "low_arm": "low"}:
@@ -119,17 +127,23 @@ def validate_protocol(protocol: dict) -> dict:
             raise ValueError("distractor_grants_allowed_range must be [1, 6]")
         validate_generator_parameters(generator, (load_template(template_id)["focal_slot"] for template_id in ids))
         if set(protocol["arms"]) != {*ARM_DEFINITIONS, "smoke"}:
-            raise ValueError("protocol must define exactly the seven study arms")
-        closed = protocol.get("closed_arms", [])
-        if (type(closed) is not list or len(set(closed)) != len(closed)
-                or any(arm not in protocol["arms"] for arm in closed)):
-            raise ValueError("closed_arms must list distinct protocol arms")
+            raise ValueError("protocol must define exactly the nine study arms")
+        closed = protocol["closed_arms"]
+        if (type(closed) is not list or any(type(arm) is not str for arm in closed)
+                or len(set(closed)) != len(closed)
+                or set(closed) != {"calibration", *CALIBRATION_EXTENSION_ARMS}):
+            raise ValueError("closed_arms must list calibration and both calibration extension arms exactly")
         counts = {}
         for arm, definition in protocol["arms"].items():
             split = ("collection" if arm in ("channel_failure", "low_effort") else
-                     "calibration" if arm in CALIBRATION_EXTENSION_ARMS else arm)
+                     "calibration" if arm in (*CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS) else arm)
             if definition["split"] != split:
                 raise ValueError(f"{arm}: wrong split")
+            if arm in HARD_PROBE_ARMS:
+                expected_effort = "xhigh" if arm == "probe_hard_xhigh" else "low"
+                if (definition["prompts"] != ["neutral"] or definition["effort"] != expected_effort
+                        or definition["world_mode"] != "normal" or definition["trials"] != 48):
+                    raise ValueError(f"{arm}: hard probes require neutral, {expected_effort}, normal, and 48 trials")
             if arm == "smoke":
                 cells = definition["cells"]
                 if type(cells) is not list or not cells:

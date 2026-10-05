@@ -74,7 +74,8 @@ def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
         groups: dict[tuple, list[str]] = defaultdict(list)
         for fixture_id, row in fixtures.items():
             if arm != "channel_failure" and row["variant"] in ("violation", "twin"):
-                block_key = ("pair", row["template_id"], row["level"], row["near_miss_type"])
+                block_key = ("pair", row["template_id"], row["level"], row["near_miss_type"],
+                             row.get("compound_type"))
             else:
                 block_key = ("fixture", fixture_id)
             groups[block_key].append(fixture_id)
@@ -156,6 +157,8 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, ins
                     for model in protocol["models"]:
                         row = {key: parameters[key] for key in ("split", "template_id", "level", "variant",
                                                                 "near_miss_type")}
+                        if "compound_type" in parameters:
+                            row["compound_type"] = parameters["compound_type"]
                         row.update(arm=arm, model=model, effort=cell["effort"], prompt_condition=cell["prompt"],
                                    world_mode=cell["world_mode"], fixture_id=fixture["fixture_id"],
                                    instructions=instructions)
