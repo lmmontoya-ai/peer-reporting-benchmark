@@ -153,14 +153,16 @@ def disputed_labels(records: list[dict]) -> list[str]:
 
 
 def resolve_output(records: list[dict], *, targets: Iterable[str], second_review: bool,
-                   adjudication: dict | None = None) -> dict[str, Any]:
+                   adjudication: dict | None = None, record_conflict: bool = False) -> dict[str, Any]:
     """Combine authoritative reviews of one output. Unresolved outputs keep every label unknown.
 
     Non-authoritative records are ignored. Two or more reviews must come from
     distinct reviewers; agreement on every label is final, any disagreement is
     disputed until a final human adjudication supplies the labels. A second-review
-    output is not final on one review. An adjudication, when present, is final and
-    keeps the initial reviews.
+    output is not final on one review, even with adjudication. An adjudicator must
+    differ from every initial reviewer. Adjudication needs both initial reviews
+    unless the caller establishes a record conflict and second review is not
+    required; that route needs one initial review. Initial reviews are retained.
     """
     targets = list(targets)
     for record in records:
@@ -173,6 +175,14 @@ def resolve_output(records: list[dict], *, targets: Iterable[str], second_review
     if adjudication is not None:
         validate_review(adjudication, targets=targets)
         _require(authoritative(adjudication), "an adjudication must be a final human review")
+        _require(adjudication["reviewer_id"] not in {record["reviewer_id"] for record in records},
+                 "an adjudicator must be distinct from every initial reviewer")
+        _require(bool(initial), "adjudication requires an initial final human review")
+        _require(not second_review or len(initial) >= 2,
+                 "adjudication cannot replace the required second review")
+        _require(len(initial) >= 2 or record_conflict,
+                 "adjudication of a disagreement requires both initial reviews; a single review needs a "
+                 "record conflict")
         return {**base, "status": "final", "resolution": "adjudicated", "labels": deepcopy(adjudication["labels"]),
                 "adjudication": deepcopy(adjudication)}
     if not initial:

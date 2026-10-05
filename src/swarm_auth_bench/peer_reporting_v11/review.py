@@ -36,7 +36,7 @@ from . import PROTOCOL_ID
 from .ladder import is_authorized
 from .live_review import EXPORT_KIND
 from .prompts import DISCOURAGED, GUIDED, NEUTRAL
-from .review_plan import SCOPES, plan_rows
+from .review_plan import SCOPES, plan_rows, verify_review_plan
 from .rubric import (
     LABEL_QUESTIONS,
     MATERIAL_CLAIM_KINDS,
@@ -475,6 +475,7 @@ def validate_review_upload(upload: Any, packet: Any, *, controller: dict | None 
 def resolve_packet_reviews(packet: dict, uploads: list[dict], *, second_review: bool,
                            adjudications: Mapping[str, dict] | None = None) -> dict[str, dict]:
     """Combine every validated upload for one packet into resolved labels per review output ID."""
+    packet = check_packet(packet)
     adjudications = dict(adjudications or {})
     labeled = [entry["review_output_id"] for entry in packet["outputs"]]
     _require(set(adjudications) <= set(labeled), "adjudications name unknown review output IDs")
@@ -484,8 +485,16 @@ def resolve_packet_reviews(packet: dict, uploads: list[dict], *, second_review: 
         for identifier, record in upload["labels_by_output_id"].items():
             by_output[identifier].append(record)
     targets = packet_targets(packet)
+    record_truth = {"operations": [
+        {**operation, "authorized": bool(operation["authoritative_matching_grant_ids"])}
+        for operation in packet["record_check"]["recorded_operations"]]}
     return {identifier: resolve_output(by_output[identifier], targets=targets, second_review=second_review,
-                                       adjudication=adjudications.get(identifier))
+                                       adjudication=adjudications.get(identifier),
+                                       record_conflict=any(
+                                           _expected_support(claim["target"], record_truth)
+                                           not in (None, claim["supported"])
+                                           for record in by_output[identifier] if authoritative(record)
+                                           for claim in record["labels"]["unauthorized_claims"]))
             for identifier in labeled}
 
 
@@ -713,6 +722,8 @@ def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
     ``controller/`` holds every packet with its private bindings and attempt, and
     ``index.json`` maps assignments to packets and second review; both are
     researcher-only. Planned rows without an attempt stay unknown.
+    The export must retain its sealed ``study_manifest`` and ``review_plan_hash``;
+    the plan is fully recomputed and checked against both before any packet is written.
     """
     from .incidents import load_template as default_loader
 
@@ -720,11 +731,19 @@ def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
     export_directory, output = Path(export_directory), Path(output)
     _require(not output.resolve().is_relative_to(export_directory.resolve()),
              "review packets must be written outside the export")
-    rows = plan_rows(plan)
     index = read_sealed(export_directory / "index.json")
     _require(index.get("kind") == EXPORT_KIND, "not a v1.1 live review export")
     _require(index["study_registration"]["study_manifest_hash"] == plan["study_manifest_hash"],
              "the export comes from another study than the review plan")
+    manifest = index.get("study_manifest")
+    _require(type(manifest) is dict, "the export must retain its sealed study_manifest for review verification")
+    errors = verify_review_plan(plan, manifest)
+    _require(not errors, f"invalid review plan: {'; '.join(errors)}")
+    _require(manifest["seal_hash"] == index["study_registration"]["study_manifest_hash"],
+             "the export study_manifest differs from its study registration")
+    _require(index.get("review_plan_hash") == plan["seal_hash"],
+             "the export review_plan_hash is missing or differs from the review plan seal hash")
+    rows = plan_rows(plan)
     models = sorted({row["model"] for row in rows.values()})
     output.mkdir(parents=True, exist_ok=False)
     for child in ("reviewer", "controller"):

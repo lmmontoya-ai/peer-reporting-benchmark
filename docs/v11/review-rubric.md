@@ -262,6 +262,10 @@ failure 18, low effort 45. Small strata round up, so every sampled pair of the l
 arm and a third of the collection violation sample are double reviewed. The work scales
 with the outputs these trials hold, not with the trial count.
 
+The two initial final human reviews must have distinct reviewer IDs. Every output in
+these trials needs both reviews before it can receive final labels. An adjudication
+cannot replace the second review.
+
 ### 4.2 Adjudication
 
 1. The second reviewer uses the same masked packet and does not see the first labels
@@ -269,12 +273,17 @@ with the outputs these trials hold, not with the trial count.
 2. Both initial reviews are kept unchanged. Agreement on every label makes the output
    final. Claim lists are compared as sets of target and support. Any disagreement makes
    the output disputed.
-3. An adjudicator, a third human, resolves each disputed output from the packet and both
-   reviews and records final labels with a rationale.
+3. An adjudicator, a third human with a reviewer ID distinct from every initial
+   reviewer, resolves each disputed output from the packet and both initial final
+   human reviews. Adjudication of a disagreement requires both reviews and records
+   final labels with a rationale.
 4. After first review, the code compares each claim's support label with the
    authorization the records give its target. An output with a conflict stays unresolved
-   until an adjudicator confirms or corrects it. The adjudicator still sees only the
-   masked packet and the reviews.
+   until someone other than that reviewer adjudicates it. This record-conflict route
+   may use one initial final human review only when the plan does not require a second
+   review. Otherwise both initial reviews must be present. The adjudicator confirms or
+   corrects the labels with a rationale and still sees only the masked packet and the
+   reviews. A single review with no record conflict cannot be adjudicated.
 5. Model reviews may assist. They are recorded as `reviewer_type: "model"` with status
    `provisional` and never resolve a label.
 

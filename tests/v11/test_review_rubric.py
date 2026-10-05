@@ -112,3 +112,56 @@ def test_resolution_ignores_non_authoritative_records_and_needs_distinct_reviewe
     with pytest.raises(ValueError, match="adjudication"):
         resolve_output([first], targets=TARGETS, second_review=False,
                        adjudication=review(reviewer="x", status="provisional"))
+
+
+@pytest.mark.parametrize("case", ["self_adjudication", "missing_second", "no_initial"])
+def test_astra_adjudication_reproductions_are_rejected(case):
+    first = review(reviewer="human-A", claims=[("op-01", True)])
+    second = review(reviewer="human-B", concern=True, uncertainty="decidable")
+    records = {"self_adjudication": [first, second], "missing_second": [first], "no_initial": []}[case]
+    with pytest.raises(ValueError, match="adjudicat"):
+        resolve_output(records, targets=TARGETS, second_review=True, adjudication=first)
+
+
+@pytest.mark.parametrize("reviewer", ["a", "b"])
+def test_neither_initial_reviewer_can_adjudicate_a_disagreement(reviewer):
+    first = review(reviewer="a", claims=[("op-01", True)])
+    second = review(reviewer="b", concern=True, uncertainty="decidable")
+    with pytest.raises(ValueError, match="distinct from every initial reviewer"):
+        resolve_output([first, second], targets=TARGETS, second_review=False,
+                       adjudication=review(reviewer=reviewer))
+
+
+@pytest.mark.parametrize("records", [[], [review(reviewer="a")],
+                                     [review(reviewer="a"), review(reviewer="b", status="provisional")],
+                                     [review(reviewer="a"), review(reviewer="b", reviewer_type="model",
+                                                                  status="provisional")]])
+def test_a_distinct_adjudicator_cannot_replace_a_required_second_review(records):
+    with pytest.raises(ValueError, match="initial final human review|required second review"):
+        resolve_output(records, targets=TARGETS, second_review=True, record_conflict=True,
+                       adjudication=review(reviewer="adjudicator"))
+
+
+def test_single_review_adjudication_requires_a_record_conflict_and_a_distinct_adjudicator():
+    first = review(reviewer="a", claims=[("op-01", False)], unsupported=True)
+    corrected = review(reviewer="adjudicator", claims=[("op-01", True)])
+    with pytest.raises(ValueError, match="both initial reviews"):
+        resolve_output([first], targets=TARGETS, second_review=False, adjudication=corrected)
+    with pytest.raises(ValueError, match="distinct"):
+        resolve_output([first], targets=TARGETS, second_review=False, adjudication=first, record_conflict=True)
+    final = resolve_output([first], targets=TARGETS, second_review=False,
+                           adjudication=corrected, record_conflict=True)
+    assert final["status"] == "final" and final["resolution"] == "adjudicated"
+    assert final["labels"] == corrected["labels"] and final["initial_reviews"] == [first]
+
+
+def test_adjudication_requires_an_initial_human_even_for_a_record_conflict():
+    with pytest.raises(ValueError, match="initial final human review"):
+        resolve_output([], targets=TARGETS, second_review=False, record_conflict=True,
+                       adjudication=review(reviewer="adjudicator"))
+
+
+def test_the_adjudicator_must_also_differ_from_a_provisional_initial_reviewer():
+    records = [review(reviewer="a"), review(reviewer="b"), review(reviewer="c", status="provisional")]
+    with pytest.raises(ValueError, match="distinct"):
+        resolve_output(records, targets=TARGETS, second_review=True, adjudication=review(reviewer="c"))

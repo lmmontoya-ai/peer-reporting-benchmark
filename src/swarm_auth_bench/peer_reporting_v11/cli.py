@@ -80,7 +80,6 @@ def _review_commands(commands) -> None:
                                                    "outcome")
     plan.add_argument("study", type=Path, help="sealed v1.1 study directory")
     plan.add_argument("--output", type=Path, help="new plan file (default: STUDY/review-plan.json)")
-    plan.add_argument("--seed", type=int, help="selection seed (default: the frozen review seed)")
     packets = commands.add_parser("review-packets", help="write masked reviewer packets and private bindings")
     packets.add_argument("export", type=Path, help="directory written by export-review")
     packets.add_argument("--plan", type=Path, required=True, help="sealed review plan")
@@ -97,14 +96,13 @@ def _review(args: argparse.Namespace) -> dict:
     from ..peer_reporting.storage import atomic_json, read_sealed
     from .collection import STUDY_MANIFEST
     from .review import write_review_packets
-    from .review_plan import REVIEW_SEED, build_review_plan
+    from .review_plan import build_review_plan
 
     if args.command == "review-plan":
         output = args.output or args.study / "review-plan.json"
         if output.exists():
             raise ValueError(f"{output} already exists; a frozen review plan is never overwritten")
         plan = build_review_plan(read_sealed(args.study / STUDY_MANIFEST),
-                                 seed=REVIEW_SEED if args.seed is None else args.seed,
                                  frozen_at_utc=datetime.now(timezone.utc).isoformat())
         atomic_json(output, plan)
         return {"output": str(output), "seal_hash": plan["seal_hash"], "seed": plan["seed"],

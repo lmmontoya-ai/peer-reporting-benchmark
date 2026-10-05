@@ -5,10 +5,8 @@ from copy import deepcopy
 
 import pytest
 
-from swarm_auth_bench.events import content_hash
 from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, seal
 from swarm_auth_bench.peer_reporting_v11.cli import main
-from swarm_auth_bench.peer_reporting_v11.live_review import EXPORT_KIND
 from swarm_auth_bench.peer_reporting_v11.review import (
     build_review_bundle,
     check_bindings,
@@ -16,12 +14,14 @@ from swarm_auth_bench.peer_reporting_v11.review import (
     record_check,
     render_packet_html,
     validate_review_upload,
+    write_review_packets,
 )
 from swarm_auth_bench.peer_reporting_v11.review_plan import build_review_plan
 
 from .review_helpers import (
     MODELS,
     bundle_for,
+    export_directory,
     fixture,
     operations,
     output_ids,
@@ -209,32 +209,6 @@ def test_bundles_refuse_withheld_text_in_the_delivered_evidence(tmp_path):
         build_review_bundle(attempt, scope="everything")
 
 
-def export_directory(tmp_path, wp6_study, plan, picks):
-    """A hand-built export in the live-review shape: replayed study fixtures under planned assignment IDs."""
-    study, manifest, _ = wp6_study
-    rows_by_id = {row["assignment_id"]: row for row in manifest["assignments"]}
-    export = tmp_path / "export"
-    (export / "attempts").mkdir(parents=True)
-    index_rows = []
-    for assignment_id, actions in picks.items():
-        row = rows_by_id[assignment_id]
-        item = read_sealed(study / "fixtures" / f"{row['fixture_id']}.json")
-        item = {key: value for key, value in item.items() if key != "seal_hash"}
-        if actions is None:
-            index_rows.append({"assignment_id": assignment_id, "status": "unrun", "excluded_from_analysis": False})
-            continue
-        attempt = replay(tmp_path / "replays", item, actions(item), assignment_id=assignment_id, arm=row["arm"],
-                         model=row["model"], effort=row["effort"], world_mode=row["world_mode"],
-                         prompt_condition=row["prompt_condition"])
-        path = f"attempts/{assignment_id}.json"
-        atomic_json(export / path, seal(attempt))
-        index_rows.append({"assignment_id": assignment_id, "status": "archived", "attempt_path": path,
-                           "attempt_hash": content_hash(attempt), "excluded_from_analysis": False})
-    atomic_json(export / "index.json", seal({"kind": EXPORT_KIND, "phase": "collection", "rows": index_rows,
-                                             "study_registration": {"study_manifest_hash": manifest["seal_hash"]}}))
-    return export
-
-
 def test_review_packets_command_and_upload_validation_end_to_end(tmp_path, wp6_study, capsys):
     study, manifest, _ = wp6_study
     plan = build_review_plan(manifest)
@@ -281,8 +255,72 @@ def test_review_packets_command_and_upload_validation_end_to_end(tmp_path, wp6_s
     with pytest.raises(ValueError, match="review_packet_hash"):
         validate_review_upload(foreign, foreign_packet)
     with pytest.raises(ValueError, match="another study"):
-        from swarm_auth_bench.peer_reporting_v11.review import write_review_packets
-
         changed = deepcopy({key: value for key, value in plan.items() if key != "seal_hash"})
         changed["study_manifest_hash"] = "0" * 64
         write_review_packets(export, seal(changed), tmp_path / "wrong")
+
+
+@pytest.mark.parametrize("tampering", ["empty_rows", "scope", "second_review", "seed", "broken_seal"])
+def test_packet_writing_refuses_tampered_and_resealed_plans(tmp_path, wp6_study, tampering):
+    _, manifest, _ = wp6_study
+    plan = build_review_plan(manifest)
+    assignment = next(row["assignment_id"] for row in plan["rows"] if row["scope"] == "full")
+    export = export_directory(tmp_path, wp6_study, plan, {assignment: lambda item: [post("Review this output.")]})
+    changed = deepcopy({key: value for key, value in plan.items() if key != "seal_hash"})
+    if tampering == "empty_rows":
+        changed["rows"] = []
+    elif tampering == "scope":
+        changed["rows"][0]["scope"] = "posts" if changed["rows"][0]["scope"] != "posts" else "full"
+    elif tampering == "second_review":
+        changed["rows"][0]["second_review"] = not changed["rows"][0]["second_review"]
+    elif tampering == "seed":
+        changed["seed"] += 1
+    bad_plan = seal(changed)
+    if tampering == "broken_seal":
+        bad_plan["seal_hash"] = "0" * 64
+    # Bind even the bad hash so a successful binding check cannot hide the invalid selection or seal.
+    index = read_sealed(export / "index.json")
+    del index["seal_hash"]
+    atomic_json(export / "index.json", seal({**index, "review_plan_hash": bad_plan["seal_hash"]}))
+    output = tmp_path / "packets"
+    with pytest.raises(ValueError, match="invalid review plan:.*(rows|seed|seal)"):
+        write_review_packets(export, bad_plan, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("binding", [None, "0" * 64])
+def test_packet_writing_requires_the_export_review_plan_hash(tmp_path, wp6_study, binding):
+    _, manifest, _ = wp6_study
+    plan = build_review_plan(manifest)
+    export = export_directory(tmp_path, wp6_study, plan, {})
+    index = read_sealed(export / "index.json")
+    del index["seal_hash"]
+    if binding is None:
+        del index["review_plan_hash"]
+    else:
+        index["review_plan_hash"] = binding
+    atomic_json(export / "index.json", seal(index))
+    output = tmp_path / "packets"
+    with pytest.raises(ValueError, match="review_plan_hash"):
+        write_review_packets(export, plan, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("tampering", ["missing", "corrupt", "another_study"])
+def test_packet_writing_verifies_the_manifest_named_by_the_export(tmp_path, wp6_study, tampering):
+    _, manifest, _ = wp6_study
+    plan = build_review_plan(manifest)
+    export = export_directory(tmp_path, wp6_study, plan, {})
+    index = read_sealed(export / "index.json")
+    del index["seal_hash"]
+    if tampering == "missing":
+        del index["study_manifest"]
+    elif tampering == "corrupt":
+        index["study_manifest"]["seal_hash"] = "0" * 64
+    else:
+        index["study_registration"]["study_manifest_hash"] = "0" * 64
+    atomic_json(export / "index.json", seal(index))
+    output = tmp_path / "packets"
+    with pytest.raises(ValueError, match="study_manifest|seal|another study"):
+        write_review_packets(export, plan, output)
+    assert not output.exists()

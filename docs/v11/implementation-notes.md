@@ -30,11 +30,22 @@ split includes all three collection arms, totaling 1,128 rows.
 
 Assignment IDs bind the protocol ID, arm, split, fixture ID, model, effort,
 prompt, world mode, instruction hash, tool manifest hash, and entire caps hash.
-Each split groups rows by fixture, world mode, and effort. A group with `c`
-cells puts its seeded cell `i` in round `floor(i * R / c)`, where `R` is the
-largest group size in the split. A separate seeded hash orders entries within
-each round. `planned_order` starts at zero in every split. Every row also
-carries its spec 9 `round`, which the live dispatcher's round barrier reads.
+Within each split, section 9 groups matched violation/twin fixtures into paired
+blocks and controls or other single fixtures into single blocks. Within each arm,
+paired blocks precede single blocks; each group is ordered by a seeded hash.
+Block position `k` sets offsets `(a_b, c_b)` from the repeating Latin-square order
+`(0,0), (1,1), (2,2), (0,1), (1,2), (2,0), (0,2), (1,0), (2,1)`.
+Three-prompt arms use rounds `r = 0..8`, with model index `(r + a_b) mod 3`
+and prompt index `(floor(r / 3) + c_b) mod 3`. One-prompt arms use rounds
+`0, 3, 6`, with model index `(r / 3 + a_b) mod 3`. Smoke instead rotates
+explicit protocol cell `i` through model index `(i + r) mod 3` in rounds
+`0..2`. Each split orders rows by round, protocol arm order, block position,
+then fixture, with each violation immediately before its twin. `planned_order`
+starts at zero in every split, and each row carries its `round`. The global
+dispatcher starts the lowest unstarted `planned_order` whose lane is idle when
+a slot is free. Its per-effort round barrier prevents starting round `r + 2`
+while another lane of that effort has an unstarted item in round `r`; each lane
+runs one attempt at a time, with global concurrency at most six.
 
 `collection.verify_study` rebuilds the complete manifest and fixtures, checks
 the seals, counts, identities, instructions and order, and runs WP5's real
