@@ -547,7 +547,9 @@ Execution rules that apply to every live phase:
   let active attempts finish within their caps. `root/HARD_STOP` and `--hard-stop-file`
   truncate active attempts. A truncation caused by a hard stop or the forced-stop deadline
   leaves the attempt consumed and behaviorally ineligible, but it is not an execution
-  failure and does not hold later runs. Lane wall limits count only time while a run of
+  failure and does not hold later runs. A stop never masks a real failure: an attempt with a
+  packet-delivery mismatch, a transport or protocol failure, or a storage failure is an
+  execution failure even if a stop also truncated it. Lane wall limits count only time while a run of
   that lane is open, summed across runs.
 - **Study instance.** `build-study` seals a random instance nonce into the manifest, so a
   rebuild is a different study and its seal differs. The study directory is the
@@ -556,7 +558,11 @@ Execution rules that apply to every live phase:
   A gate accepts evidence only from roots registered in the same study directory. Roots are
   registered as pending before their plan is written and finalized after. A pending root,
   or a finalized root whose journals show no start, can be abandoned through a sealed
-  abandonment record; an abandoned root never runs.
+  abandonment record; an abandoned root never runs. Abandonment checks the journals of the
+  root at the path its registration records, and refuses if that path holds no sealed plan
+  matching the registered plan hash, unless the registration is still pending. Every root,
+  including a compatibility root, seals its own random nonce, so no two roots share a plan
+  hash.
 - **Freeze.** A run refuses to start if any code, catalog, schema, template or protocol
   hash differs from its sealed plan. The offline scorer modules (`score.py`,
   `structured.py`) are sealed too, but they do not gate a run, because scoring never
@@ -564,8 +570,10 @@ Execution rules that apply to every live phase:
   freeze is a declared deviation.
 - **Smoke.** The collection gate needs one smoke root that holds exactly the study's smoke
   rows, all archived and passed. A smoke run stopped early resumes the same plan under a
-  new authorization. A failed smoke attempt blocks collection for that study until the
-  user approves an amendment.
+  new authorization. A failed smoke attempt, including one truncated by a hard stop or the
+  deadline, blocks collection for that study until the user approves an amendment.
+  Amendments cannot replace all of a lane's smoke evidence: every lane used in collection
+  needs at least one passed, valid smoke attempt.
 - **Amendments.** An amendment is a sealed record (`kind:
   peer_reporting_v11_amendment`) that names the study seal, the reason, the user's approval
   text and an action. The only action is `accept_failed_smoke_attempts`: it lists failed
