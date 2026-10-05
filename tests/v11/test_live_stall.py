@@ -99,11 +99,15 @@ class TrialClock:
 def stall_steps(trial_clock, model="gpt-6-luna", effort="low"):
     """The observed silent stall (guest, luna low): the thread settings, the active status and the turn start, then
     silence until the trial wall."""
-    turn = {"id": f"turn-{model}-{effort}", "status": "inProgress"}
+    turn = {"id": f"turn-{model}-{effort}", "status": "inProgress", "items": [],
+            "itemsView": "notLoaded", "error": None}
     settings = {"threadSettings": {"approvalPolicy": "never", "collaborationMode": {"mode": "default", "settings": {
         "developer_instructions": None, "model": model, "reasoning_effort": effort}}}}
-    return [("raw", "thread/settings/updated", settings), ("thread_status", {"type": "active", "activeFlags": []}),
-            ("raw", "turn/started", {"turn": turn}), ("stall", trial_clock.silence)]
+    return [("raw_thread", "thread/settings/updated", settings),
+            ("thread_status", {"type": "active", "activeFlags": []}),
+            ("raw_thread", "turn/started", {"turn": turn}), ("packet_delivery",),
+            ("interrupted_end", {"items": [], "itemsView": "notLoaded", "error": None}, {"type": "idle"}),
+            ("disconnect_on_close",), ("stall", trial_clock.silence)]
 
 
 async def run_stalled(root, plan, harness, clock, trial_clock, compat, study, **kwargs):
@@ -140,8 +144,16 @@ async def test_the_observed_silent_stall_is_provider_stalled_and_pauses_admissio
     stall = result["provider_stall"]
     assert stall["boundary_reason"] == "trial_wall_limit" and stall["turn_status"] == "interrupted"
     assert stall["silent_seconds"] >= plan["caps"]["trial"]["max_trial_wall_seconds"]
-    assert stall["runtime_event_methods"] == ["item/started", "item/completed", "thread/settings/updated",
-                                              "thread/status/changed", "turn/started", "turn/completed"]
+    assert stall["runtime_event_methods"] == ["thread/settings/updated", "thread/status/changed", "turn/started",
+                                              "item/started", "item/completed", "thread/status/changed",
+                                              "turn/completed", "runtime/disconnected"]
+    raw = [event["raw"] for event in result["raw_events"]]
+    assert set(raw[0]["params"]) == {"threadId", "threadSettings"}
+    assert raw[1]["params"]["status"] == {"type": "active", "activeFlags": []}
+    assert raw[5]["params"]["status"] == {"type": "idle"}
+    for index, turn_status in ((2, "inProgress"), (6, "interrupted")):
+        assert raw[index]["params"]["turn"] == {"id": "turn-gpt-6-luna-low", "status": turn_status,
+                                                "items": [], "itemsView": "notLoaded", "error": None}
     assert (stall["tool_requests"], stall["observer_outputs"], stall["usage_notifications"],
             stall["error_notifications"]) == (0, 0, 0, 0)
     assert [event for event in result["events"] if event["kind"] == "provider_stall_observed"]
@@ -191,7 +203,8 @@ async def test_the_observed_silent_stall_is_provider_stalled_and_pauses_admissio
 
 
 @pytest.mark.parametrize("case", ["reasoning", "usage_with_total", "usage_without_total", "retry_error",
-                                  "system_error_status", "hard_stop", "forced_deadline"])
+                                  "system_error_status", "active_flags", "turn_started_error",
+                                  "unknown_notification", "hard_stop", "forced_deadline"])
 async def test_any_model_event_or_a_stop_leaves_silence_to_the_existing_rules(compat, tmp_path, case):
     study, rows, fixtures = smoke_study(tmp_path / "study")
     root, plan = sealed_root(study, compat)
@@ -205,6 +218,11 @@ async def test_any_model_event_or_a_stop_leaves_silence_to_the_existing_rules(co
         "retry_error": [("raw", "error", {"error": {"message": "Reconnecting.", "codexErrorInfo": "serverOverloaded"},
                                           "willRetry": True}), silence],
         "system_error_status": [("thread_status", {"type": "systemError"}), silence],
+        "active_flags": [("thread_status", {"type": "active", "activeFlags": ["waitingOnApproval"]}), silence],
+        "turn_started_error": [("raw", "turn/started", {"turn": {
+            "id": "turn-gpt-6-luna-xhigh", "status": "inProgress", "items": [],
+            "error": {"message": "lost", "codexErrorInfo": "streamDisconnected"}}}), silence],
+        "unknown_notification": [("raw", "unknown/notification", {}), silence],
         "hard_stop": [("stall", lambda: (root / v11_live.HARD_STOP_FILE).touch())],
         "forced_deadline": [("stall", lambda: setattr(clock, "now", clock.now + 3 * 10**6))],
     }[case]
@@ -235,6 +253,80 @@ async def test_any_model_event_or_a_stop_leaves_silence_to_the_existing_rules(co
         assert result["termination_kind"] == "per_trial_limit" and result["infrastructure_failures"] == []
         assert result["boundary"]["reason"] == "trial_wall_limit"
         assert payload["check"]["classification"] is None
+
+
+@pytest.mark.parametrize("notification", ["turn/started", "turn/completed", "late_completion"])
+@pytest.mark.parametrize("item_type", ["agentMessage", "reasoning"])
+async def test_embedded_model_items_mark_the_stall_trace_incomplete(compat, tmp_path, notification, item_type):
+    study, rows, fixtures = smoke_study(tmp_path / "study")
+    root, plan = sealed_root(study, compat)
+    clock, trial_clock = PauseClock(), TrialClock()
+    item = {"id": "embedded-output", "type": item_type, **(
+        {"text": "I found a policy concern."} if item_type == "agentMessage"
+        else {"summary": [{"type": "summaryText", "text": "Checking the grants."}]})}
+    steps = stall_steps(trial_clock, "gpt-6-luna", "xhigh")
+    if notification == "turn/started":
+        steps[2][2]["turn"]["items"] = [item]
+    elif notification == "turn/completed":
+        steps[4][1]["items"] = [item]
+    else:
+        steps.insert(0, ("raw_on_close", "turn/completed", {"turn": {
+            "id": "turn-gpt-6-luna-xhigh", "status": "interrupted", "items": [item], "error": None}}))
+    harness = Harness(tmp_path / "homes", scripted(fixtures, {LUNA_L1: lambda f: steps}))
+    status = await run_stalled(root, plan, harness, clock, trial_clock, compat, study)
+    attempt = attempt_of(rows, "gpt-6-luna", "L1", "violation")
+    payload = payloads(root)[attempt]
+    result = payload["observer_result"]
+    assert result["termination_kind"] == "infrastructure_incomplete" and result["provider_stall"] is None
+    assert result["infrastructure_failures"] == ["unreconciled items in turn lifecycle notification"]
+    assert result["queue_reconciled"] is False and result["world_checkpoint"] is None
+    assert any(item in (event["raw"]["params"].get("turn") or {}).get("items", [])
+               for event in result["raw_events"])
+    assert payload["check"]["classification"] is None and payload["check"]["passed"] is False
+    assert f"execution_check_failure:{attempt}" in status["holds"]
+    assert status["status"] == "held" and f"unknown_final_usage:{attempt}" in status["holds"]
+    assert payload["orchestrator"]["usage_settlement"]["status"] == "unresolved"
+    assert payload["orchestrator"]["provider_pause"] is None and v11_live.study_provider_pauses(study) == {}
+    assert clock.waits == []
+
+
+@pytest.mark.parametrize("change", [
+    {"error": {"message": "lost", "codexErrorInfo": "streamDisconnected"}},
+    {"status": "completed"}, {"id": "another-turn"}, {"threadId": "another-thread"}, {},
+], ids=["stream_disconnected", "status", "turn_id", "thread_id", "matching_duplicate"])
+async def test_every_late_completion_is_reconciled_with_the_settled_turn(compat, tmp_path, change):
+    study, rows, fixtures = smoke_study(tmp_path / "study")
+    root, plan = sealed_root(study, compat)
+    clock, trial_clock = PauseClock(), TrialClock()
+    turn = {"id": "turn-gpt-6-luna-xhigh", "status": "interrupted", "items": [], "error": None,
+            **{key: value for key, value in change.items() if key != "threadId"}}
+    if not change:  # absent items and error are as silent as an empty list and null error
+        turn.pop("items")
+        turn.pop("error")
+    late = ("raw_on_close", "turn/completed", {"turn": turn,
+                                              **({"threadId": change["threadId"]} if "threadId" in change else {})})
+    harness = Harness(tmp_path / "homes", scripted(fixtures, {LUNA_L1: lambda f: [
+        late, *stall_steps(trial_clock, "gpt-6-luna", "xhigh")]}))
+    status = await run_stalled(root, plan, harness, clock, trial_clock, compat, study)
+    attempt = attempt_of(rows, "gpt-6-luna", "L1", "violation")
+    payload = payloads(root)[attempt]
+    result = payload["observer_result"]
+    completions = [event["raw"] for event in result["raw_events"]
+                   if event["raw"]["method"] == "turn/completed"]
+    assert len(completions) == 2 and completions[-1]["params"]["turn"] == turn
+    if not change:
+        assert status["status"] == "complete" and status["holds"] == []
+        assert result["termination_kind"] == "provider_stalled" and result["infrastructure_failures"] == []
+        assert result["provider_stall"]["runtime_event_methods"].count("turn/completed") == 2
+        return
+    assert result["termination_kind"] == "infrastructure_incomplete" and result["provider_stall"] is None
+    assert result["infrastructure_failures"] == ["terminal notification contradicts settled turn"]
+    assert payload["check"]["classification"] is None and payload["check"]["passed"] is False
+    assert f"execution_check_failure:{attempt}" in status["holds"]
+    assert status["status"] == "held" and f"unknown_final_usage:{attempt}" in status["holds"]
+    assert payload["orchestrator"]["usage_settlement"]["status"] == "unresolved"
+    assert payload["orchestrator"]["provider_pause"] is None and v11_live.study_provider_pauses(study) == {}
+    assert clock.waits == []
 
 
 async def test_stalls_and_overloads_share_one_limit_and_a_resume_waits_out_the_window(compat, tmp_path):
