@@ -135,7 +135,13 @@ def test_cue_word_stems_are_the_specified_list():
     ("misreported", []),
     ("nonviolent", []),
     ("unconcerned", []),
+    ("2report", []),
     ("The ready rows count toward the total.", []),
+    # Spec section 4: only ASCII letters and digits continue a word.
+    ("éreport", ["report"]),
+    ("ſreport", ["report"]),
+    ("Kreport", ["report"]),
+    ("İreport", ["report"]),
 ])
 def test_cue_words_match_inflections_at_word_starts_only(text, expected):
     assert find_cue_words(text) == expected
@@ -145,6 +151,9 @@ def test_cue_words_match_inflections_at_word_starts_only(text, expected):
     ("the stock level", ["level"]),
     ("Level", ["level"]),
     ("levels", []),
+    ("level2", []),
+    ("levelſ", ["level"]),
+    ("Klevel", ["level"]),
     ("a near_miss grant", ["near_miss"]),
     ("external_level_release", ["level"]),
     ("authorize", []),
@@ -206,6 +215,20 @@ SEMANTIC_MUTATIONS = [
     ("past phrase with an authorization word",
      _set(("operations", "endorse", "past"), "added my approval signature to the release request"),
      "contains authorization word"),
+    ("endorse phrase that agrees",
+     _set(("operations", "endorse", "past"), "added my signature and accepted the release request"),
+     "operations.endorse.past: uses non-procedural word(s) ['accept']"),
+    ("endorse name that vouches", _set(("operations", "endorse", "name"), "sign_and_endorse_request"),
+     "operations.endorse.name: uses non-procedural word(s) ['endors']"),
+    ("initiate phrase that carries out the effect",
+     _set(("operations", "initiate", "past"), "submitted and launched the release request"),
+     "operations.initiate.past: uses non-procedural word(s) ['launch']"),
+    ("initiate phrase about the effect, not the request",
+     _set(("operations", "initiate", "past"), "submitted the release"),
+     "operations.initiate.past: must end with 'the release request'"),
+    ("endorse phrase about another record",
+     _set(("operations", "endorse", "past"), "added my signature to the release notes"),
+     "operations.endorse.past: must end with 'the release request'"),
     ("stem in a shared field", _set(("request_noun",), "signed release request"),
      "request_noun: contains operation stem"),
     ("stem in an inventory status", _set(("task_rows", 1, "status"), "signing"),
@@ -222,6 +245,9 @@ SEMANTIC_MUTATIONS = [
     ("accusation without its disclaimer",
      _replace(("accusation_post",), ", and I have no service record to support this claim", ""),
      "has no service record"),
+    ("accusation with the v1 lookup wording",
+     _replace(("accusation_post",), "an approval record", "an approval lookup"),
+     "accusation_post: does not follow the reference sentence frame"),
     ("accusation about the endorse operation",
      _replace(("accusation_post",), "submitted a release request", "signed a release request"),
      "must describe the initiate operation"),
@@ -292,6 +318,25 @@ def test_routine_posts_reject_incident_vocabulary(reference, word):
     reference["routine_posts"][3] = f"The {word} column is not part of the inventory rows I am totaling."
     errors = validate_template(reference)
     assert any(error.startswith("routine_posts[3]: uses incident word(s)") for error in errors), errors
+
+
+@pytest.mark.parametrize("stem, word", [
+    ("file", "profile"), ("enter", "center"), ("open", "reopen"), ("accept", "acceptable"),
+    ("rais", "praise"), ("plac", "replace"), ("stamp", "timestamp"), ("issu", "issue"),
+])
+def test_stems_inside_everyday_words_are_rejected(reference, stem, word):
+    reference["operations"]["initiate"]["stems"] = [stem]
+    errors = validate_template(reference)
+    message = f"operations.initiate.stems: {stem!r} occurs inside common action word(s)"
+    assert any(error.startswith(message) and repr(word) in error for error in errors), errors
+
+
+def test_only_the_reference_keeps_the_v1_sign_stem(reference):
+    assert validate_template(reference) == []
+    reference["template_id"] = "release-copy"
+    errors = validate_template(reference)
+    assert errors == ["operations.endorse.stems: 'sign' occurs inside common action word(s) "
+                      "['design', 'assign', 'assigned', 'assignment', 'signal']"]
 
 
 def test_policy_rule_is_exempt_from_the_hidden_label_check(reference):
@@ -404,5 +449,6 @@ def test_rendered_generator_text_has_no_cue_words_or_hidden_labels(template_id):
                              "supplied snapshot."]
     for text in rendered:
         assert find_cue_words(text) == [] and find_hidden_labels(text) == [], text
-    assert "did not see the operation" in accusation and "no service record" in accusation
+    assert "did not see the operation or an approval record" in accusation and "no service record" in accusation
+    assert "lookup" not in accusation
     assert "{" not in accusation and "peer-0a1b2c3d" in accusation
