@@ -15,7 +15,10 @@ Each archived primary attempt becomes one attempt in the shape produced by P1's
 - ``usage`` (settled and observed tokens, and the settlement label, such as
   ``bounded_by_reservation``) and ``elapsed_seconds``;
 - ``excluded_from_analysis``: true for a failed attempt that an approved
-  amendment accepted (spec 10); such an attempt is also not ``eligible``.
+  amendment accepted, and for a ``provider_unavailable`` attempt (a capacity
+  refusal before any tool request, spec 10, revision 3); such an attempt is also
+  not ``eligible``. It is consumed and exported, not quarantined, and its index
+  row names the ``exclusion_reason``.
 
 No model, repair, resume, or admission operation is performed. The export needs
 the study directory in which the root is registered and the root at its
@@ -25,7 +28,9 @@ listing and amendments. It applies verify's authorization-evidence check to ever
 started row: a row whose retained authorization record is missing, corrupt, or
 mismatched is ``quarantined_authorization`` and is not scored, while other valid
 rows still export. The index carries ``review_plan_hash`` (null outside
-collection). Compatibility roots are engineering checks and are not exported.
+collection) and a calibration root's ``selected_arms``, which the export
+rechecks against the sealed lane plans. Compatibility roots are engineering
+checks and are not exported.
 Every planned row is kept; unrun, incomplete, and quarantined rows have no
 attempt and never become negatives.
 """
@@ -45,16 +50,19 @@ from ..peer_reporting.live_archive import verify_archived_index
 from ..peer_reporting.live_runtime import _text_item
 from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
 from .bundle import ProtocolBundle, load_bundle
+from .lanes import PROVIDER_UNAVAILABLE
 from .live import (
     CONFIGURATION_CHECKS,
     _row_valid,
     authorization_error,
     check_abandoned_root,
+    check_arm_selection,
     check_retained_review_plan,
     check_start_claims,
     evaluate_transport,
     journaled_authorizations,
     lane_journals,
+    planned_arms,
     read_live_plan,
     read_root_fixture,
     read_study_manifest,
@@ -156,7 +164,12 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
                                observer_error=payload["observer_error"], usage_settlement=settlement["status"],
                                stop_reasons=payload["orchestrator"]["collection_stop_reasons"])
     _require(check == payload["check"], "archived transport classification differs from its evidence")
-    eligible = all(check["checks"][key] for key in CONFIGURATION_CHECKS if key != "tools_registered")
+    # Spec 10 (revision 3): a capacity refusal is consumed and exported, but it is no behavioral opportunity.
+    provider_unavailable = check.get("classification") == PROVIDER_UNAVAILABLE
+    _require(provider_unavailable == (payload["orchestrator"].get("provider_pause") is not None),
+             "a provider pause is sealed exactly for a provider_unavailable attempt")
+    eligible = (all(check["checks"][key] for key in CONFIGURATION_CHECKS if key != "tools_registered")
+                and not provider_unavailable)
     # Later infrastructure failures close the opportunity incompletely; they do
     # not erase a known positive established before that failure.
     termination = result["termination_kind"]
@@ -201,7 +214,7 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
             "usage": {"total_tokens": settlement["actual_tokens"],
                       "observed_total_tokens": (result.get("usage") or {}).get("observed_total_tokens"),
                       "settlement": settlement["status"]},
-            "elapsed_seconds": result.get("elapsed_seconds"), "excluded_from_analysis": False}
+            "elapsed_seconds": result.get("elapsed_seconds"), "excluded_from_analysis": provider_unavailable}
 
 
 def _read_attempt(state: _PhaseState, entry: dict, fixture: dict, *, phase: str, bundle: ProtocolBundle
@@ -252,6 +265,7 @@ def _exclude(row: dict, entry: dict, state: _PhaseState, hashes: list[str], erro
         errors.append(f"amendment {hashes} accepts {entry['attempt_id']}, which is not a failed attempt of this root")
         return
     row.update(excluded_from_analysis=True, amendment_hashes=hashes)
+    row.setdefault("exclusion_reason", "accepted_by_amendment")
     if row["attempt"] is not None:
         row["attempt"].update(excluded_from_analysis=True, eligible=False)
 
@@ -322,6 +336,8 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
                 if row["attempt"] is not None and row["authorization_error"] is not None:
                     row.update(status="quarantined_authorization", attempt=None,
                                evidence_error=row["authorization_error"])
+                if row["attempt"] is not None and row["attempt"]["excluded_from_analysis"]:
+                    row.update(excluded_from_analysis=True, exclusion_reason=PROVIDER_UNAVAILABLE)
                 if entry["attempt_id"] in accepted:
                     _exclude(row, entry, state, sorted(accepted[entry["attempt_id"]]), amendment_errors)
                 if row["attempt"] is not None and scorer is not None:
@@ -368,6 +384,7 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     journals = lane_journals(directory, plan)
     start_claims = check_start_claims(study_directory, plan, directory, journals)
     ledger = verify_consumed_ledger(directory, plan, prior_roots, bundle=bundle, study_directory=study_directory)
+    selected_arms = check_arm_selection(plan, planned_arms(directory, plan))
     review_plan_hash = check_retained_review_plan(directory, plan) if plan["phase"] == "collection" else None
     amendments = study_amendments(study_directory) if plan["phase"] == "smoke" else []
     data = inspect_live_root(directory, bundle=bundle, scorer=scorer, amendments=amendments)
@@ -396,6 +413,7 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
         "semantic_review": "pending_human_review_of_free_text", "study_registration": registration,
         "study_registry": study_registry_listing(study_directory), "start_claims": start_claims,
         "authorization_evidence": authorizations, "review_plan_hash": review_plan_hash,
+        "selected_arms": selected_arms,
         # Review packets recompute the frozen plan against the sealed manifest this root was built from.
         "study_manifest": read_study_manifest(study_directory),
         "analysis_exclusions": sorted(row["assignment_id"] for row in data["rows"] if row["excluded_from_analysis"]),

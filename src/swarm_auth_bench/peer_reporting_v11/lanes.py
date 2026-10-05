@@ -20,6 +20,11 @@ and drains them; such a truncation is consumed and behaviorally ineligible
 inside a run, and an archived failed attempt holds every later run of the same
 plan unless an approved amendment accepts it.
 
+A provider capacity refusal before any tool request (``provider_unavailable``,
+spec 10, revision 3) is consumed and ineligible but is not an execution failure:
+it pauses all new admission for 10 minutes (``ProviderPause``), and a third such
+attempt within any 60 minutes holds all new admission.
+
 This module performs no model call and imports no v1.1 content module.
 """
 
@@ -31,7 +36,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterable
 
@@ -67,6 +72,15 @@ HARD_STOP = "hard_stop"
 FORCED_STOP_DEADLINE = "forced_stop_deadline"
 STOP_TRUNCATION_REASON = "hard_stop_or_forced_deadline"  # the attempt's collection stop reason
 STOP_TRUNCATION = "stop_truncation"  # classification: consumed, ineligible, not an execution failure
+# Spec 10 (revision 3): a provider capacity refusal before any tool request. Consumed, ineligible, settled at its
+# reservation, not an execution failure; it pauses new admission, and the third within the window holds.
+PROVIDER_UNAVAILABLE = "provider_unavailable"
+PROVIDER_PAUSE = "provider_pause"  # refusal reason while a pause is active; the entry stays unstarted
+PROVIDER_PAUSE_SECONDS = 600
+PROVIDER_WINDOW_SECONDS = 3600
+PROVIDER_UNAVAILABLE_LIMIT = 3
+PAUSE_RECORD_FIELDS = frozenset({"attempt_id", "lane_id", "paused_at", "resume_at", "paused_at_utc", "resume_at_utc",
+                                 "pause_seconds", "window_seconds", "window_count", "limit", "holds_admission"})
 
 
 def validate_effort(value: Any) -> str:
@@ -248,14 +262,17 @@ def attempt_hold_kinds(check_passed: Any, failure_reasons: Any, usage_settlement
     """Why an archived attempt holds all new admission; empty when it does not.
 
     A failed execution check holds, except a check whose only failure is unknown
-    usage after a clean close that settled at the reservation bound, and a
+    usage after a clean close that settled at the reservation bound, a
     ``stop_truncation`` (a hard stop or the deadline truncated an otherwise clean
-    attempt). Any settlement other than ``settled`` or ``bounded_by_reservation``
-    holds, including for a stop truncation.
+    attempt), and a ``provider_unavailable`` attempt settled at its reservation
+    (its pause and window limit are ``ProviderPause``'s). Any settlement other than
+    ``settled`` or ``bounded_by_reservation`` holds, including for a stop truncation.
     """
     kinds = []
     bounded_only = usage_settlement == BOUNDED_USAGE and set(failure_reasons or []) <= {"usage_known"}
-    if check_passed is not True and not bounded_only and classification != STOP_TRUNCATION:
+    provider_unavailable = classification == PROVIDER_UNAVAILABLE and usage_settlement == BOUNDED_USAGE
+    if (check_passed is not True and not bounded_only and classification != STOP_TRUNCATION
+            and not provider_unavailable):
         kinds.append("execution_check_failure")
     if usage_settlement not in SETTLED_USAGE:
         kinds.append("unknown_final_usage")
@@ -334,7 +351,7 @@ class AdmissionPolicy:
         prefix = "retained_" if retained else ""
         accepted = self.accepted_attempts
         halted = report.get("halted")
-        if halted and halted.get("reason") not in {None, "global_admission_hold"} and not retained:
+        if halted and halted.get("reason") not in {None, "global_admission_hold", PROVIDER_PAUSE} and not retained:
             self.hold(f"lane_halted:{lane}:{halted.get('reason')}")
         for attempt_id in report.get("unreconciled_starts") or []:
             self.hold(f"{prefix}unreconciled_start:{attempt_id}")
@@ -359,6 +376,105 @@ class AdmissionPolicy:
                 self.hold(f"{prefix}failed_or_unknown_attempt:{row['attempt_id']}")
             elif row["status"] not in {"archived", "unrun", "not_started_preflight_failed"}:
                 self.hold(f"{prefix}incomplete_attempt:{row['attempt_id']}")
+
+
+def _utc(value: float) -> str:
+    return datetime.fromtimestamp(value, timezone.utc).isoformat()
+
+
+def validate_pause_record(record: Any) -> dict:
+    """A journaled provider pause: the attempt, its lane, its wall-clock pause, and its window count."""
+    if type(record) is not dict or set(record) - {"recovered"} != PAUSE_RECORD_FIELDS:
+        raise ValueError(f"a provider pause record must contain exactly {sorted(PAUSE_RECORD_FIELDS)}")
+    for key in ("paused_at", "resume_at"):
+        if isinstance(record[key], bool) or not isinstance(record[key], (int, float)) or not math.isfinite(record[key]):
+            raise ValueError(f"provider pause {key} must be a finite wall-clock time")
+    if (type(record["attempt_id"]) is not str or type(record["lane_id"]) is not str
+            or abs(record["resume_at"] - record["paused_at"] - PROVIDER_PAUSE_SECONDS) > 1e-6
+            or (record["pause_seconds"], record["window_seconds"], record["limit"])
+            != (PROVIDER_PAUSE_SECONDS, PROVIDER_WINDOW_SECONDS, PROVIDER_UNAVAILABLE_LIMIT)
+            or type(record["window_count"]) is not int or record["window_count"] < 1
+            or record["holds_admission"] is not (record["window_count"] >= PROVIDER_UNAVAILABLE_LIMIT)):
+        raise ValueError("a provider pause record differs from the revision 3 pause rule")
+    return record
+
+
+class ProviderPause:
+    """Spec 10 (revision 3): provider capacity refusals pause new admission; the third within the window holds.
+
+    Each ``provider_unavailable`` attempt pauses all new admission for
+    ``PROVIDER_PAUSE_SECONDS`` of wall-clock time from its archive. Its window
+    count is the number of such attempts, itself included, in the
+    ``PROVIDER_WINDOW_SECONDS`` ending at its archive; at
+    ``PROVIDER_UNAVAILABLE_LIMIT`` it holds all new admission. Records are
+    journaled in the attempt's lane, so a resumed or restarted run restores them
+    (``restore``): it respects an active pause, keeps counting in the window, and
+    holds at start while the window still holds the limit (``limit_reached``).
+    """
+
+    def __init__(self, *, wall_clock: Callable[[], float] = time.time,
+                 on_change: Callable[[], None] | None = None) -> None:
+        self.wall_clock, self.on_change = wall_clock, on_change
+        self.events: list[dict] = []
+        self.ended: set[str] = set()
+
+    def restore(self, records: Iterable[dict], ended: Iterable[str] = ()) -> None:
+        known = {event["attempt_id"] for event in self.events}
+        for record in sorted(records, key=lambda item: (item["paused_at"], item["attempt_id"])):
+            record = validate_pause_record(deepcopy(record))
+            if record["attempt_id"] not in known:
+                known.add(record["attempt_id"])
+                self.events.append({key: record[key] for key in PAUSE_RECORD_FIELDS})
+        self.ended |= set(ended)
+
+    def window_count(self, at: float) -> int:
+        return sum(at - PROVIDER_WINDOW_SECONDS < event["paused_at"] <= at for event in self.events)
+
+    def record(self, attempt_id: str, lane_id: str) -> dict:
+        """Pause admission for a provider_unavailable attempt; return its journal record."""
+        if any(event["attempt_id"] == attempt_id for event in self.events):
+            raise ValueError(f"{attempt_id} already paused admission; an attempt is consumed once")
+        now = float(self.wall_clock())
+        count = self.window_count(now) + 1
+        record = validate_pause_record({
+            "attempt_id": attempt_id, "lane_id": lane_id, "paused_at": now,
+            "resume_at": now + PROVIDER_PAUSE_SECONDS, "paused_at_utc": _utc(now),
+            "resume_at_utc": _utc(now + PROVIDER_PAUSE_SECONDS), "pause_seconds": PROVIDER_PAUSE_SECONDS,
+            "window_seconds": PROVIDER_WINDOW_SECONDS, "window_count": count, "limit": PROVIDER_UNAVAILABLE_LIMIT,
+            "holds_admission": count >= PROVIDER_UNAVAILABLE_LIMIT})
+        self.events.append(record)
+        if self.on_change is not None:
+            self.on_change()
+        return deepcopy(record)
+
+    def active(self) -> dict | None:
+        """The pause in force now, as an admission refusal, or None."""
+        now = self.wall_clock()
+        latest = max(self.events, key=lambda event: event["resume_at"], default=None)
+        if latest is None or now >= latest["resume_at"]:
+            return None
+        return {"reason": PROVIDER_PAUSE, "paused_by_attempt_id": latest["attempt_id"],
+                "paused_by_lane_id": latest["lane_id"], "resume_at": latest["resume_at"],
+                "resume_at_utc": latest["resume_at_utc"], "remaining_seconds": latest["resume_at"] - now}
+
+    def expired_unended(self) -> list[dict]:
+        """Pauses whose time is over but whose end is not journaled yet."""
+        now = self.wall_clock()
+        return [deepcopy(event) for event in self.events
+                if event["attempt_id"] not in self.ended and now >= event["resume_at"]]
+
+    def limit_reached(self) -> dict | None:
+        """The window ending now still holds the limit: the latest refusal and the count, or None."""
+        now = self.wall_clock()
+        count = self.window_count(now)
+        if count < PROVIDER_UNAVAILABLE_LIMIT:
+            return None
+        latest = max((event for event in self.events if event["paused_at"] <= now), key=lambda event: event["paused_at"])
+        return {"attempt_id": latest["attempt_id"], "window_count": count}
+
+    def summary(self) -> dict:
+        return {"events": deepcopy(self.events), "ended": sorted(self.ended), "active": self.active(),
+                "window_count_now": self.window_count(self.wall_clock())}
 
 
 class GlobalSlots:

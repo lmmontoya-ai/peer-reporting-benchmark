@@ -14,7 +14,12 @@ phase plans, so the P1 module is not edited. The differences are:
   admission closed; valid late work still receives ``closed`` (spec 10);
 - at close, every pending tool receipt is reconciled with the response prepared
   for its call; a contradiction is an execution failure, and a missing receipt
-  is recorded in ``tool_receipt_reconciliation`` (spec 10).
+  is recorded in ``tool_receipt_reconciliation`` (spec 10);
+- a turn that ends with an explicit provider capacity error (``serverOverloaded``)
+  after packet delivery, before any tool request and with no observer output, and
+  that otherwise closes cleanly, terminates as ``provider_unavailable`` instead of
+  an invalid turn result (spec 10, revision 3). Any other error, or an overload
+  after a tool request or output, is an execution failure as before.
 
 The exact receipt matching, queue, drain, and usage handling are otherwise
 unchanged. No function in this module runs inference on import or during offline
@@ -44,10 +49,19 @@ from ..runtime import (
     TurnResult,
 )
 from .bundle import ProtocolBundle
-from .lanes import validate_effort, validate_world_mode
+from .lanes import PROVIDER_UNAVAILABLE, validate_effort, validate_world_mode
 
 ADAPTER_VERSION = "peer-reporting-v11-live-runtime-v1"
 PREFLIGHT_KIND = "peer_v11_runtime_preflight"
+# Spec 10 (revision 3): the provider's explicit capacity error, as the app-server's ``error`` notification names it.
+PROVIDER_OVERLOAD_CODE = "serverOverloaded"
+INVALID_TURN_RESULT = "turn result identity, status, or error invalid"
+
+
+def provider_error_code(error: Any) -> str | None:
+    """The ``codexErrorInfo`` code of an app-server turn error, when it is a plain string code."""
+    info = error.get("codexErrorInfo") if type(error) is dict else None
+    return info if type(info) is str else None
 
 
 def validate_preflight(requested_model: str, caps: dict, qualification: dict, runtime: Any | None = None, *,
@@ -153,6 +167,7 @@ class _Controller:
         self.response_usage: dict[str, int | None] = {}
         self.observed_tokens: int | None = None
         self.usage_missing = False
+        self.provider_errors: list[dict] = []
         self.failures: list[str] = []
         self.interrupts: set[asyncio.Task] = set()
         self.worker: asyncio.Task | None = None
@@ -497,6 +512,11 @@ class _Controller:
         if method in {"thread/tokenUsage/updated", "rawResponse/completed"}:
             await self._usage(raw)
             return
+        if method == "error":
+            self.provider_errors.append({"error": deepcopy(params.get("error")), "will_retry": params.get("willRetry"),
+                                         "code": provider_error_code(params.get("error")),
+                                         "elapsed_seconds": self.elapsed(), "arrival_event_seq": len(self.events) - 1})
+            return
         item = params.get("item") or {}
         if method in {"item/started", "item/completed"} and item.get("type") in NATIVE_ITEM_TYPES:
             await self.fail("native tool item appeared")
@@ -571,6 +591,32 @@ class _Controller:
             raw = self.session.queue.get_nowait()
             await self.event({"kind": "codex_event", "agent_id": "observer",
                               "method": raw.get("method"), "raw": raw})
+
+    def provider_overload(self, result: TurnResult | None, requested_model: str) -> dict | None:
+        """Spec 10 (revision 3): evidence that the provider refused the turn for capacity, or None.
+
+        The attributed turn ended by itself (``failed``) after the exact packet
+        was delivered, every scoped ``error`` notification carries the
+        ``serverOverloaded`` code and the last one does not announce a retry, a
+        turn error, if any, carries the same code, no tool request arrived, no
+        assistant output appeared, no usage notification lacked a total, and no
+        failure was recorded. Anything else is an invalid turn result.
+        """
+        session, errors = self.session, self.provider_errors
+        if (result is None or session is None or result.model != requested_model or result.turn_id is None
+                or result.turn_id != session.turn_id or result.status != "failed"
+                or result.termination_reason is not None):
+            return None
+        if (self.failures or self.requests or self.receipts or self.pending_receipts or self.assistant_items
+                or self.assistant_deltas or result.text or self.exposure_receipt is None or self.usage_missing
+                or self.hard_stop.is_set() or (self.boundary or {}).get("reason") != "turn_completed"):
+            return None
+        if (not errors or any(error["code"] != PROVIDER_OVERLOAD_CODE for error in errors)
+                or errors[-1]["will_retry"] is True
+                or (result.error is not None and provider_error_code(result.error) != PROVIDER_OVERLOAD_CODE)):
+            return None
+        return {"code": PROVIDER_OVERLOAD_CODE, "turn_status": result.status, "turn_error": deepcopy(result.error),
+                "error_notifications": deepcopy(errors), "tool_requests": 0, "observer_outputs": 0}
 
 
 def _audited_world(controller: _Controller) -> tuple[dict, dict | None]:
@@ -701,10 +747,15 @@ async def run_live_observer(
         await controller.drain_runtime_events()
     except (Exception, asyncio.CancelledError) as error:
         await controller.fail(f"bounded drain incomplete: {type(error).__name__}: {error}")
-    if result is not None:
+    # Spec 10 (revision 3): a capacity refusal before any tool request is classified, not failed, if the
+    # rest of the close stays clean; it is rechecked below after cleanup, receipts, and the world audit.
+    overload = controller.provider_overload(result, requested_model)
+    if overload is not None:
+        controller.emit("provider_overload_observed", **overload)
+    elif result is not None:
         if (result.model != requested_model or not controller.session or result.turn_id != controller.session.turn_id
                 or result.status not in {"completed", "interrupted"} or result.error):
-            await controller.fail("turn result identity, status, or error invalid")
+            await controller.fail(INVALID_TURN_RESULT)
         if result.termination_reason in {"native_tool_attempt", "unknown_server_request", "protocol_violation",
                                         "undeclared_tool_attempt", "tool_handler_failure"}:
             await controller.fail(f"runtime termination: {result.termination_reason}")
@@ -785,9 +836,15 @@ async def run_live_observer(
     acknowledged_replies = sorted({message["event_id"] for receipt in controller.receipts
                                    if receipt["tool"] == "read_channel" and receipt["result"].get("status") == "ok"
                                    for message in receipt["result"]["messages"] if message["event_id"] in reply_ids})
+    if overload is not None and (controller.failures or not controller.queue_reconciled or not runtime_closed
+                                 or checkpoint is None or outputs or controller.requests):
+        # The overload did not end an otherwise clean attempt, so the failed turn is an execution failure again.
+        controller.failures.append(INVALID_TURN_RESULT)
+        controller.emit("infrastructure_failed", reason=INVALID_TURN_RESULT, provider_overload=overload)
+        overload = None
     boundary = controller.boundary or {"termination_kind": "infrastructure_incomplete", "reason": "no_boundary"}
     termination = "infrastructure_incomplete" if controller.failures or not controller.queue_reconciled \
-        else boundary["termination_kind"]
+        else PROVIDER_UNAVAILABLE if overload is not None else boundary["termination_kind"]
     controller.emit("observer_attempt_reconciled", termination_kind=termination,
                     queue_reconciled=controller.queue_reconciled, failures=controller.failures, usage=usage)
     controller.log.close()
@@ -805,6 +862,7 @@ async def run_live_observer(
         "exposure_confirmed": controller.exposure_receipt is not None,
         "exposure_issue": None if controller.exposure_receipt is not None else "initial exposure unverified",
         "initial_receipt": controller.exposure_receipt, "termination_kind": termination, "boundary": boundary,
+        "provider_overload": overload,
         "infrastructure_failures": controller.failures, "queue_reconciled": controller.queue_reconciled,
         "runtime_closed": runtime_closed, "elapsed_seconds": controller.elapsed(),
         "drain_elapsed_seconds": clock() - drain_started, "usage": usage,

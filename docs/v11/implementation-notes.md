@@ -161,7 +161,8 @@ The admission policy is that study's policy, amended by spec 10. These events
 hold all new admission for the rest of the run:
 
 - an archived attempt whose execution check failed, unless its classification
-  is `stop_truncation` (W09 R2-M2) or an approved amendment accepts it;
+  is `stop_truncation` (W09 R2-M2) or `provider_unavailable` (revision 3, which
+  pauses admission instead; see below), or an approved amendment accepts it;
 - an archived attempt whose usage settlement is not `settled` or
   `bounded_by_reservation` (unknown usage after an unclean close, usage never
   observed, a notification without a total, or a settlement conflict, which is
@@ -547,6 +548,146 @@ compatibility root that ran under an authorization without `root_path` would no
 longer verify. No compatibility, calibration, smoke, or collection call has been
 made, so no retained evidence is affected.
 
+### Specification revision 3, live layer (spec sections 9 and 10)
+
+The first calibration run held after 44 of 84 starts. One sol-xhigh turn ended
+about 7 s in, after packet delivery and before any tool request. The sequence was
+`thread/status/changed` (`systemError`), then `error` with `codexErrorInfo:
+"serverOverloaded"`, then a failed `turn/completed`, then `runtime/disconnected`,
+with no usage total. Revision 2 classified it `infrastructure_incomplete` with
+unresolved usage and held all admission. Revision 3 changes the policy for this
+case only. `test_live_overload.py` replays this sequence through the fake
+transport (`overload_steps`), with a `PauseClock` standing in for the wall clock.
+
+Adapter (`live_runtime.py`). The controller records every turn-scoped `error`
+notification with its `codexErrorInfo` code and `willRetry` flag. After the
+drain, `provider_overload` returns evidence only when every one of these holds:
+
+- the attributed turn ended by itself with status `failed`: its boundary is
+  `turn_completed`, with no stop, no interrupt, and no runtime termination reason;
+- the packet receipt was verified;
+- no tool request, receipt, assistant item, delta, or turn text appeared;
+- no usage notification lacked a total;
+- no failure was recorded;
+- every scoped error has the code `serverOverloaded`, and the last one announces
+  no retry;
+- the turn error, if any, has the same code.
+
+When that evidence exists, the adapter skips the invalid-turn failure and emits
+`provider_overload_observed`. It checks again after cleanup, receipt
+reconciliation, and the world audit. A new failure, an unclosed runtime, an
+unreconciled queue, a missing checkpoint, any output, or any request restores the
+original `turn result identity, status, or error invalid` failure. Otherwise the
+termination kind is `provider_unavailable`, and the result carries
+`provider_overload`, which is null in every other case. A `runtime/disconnected`
+while the runtime closes is ignored, as before. Other error codes, an overload
+after a tool request or output, a missing or mismatched packet delivery, and an
+announced retry remain execution failures. The tests cover each of these cases.
+
+Classification and settlement. `evaluate_transport` and `evaluate_qualification`
+classify an attempt `provider_unavailable` when all of these hold:
+
+- the termination kind and the overload evidence agree;
+- there is no request and no output;
+- the configuration, world-binding, initial-receipt, and clean-close checks pass
+  (`PROVIDER_UNAVAILABLE_REQUIRED`);
+- the settlement is `bounded_by_reservation`.
+
+The check still fails `valid_close`, so the attempt is behaviorally ineligible,
+and a compatibility probe stays unqualified. The orchestrator
+(`phase.provider_unavailable_close`) settles such an attempt at the larger of its
+observed usage and its reservation even when no usage was observed. This is the
+one exception to the observed-usage rule. The settlement is labeled
+`bounded_by_reservation` with `settlement_reason: "provider_unavailable"` in the
+payload and the `usage_settled` journal record. A usage notification without a
+total, an unclean close, or any orchestrator failure still leaves usage
+unresolved. `attempt_hold_kinds` does not count a `provider_unavailable`
+attempt with that settlement as an execution failure, during a run or as
+retained evidence. Lane reports add `settlement_reason` to each entry and
+resource observation (`provider_unavailable` or
+`observed_usage_after_clean_close`), and they add
+`ledger.bounded_tokens_by_settlement_reason` and `provider_pauses`. The earlier
+bounded settlement record is unchanged.
+
+Pause (`lanes.ProviderPause`). `_archive` runs synchronously, so no other lane's
+admission can interleave. It registers the pause right after the final check.
+The pause lasts `PROVIDER_PAUSE_SECONDS` (600) of wall-clock time. Its window
+count is the number of refusals, itself included, in the
+`PROVIDER_WINDOW_SECONDS` (3600) ending at its archive. The record is sealed in
+the payload as `orchestrator.provider_pause`, null for every other attempt, and
+journaled as `provider_pause_started` right after `attempt_archived`. The third
+refusal in a window holds with `provider_unavailable_limit:<attempt>`.
+
+While a pause is active, the dispatcher starts nothing new and active attempts
+finish within their caps. With nothing active, it polls with
+`pause_sleep(min(remaining, poll_seconds))` and rechecks holds and stop files
+after each poll. A stop, the cutoff, or the deadline therefore still applies
+during a pause. When a pause's time is over, the dispatcher journals
+`provider_pause_ended` in that attempt's lane. A pause that began during another
+lane's preflight refuses that start at the post-preflight check
+(`admission_paused`, naming `paused_by_attempt_id`). That entry has no start, no
+reservation, and no session, and its runtime is closed. The dispatcher offers it
+again after the pause, so it runs once. This refusal does not halt the lane.
+`run_live_phase` takes `wall_clock` (already a parameter) and the new
+`pause_sleep` (default `sleep`). `Hooks` gains `wall_clock`, `pause_sleep`, and
+`provider_pause`, and `status.json` carries `provider_pauses`.
+
+Restart. `run_lanes` restores the pauses from every lane journal after
+reconciling the lanes. If a crash fell between an archive and its pause record,
+`reconcile_lane` journals the pause sealed in the attempt (`recovered: true`).
+An active pause delays the first dispatch, and the window count continues. If
+the window ending at run start still holds three refusals, the run holds with
+`retained_provider_unavailable_limit:<attempt>`. Once that window has passed, a
+later run proceeds. Verify requires each journaled pause to equal the pause
+sealed in its attempt, and it requires a sealed pause exactly for each
+`provider_unavailable` attempt.
+
+Export and other consumers. An exported `provider_unavailable` attempt has
+`eligible: false` and `excluded_from_analysis: true`. Its row is archived, not
+quarantined, carries `exclusion_reason: "provider_unavailable"`, and is listed in
+`analysis_exclusions`. The scorer blocks it as ineligible, and review packets
+skip it. Rows excluded by an amendment now also carry `exclusion_reason:
+"accepted_by_amendment"`. Resource proposals ignore the attempt with the reason
+`classification:provider_unavailable`. A `provider_unavailable` smoke attempt is
+not valid smoke evidence. As with a stop truncation, the collection gate needs an
+approved amendment for it, and `record_amendment` accepts one. Pause time counts
+against the lane walls, because spec 10 counts all open-run time. Each pause
+adds up to 600 s to every open lane.
+
+Calibration arm selection (spec 9). `build_phase_plan(..., arms=...)` and CLI
+`build --arm NAME` (repeatable) plan only the rows of the named arms of the
+calibration split. The validation:
+
+- every name must be an arm of that split in the study;
+- each selected arm must keep at least one unconsumed row;
+- other phases refuse a selection (`validate_arm_selection`), and so does the CLI
+  before any other check.
+
+The top plan seals `selected_arms` (sorted), or null when every arm is planned.
+Verify (and so run and every gate), and export (`check_arm_selection` over the
+sealed lane plans), require the planned rows' arms to equal the selection.
+Verify reports carry `selected_arms`, and so do export indexes. Gates are
+unchanged: the needed lanes come from the selected rows, so the low-effort
+extension arm needs a qualified compatibility attempt for every low lane. The
+consumed-attempt ledger is unchanged. An extension root names the held
+calibration root with `--prior-root`, excludes its consumed starts, and
+supersedes it. A later `--arm calibration` root that names both earlier roots
+finishes the original arm without repeating any start.
+
+New CLI argument: `build --arm NAME` (calibration only, repeatable).
+
+Bindings. Tool schemas, descriptions, wire specs, catalogs, the client,
+`LIVE_VERSION`, and `ADAPTER_VERSION` are unchanged, so retained compatibility
+roots still serve as gate evidence. The adapter now returns the new
+`provider_overload` key, and the overload case returns the new termination kind,
+both without a version bump. Every other attempt's adapter behavior is unchanged.
+`live_runtime.py`, `phase.py`, `live.py`, `lanes.py`, `live_review.py`,
+`resources.py`, and `cli.py` changed, so implementation hashes change, and
+calibration, smoke, and collection roots must be built under this code. Plans
+gain `selected_arms` and the `provider_overload_policy` execution-policy key. The
+held calibration root ran under revision 2 code, so the freeze already prevents
+it from running again.
+
 ### Compatibility probe
 
 The probe makes one tool-exercise call per lane: six calls. It uses an L1
@@ -644,6 +785,14 @@ their resumes, a resume after a ten-hour pause, the copied-study and rebuilt-stu
 scenarios, the amendment path, a crash between registration and plan write,
 abandonment, the round barrier in the reviewer's speed simulation and in a live
 fake run, bounded-settlement labels, lane token headroom, and the new CLI flags.
+`test_live_overload.py` covers revision 3. It replays the observed overload
+sequence, which pauses admission and then resumes. It also covers the third
+refusal in an hour, which holds, and a resume after the window has passed. Every
+non-qualifying overload or error remains an execution failure. The remaining
+cases are a restart after a soft stop or a crash during a pause, a crash before
+the pause record is journaled, a pause that begins during preflight, the window
+rule, the export exclusion, and calibration arm selection with its ledger
+workflow and CLI refusal.
 
 ## WP10: resource proposals and caps approval
 

@@ -111,12 +111,14 @@ from .bundle import ProtocolBundle, load_bundle, require_v11_tools
 from .lanes import (
     BOUNDED_USAGE,
     PROMPT_CONDITIONS,
+    PROVIDER_UNAVAILABLE,
     SETTLED_USAGE,
     STOP_TRUNCATION,
     STOP_TRUNCATION_REASON,
     TOOL_REQUEST_CAP,
     AdmissionPolicy,
     GlobalSlots,
+    ProviderPause,
     lane_caps,
     lane_id,
     lane_order,
@@ -231,6 +233,9 @@ EXECUTION_POLICY = {
     "soft_stop_policy": "root_STOP_or_stop_file_refuses_new_admission_active_attempts_finish_within_caps",
     "hard_stop_or_deadline_policy": ("root_HARD_STOP_hard_stop_file_or_deadline_truncates_active_attempts"
                                      "_consumed_ineligible_not_an_execution_failure"),
+    "provider_overload_policy": ("server_overloaded_before_any_tool_request_and_output_is_provider_unavailable"
+                                 "_consumed_ineligible_settled_at_reservation_pauses_admission_600s"
+                                 "_third_within_3600s_holds_pauses_journaled"),
     "lane_wall": "counts_only_open_run_time_summed_across_runs",
     "lane_scheduling": ("global_dispatcher_lowest_unstarted_planned_order_whose_lane_is_idle"
                         "_round_barrier_r_plus_2_per_effort"),
@@ -245,6 +250,9 @@ CLEAN_CLOSE_CHECKS = ("queue_reconciled", "runtime_closed", "no_infrastructure_f
 # attempt was otherwise configured exactly and closed cleanly.
 STOP_TRUNCATION_REQUIRED = ("live_model_execution", "exact_model", "reasoning_effort_valid", "world_mode_bound",
                             "reviewed_catalog", "exact_tool_manifest", "world_bound_to_attempt") + CLEAN_CLOSE_CHECKS
+# Spec 10 (revision 3): a capacity refusal is not an execution failure only when the attempt was configured
+# exactly, the packet was delivered, and the close was clean.
+PROVIDER_UNAVAILABLE_REQUIRED = STOP_TRUNCATION_REQUIRED + ("initial_receipt_exact",)
 
 
 # Runtime construction and preflight
@@ -363,6 +371,21 @@ def stop_truncated(result: dict, checks: dict, stop_reasons: list[str] | None) -
             and all(checks.get(name) is True for name in STOP_TRUNCATION_REQUIRED))
 
 
+def provider_unavailable(result: dict, checks: dict, usage_settlement: str | None) -> bool:
+    """Spec 10 (revision 3): the provider refused the turn for capacity before any tool request or output.
+
+    The adapter's ``provider_unavailable`` termination and its overload evidence,
+    no tool request, no observer output, an exactly configured attempt with a
+    verified packet receipt and a clean close, and a reservation-bound settlement.
+    """
+    overload = result.get("provider_overload")
+    return (result.get("termination_kind") == live_runtime.PROVIDER_UNAVAILABLE
+            and usage_settlement == BOUNDED_USAGE and type(overload) is dict
+            and overload.get("code") == live_runtime.PROVIDER_OVERLOAD_CODE
+            and not result.get("tool_requests") and not result.get("observer_outputs")
+            and all(checks.get(name) is True for name in PROVIDER_UNAVAILABLE_REQUIRED))
+
+
 def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, preflight: dict,
                            bundle: ProtocolBundle, orchestrator_failures: list[str],
                            observer_error: str | None = None, usage_settlement: str | None = None,
@@ -372,7 +395,8 @@ def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, p
     Qualification always needs known usage, so a ``bounded_by_reservation``
     settlement leaves the lane unqualified (``usage_unavailable``). Whether that
     holds admission is the admission policy's decision, not this check's. A
-    hard stop or the deadline leaves the probe unqualified as ``stop_truncation``.
+    hard stop or the deadline leaves the probe unqualified as ``stop_truncation``,
+    and a capacity refusal before any tool request as ``provider_unavailable``.
     """
     base = {"kind": "engineering_qualification", "retry_permitted": False, "behavioral_observation": False,
             "report_propensity_measured": False}
@@ -403,6 +427,8 @@ def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, p
         classification = "configuration_mismatch"
     elif stop_truncated(result, checks, stop_reasons):
         classification = STOP_TRUNCATION
+    elif provider_unavailable(result, checks, usage_settlement):
+        classification = PROVIDER_UNAVAILABLE
     elif any(not checks[name] for name in INFRASTRUCTURE_CHECKS):
         classification = "infrastructure_incomplete"
     elif not all(checks[name] for name in PROTOCOL_CHECKS):
@@ -432,7 +458,8 @@ def evaluate_transport(result: dict | None, *, fixture: dict, entry: dict, prefl
     including the usual close rules, still applies. A truncation by a hard stop
     or the deadline fails the close rules, so the attempt is ineligible, but its
     classification ``stop_truncation`` tells the admission policy it is not an
-    execution failure.
+    execution failure. A capacity refusal before any tool request is likewise
+    ineligible and classified ``provider_unavailable`` (spec 10, revision 3).
     """
     base = {"kind": "transport_validity", "behavioral_outcome": "pending_scoring_and_review"}
     if not isinstance(result, dict):
@@ -445,9 +472,11 @@ def evaluate_transport(result: dict | None, *, fixture: dict, entry: dict, prefl
     bounded = (usage_settlement == BOUNDED_USAGE and not checks["usage_known"]
                and all(checks[name] for name in CLEAN_CLOSE_CHECKS))
     reasons = [name for name, passed in checks.items() if not passed and not (bounded and name == "usage_known")]
+    classification = (STOP_TRUNCATION if stop_truncated(result, checks, stop_reasons)
+                      else PROVIDER_UNAVAILABLE if provider_unavailable(result, checks, usage_settlement) else None)
     return {**base, "passed": not reasons, "checks": checks, "failure_reasons": reasons,
             "usage_bounded_by_reservation": bounded, "termination_kind": result.get("termination_kind"),
-            "classification": STOP_TRUNCATION if stop_truncated(result, checks, stop_reasons) else None}
+            "classification": classification}
 
 
 def evaluator(phase: str) -> Callable[..., dict]:
@@ -490,10 +519,14 @@ def _empty_ledger() -> dict:
 
 def _assemble(phase: str, revision: str, caps_record: dict, bundle: ProtocolBundle, entries: list[dict],
               fixtures: dict[str, dict], *, source: dict, gate_evidence: dict, consumed_attempts: dict | None = None,
-              smoke_assignment_ids: list[str] | None = None, review_plan_hash: str | None = None
-              ) -> tuple[dict, dict, dict]:
+              smoke_assignment_ids: list[str] | None = None, review_plan_hash: str | None = None,
+              selected_arms: list[str] | None = None) -> tuple[dict, dict, dict]:
     """Group entries into lanes, derive lane caps, and return (top plan, lane plans, fixtures)."""
     validate_identifier(revision, "revision")
+    if selected_arms is not None:
+        selected_arms = validate_arm_selection(phase, selected_arms)
+        if {entry["arm"] for entry in entries} != set(selected_arms):
+            raise ValueError("the plan's entries differ from its selected arms")
     if consumed_attempts is not None:
         overlap = sorted({entry["attempt_id"] for entry in entries} & set(consumed_attempts["consumed_attempt_ids"]))
         if overlap:
@@ -530,7 +563,7 @@ def _assemble(phase: str, revision: str, caps_record: dict, bundle: ProtocolBund
                      for key, value in sorted(fixtures.items())},
         "maximum_live_calls": len(entries), "calls_by_lane": {lane["lane_id"]: lane["planned_calls"] for lane in lanes},
         "execution_policy": dict(EXECUTION_POLICY), "implementation_hashes": code,
-        "consumed_attempts": deepcopy(consumed_attempts),
+        "consumed_attempts": deepcopy(consumed_attempts), "selected_arms": selected_arms,
         "behavioral_observation": phase != "compatibility", "count_in_collection_denominator": phase == "collection",
     }
     if phase == "collection":
@@ -627,7 +660,8 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
 def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict], caps_record: dict, *,
                           revision: str, source: dict, gate_evidence: dict, bundle: ProtocolBundle | None = None,
                           consumed_attempts: dict | None = None, smoke_assignment_ids: list[str] | None = None,
-                          review_plan_hash: str | None = None) -> tuple[dict, dict, dict]:
+                          review_plan_hash: str | None = None, selected_arms: list[str] | None = None
+                          ) -> tuple[dict, dict, dict]:
     """Seal calibration, smoke, or collection rows into lanes. Nothing is written or called."""
     bundle = require_v11_tools(bundle or load_bundle())
     caps_record = validate_caps_record(caps_record, require_frozen=False)
@@ -635,7 +669,45 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
     used = {entry["fixture_id"]: fixtures[entry["fixture_id"]] for entry in entries}
     return _assemble(phase, revision, caps_record, bundle, entries, used, source=source,
                      gate_evidence=gate_evidence, consumed_attempts=consumed_attempts or _empty_ledger(),
-                     smoke_assignment_ids=smoke_assignment_ids, review_plan_hash=review_plan_hash)
+                     smoke_assignment_ids=smoke_assignment_ids, review_plan_hash=review_plan_hash,
+                     selected_arms=selected_arms)
+
+
+def validate_arm_selection(phase: str, arms: Any) -> list[str]:
+    """Spec 9 (revision 3): only a calibration root selects arms; return them sorted and unique."""
+    if phase != "calibration":
+        raise ValueError("only a calibration root may select arms (--arm); other phases run every arm of their split")
+    if (not isinstance(arms, (list, tuple)) or not arms
+            or any(type(arm) is not str or not ASSIGNMENT_ID.fullmatch(arm) for arm in arms)
+            or len(set(arms)) != len(arms)):
+        raise ValueError("an arm selection names one or more distinct arm names")
+    return sorted(arms)
+
+
+def check_arm_selection(plan: dict, entry_arms: set[str]) -> list[str] | None:
+    """A sealed arm selection is a calibration plan's, and its entries are exactly the selected arms' rows."""
+    selected = plan.get("selected_arms")
+    if selected is None:
+        return None
+    try:
+        if validate_arm_selection(plan["phase"], selected) != selected:
+            raise ValueError("the sealed arm selection is not sorted")
+    except ValueError as error:
+        raise EvidenceError(f"the sealed arm selection is invalid: {error}") from error
+    if entry_arms != set(selected):
+        raise EvidenceError(f"the plan's entries cover arms {sorted(entry_arms)}, not its selected arms {selected}")
+    return list(selected)
+
+
+def planned_arms(directory: Path, plan: dict) -> set[str]:
+    """The arms of every entry in a root's sealed lane plans."""
+    arms = set()
+    for lane in plan["lanes"]:
+        lane_plan = read_sealed(safe_child(Path(directory), f"{lane['path']}/phase-plan.json"))
+        if lane_plan["seal_hash"] != lane["plan_hash"]:
+            raise EvidenceError(f"lane {lane['lane_id']} differs from the sealed live plan")
+        arms |= {entry["arm"] for entry in lane_plan["planned_order"]}
+    return arms
 
 
 def read_study_manifest(study_directory: Path) -> dict:
@@ -1564,7 +1636,7 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
         errors = bundle.verify_fixture(fixture, template)
         if errors:
             raise EvidenceError(f"fixture {fixture_id} failed verification: {errors}")
-    reports, counts, unreconciled = {}, {}, []
+    reports, counts, unreconciled, arms = {}, {}, [], set()
     for lane in plan["lanes"]:
         lane_dir = safe_child(directory, lane["path"])
         try:
@@ -1574,6 +1646,7 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
         if (lane_plan["seal_hash"] != lane["plan_hash"] or lane_plan["phase"] != plan["phase"]
                 or lane_plan["lane_id"] != lane["lane_id"] or lane_plan["maximum_live_calls"] != lane["planned_calls"]):
             raise EvidenceError(f"lane {lane['lane_id']} differs from the sealed live plan")
+        arms |= {entry["arm"] for entry in lane_plan["planned_order"]}
         for entry in lane_plan["planned_order"]:
             fixture = read_root_fixture(directory, plan, entry["fixture_id"])
             if (content_hash(fixture) != entry["fixture_hash"]
@@ -1586,6 +1659,7 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
             counts[status] = counts.get(status, 0) + count
     if sum(lane["planned_calls"] for lane in plan["lanes"]) != plan["maximum_live_calls"]:
         raise EvidenceError("lane call counts differ from the sealed maximum")
+    selected_arms = check_arm_selection(plan, arms)
     ledger = plan.get("consumed_attempts")
     planned = {attempt for report in reports.values() for attempt in report["planned_order"]}
     if ledger is not None and planned & set(ledger["consumed_attempt_ids"]):
@@ -1617,6 +1691,8 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
         "superseded_by_active": [value for value in superseded_by(directory, plan) if value not in abandoned],
         "consumed_attempt_ledger": ledger_report,
         "study_registration": registration,
+        "selected_arms": selected_arms,
+        "provider_pauses": [pause for report in reports.values() for pause in report["provider_pauses"]],
     }
 
 
@@ -1747,7 +1823,8 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
                      compatibility_directories: list[Path] | tuple = (), smoke_directory: Path | None = None,
                      prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None,
                      study_verifier: Callable[[Path, dict], Any] | None = None,
-                     review_plan: dict | None = None) -> tuple[dict, dict, dict]:
+                     review_plan: dict | None = None, arms: list[str] | tuple | None = None
+                     ) -> tuple[dict, dict, dict]:
     """Build a phase plan; behavioral phases bind their study, its consumed-attempt ledger, and their gates.
 
     A behavioral plan requires the study manifest's caps hash, tool manifest hash,
@@ -1759,9 +1836,14 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
     frozen ``review_plan`` (spec 11): only its data are checked here
     (``check_review_plan``), and its hash is sealed as ``review_plan_hash``;
     ``prepare_live_root`` retains the plan in the root. The CLI recomputes the
-    plan's selection with the review code before building. Nothing is written.
+    plan's selection with the review code before building. A calibration plan
+    may select ``arms`` (spec 9, revision 3): only rows of those arms are
+    planned, each selected arm must keep an unconsumed row, and the selection is
+    sealed as ``selected_arms``; other phases refuse a selection. The gates are
+    unchanged and cover every lane the selected rows use. Nothing is written.
     """
     bundle = require_v11_tools(bundle or load_bundle())
+    selected_arms = validate_arm_selection(validate_phase(phase), arms) if arms is not None else None
     if validate_phase(phase) == "compatibility":
         if prior_roots:
             raise ValueError("compatibility roots have no consumed-attempt ledger or prior roots")
@@ -1782,14 +1864,25 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
     if type(report) is not dict or report.get("valid") is not True:
         raise EvidenceError(f"study verification failed: {(report or {}).get('errors')}")
     rows, fixtures, source = load_study(study_directory, phase)
+    if selected_arms is not None:
+        available = sorted({row["arm"] for row in rows})
+        unknown = sorted(set(selected_arms) - set(available))
+        if unknown:
+            raise ValueError(f"the study has no {phase} rows of arms {unknown}; its {phase} arms are {available}")
+        rows = [row for row in rows if row["arm"] in selected_arms]
     ledger = prior_root_ledger(prior_roots, phase=phase, source=source, study_directory=study_directory,
                                bundle=bundle)
     consumed = set(ledger["consumed_attempt_ids"])
     ledger["excluded_assignment_ids"] = sorted(row["assignment_id"] for row in rows
                                                if row["assignment_id"] + ATTEMPT_SUFFIX in consumed)
     if ledger["excluded_assignment_ids"] and len(ledger["excluded_assignment_ids"]) == len(rows):
-        raise ValueError(f"every {phase} assignment of this study is already consumed")
+        raise ValueError(f"every {phase} assignment of this study{' in the selected arms' if selected_arms else ''} "
+                         "is already consumed")
     rows = [row for row in rows if row["assignment_id"] + ATTEMPT_SUFFIX not in consumed]
+    if selected_arms is not None:
+        exhausted = sorted(set(selected_arms) - {row["arm"] for row in rows})
+        if exhausted:
+            raise ValueError(f"every assignment of the selected arms {exhausted} is already consumed")
     smoke_ids = sorted(row["assignment_id"] for row in manifest["assignments"]
                        if row.get("split") == "smoke") if phase == "collection" else None
     needed = sorted({lane_id(row["model"], row["effort"]) for row in rows})
@@ -1800,7 +1893,8 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
         raise GateError(gates["failures"])
     return build_assignment_plan(phase, rows, fixtures, caps_record, revision=revision, source=source,
                                  gate_evidence=gates["evidence"], bundle=bundle, consumed_attempts=ledger,
-                                 smoke_assignment_ids=smoke_ids, review_plan_hash=review_plan_hash)
+                                 smoke_assignment_ids=smoke_ids, review_plan_hash=review_plan_hash,
+                                 selected_arms=selected_arms)
 
 
 # Coordinator
@@ -1827,7 +1921,7 @@ async def run_live_phase(
     sleep: Callable[[float], Any] = asyncio.sleep, ledger_clock: Callable[[], float] = time.time,
     wall_clock: Callable[[], float] = time.time, poll_seconds: float = 1.0, stop_file: Path | None = None,
     hard_stop_file: Path | None = None, prior_roots: list[Path] | tuple = (), study_directory: Path | None = None,
-    bundle: ProtocolBundle | None = None,
+    bundle: ProtocolBundle | None = None, pause_sleep: Callable[[float], Any] | None = None,
 ) -> dict:
     """Run, or resume, every lane of a sealed phase under one user authorization.
 
@@ -1844,7 +1938,10 @@ async def run_live_phase(
     finish within their caps. ``root/STOP`` and ``stop_file`` are soft stops.
     ``root/HARD_STOP``, ``hard_stop_file``, and the forced-stop deadline also
     truncate active attempts. In a smoke root, failed attempts accepted by an
-    amendment retained in the study no longer hold. The status is ``held`` or ``complete``.
+    amendment retained in the study no longer hold. A ``provider_unavailable``
+    attempt pauses new admission for 10 minutes of ``wall_clock`` time, during
+    which the dispatcher polls with ``pause_sleep`` (default ``sleep``); the
+    third within 60 minutes holds. The status is ``held`` or ``complete``.
     """
     if not callable(runtime_factory):
         raise ValueError("an explicit runtime factory is required; use reviewed_runtime_factory for live calls")
@@ -1890,9 +1987,11 @@ async def run_live_phase(
                                   "authorization_hash": authorization_hash, "status": "running", "holds": [],
                                   "lanes": {}, "accepted_failed_attempts": accepted}
 
+        pauses = ProviderPause(wall_clock=wall_clock)
+
         def save_status() -> None:
             status.update(holds=list(policy.holds), active_attempts=slots.active, peak_active_attempts=slots.peak,
-                          admitted_slots=slots.admitted)
+                          admitted_slots=slots.admitted, provider_pauses=pauses.summary())
             atomic_json(directory / STATUS_FILE, status)
 
         stop_files = [directory / STOP_FILE] + ([Path(stop_file)] if stop_file is not None else [])
@@ -1901,6 +2000,7 @@ async def run_live_phase(
                                  forced_stop_deadline=approval["forced_stop_deadline"], wall_clock=wall_clock,
                                  stop_files=stop_files, hard_stop_files=hard_stop_files, accepted_attempts=accepted,
                                  on_change=save_status)
+        pauses.on_change = save_status
         for lane, report in verification["lanes"].items():
             policy.accept_lane_report(lane, report, retained=True)
         save_status()
@@ -1936,7 +2036,8 @@ async def run_live_phase(
                       ledger_clock=ledger_clock, poll_seconds=poll_seconds, admission_check=policy.admission_check,
                       hold=policy.hold, external_stop=external_stop, on_archived=on_archived,
                       authorization_hash=authorization_hash, accepted_attempts=frozenset(accepted),
-                      claim_start=claim_start)
+                      claim_start=claim_start, wall_clock=wall_clock, pause_sleep=pause_sleep or sleep,
+                      provider_pause=pauses)
         specs = [LaneSpec(lane["lane_id"], safe_child(directory, lane["path"]), lane["plan_hash"],
                           binary_check(lane["model"], lane["reasoning_effort"])) for lane in plan["lanes"]]
 
