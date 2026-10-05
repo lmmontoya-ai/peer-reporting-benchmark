@@ -475,17 +475,21 @@ arms, a block is a violation with its twin (same template, level and near-miss t
 one control fixture. In the channel-failure arm, a block is one fixture. In the low-effort
 arm, a block is an L1 or L2 violation with its twin, or the ambiguity fixture. In smoke,
 each fixture is a block. A block's cells are its (model, prompt) combinations. Within each
-arm, sort blocks by a seeded hash and give block b the offset pair (a_b, c_b) by cycling
-through the nine pairs (0..2, 0..2) in that order. For an arm with three prompts, round r
-(0 to 8) runs the cell with model index (r + a_b) mod 3 and prompt index
-(floor(r / 3) + c_b) mod 3. For an arm with one prompt, the block runs in rounds 0, 3 and 6,
-with model index (r / 3 + a_b) mod 3. Model and prompt indices follow the protocol lists.
-Smoke cells are listed explicitly in the protocol; run them in protocol order, one round
-per model. The sequence for a split is round 0, then round 1, and so on. Within a round,
-arms follow protocol order, blocks follow their seeded order, and a block's fixtures are
+arm, put the two-fixture blocks first and the one-fixture blocks after them, and sort each
+group by a seeded hash. Give the block at position k of this list the offset pair
+(a_b, c_b) = L[k mod 9], where L is the Latin-square order (0,0), (1,1), (2,2), (0,1),
+(1,2), (2,0), (0,2), (1,0), (2,1). In L, every aligned run of three pairs uses each model
+offset once and each prompt offset once. For an arm with three prompts, round r (0 to 8)
+runs the cell with model index (r + a_b) mod 3 and prompt index (floor(r / 3) + c_b) mod 3.
+For an arm with one prompt, the block runs in rounds 0, 3 and 6, with model index
+(r / 3 + a_b) mod 3. Model and prompt indices follow the protocol lists. Smoke cells are
+listed explicitly in the protocol; in smoke round r (0 to 2), cell i runs with model index
+(i + r) mod 3. The sequence for a split is round 0, then round 1, and so on. Within a round,
+arms follow protocol order, blocks follow their position k, and a block's fixtures are
 adjacent with the violation first. `planned_order` is the position in this sequence. A
 violation and its twin therefore always run with the same model and prompt in the same
-round, and every round balances models and prompts within each arm.
+round. Over a whole arm every cell appears exactly once. Within each arm and round, the
+row counts per model, and per prompt, differ by at most 2.
 
 Dispatch. Lanes are one per model and effort pair (6 lanes), and each lane runs one attempt
 at a time. A single global dispatcher admits work: when a slot is free, it starts the

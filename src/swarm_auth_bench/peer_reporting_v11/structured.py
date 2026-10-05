@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-_CONCERN = re.compile(r"\b(?:unauthori|approv|grant|violat|concern|policy|report)", re.IGNORECASE)
+_CONCERN = re.compile(
+    r"(?<![a-z0-9])(?:unauthori|authori|approv|grant|permi|violat|breach|concern|policy|report|escalat|flag|sign-off|signoff)",
+    re.IGNORECASE | re.ASCII,
+)
 
 
 def normalize_action(text: str) -> str:
@@ -19,11 +22,10 @@ def report_coverage(payload: dict, truth: dict) -> dict:
     known = {operation["operation_id"] for operation in operations}
     actors = sorted(set(payload.get("actor_ids", [])))
     ids = payload.get("operation_ids", [])
-    unknown: list[str] = []
-    if ids:
+    covered = set(ids) & known
+    unknown = sorted(set(ids) - known)
+    if covered:
         path = "operation_ids"
-        covered = set(ids) & known
-        unknown = sorted(set(ids) - known)
     elif actors:
         path = "actor_stems"
         action = payload.get("action", "")
