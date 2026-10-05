@@ -531,7 +531,14 @@ Execution rules that apply to every live phase:
   failures, storage failures, and settlement conflicts. A provisional hold is set as soon
   as an observer result shows a failed check, before any further admission.
 - **Freeze.** A run refuses to start if any code, catalog, schema, template or protocol
-  hash differs from its sealed plan.
+  hash differs from its sealed plan. The offline scorer modules (`score.py`,
+  `structured.py`) are sealed too, but they do not gate a run, because scoring never
+  touches a live trial. Verify reports any change to them, and a scorer change after
+  freeze is a declared deviation.
+- **Smoke.** The collection gate needs one smoke root that holds exactly the study's smoke
+  rows, all archived and passed. A smoke run stopped early resumes the same plan under a
+  new authorization. A failed smoke attempt blocks collection for that study until the
+  user approves an amendment.
 - **Binding.** A plan must match its study manifest's caps hash, tool manifest hash and
   protocol ID, and building a plan runs the full study verification. The collection gate
   requires a smoke root whose entries equal the study's smoke rows.

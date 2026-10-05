@@ -1062,7 +1062,7 @@ async def run_live_phase(
         raise LivePhaseError("supplied caps differ from the sealed live plan; no model session was created")
     approval = validate_authorization(authorization, plan)
     with _exclusive(directory / COORDINATOR_LOCK):
-        changes = implementation_changes(plan["implementation_hashes"])
+        changes = implementation_changes(plan["implementation_hashes"], execution_only=True)
         if changes:
             raise LivePhaseError(f"code, catalog, schema, template, or protocol files changed after sealing: "
                                  f"{changes}; a change requires a new plan revision")

@@ -462,6 +462,20 @@ async def test_a_changed_sealed_file_refuses_the_run_and_is_reported(compat, tmp
     assert report["implementation_changes"] == ["peer_reporting_v11/world.py"]
 
 
+async def test_a_changed_scorer_is_reported_but_does_not_gate_the_run(compat, tmp_path, monkeypatch):
+    study, _, fixtures = smoke_study(tmp_path / "study")
+    root = tmp_path / "smoke"
+    plan = prepare(root, build_plan("smoke", study, compatibility_directories=[compat]), study)
+    original = v11_phase.implementation_hashes
+    monkeypatch.setattr(v11_phase, "implementation_hashes",
+                        lambda: {**original(), "peer_reporting_v11/score.py": "0" * 64})
+    harness = Harness(tmp_path / "homes", scripted(fixtures))
+    await run(root, plan, harness, compatibility_directories=[compat])
+    assert harness.created
+    report = v11_live.verify_live_root(root, bundle=fake_bundle())
+    assert report["implementation_changes"] == ["peer_reporting_v11/score.py"]
+
+
 # m5: world mode from the world's own record
 
 

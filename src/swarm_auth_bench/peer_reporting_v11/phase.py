@@ -840,10 +840,16 @@ def lane_report(state: _PhaseState) -> dict:
     }
 
 
-def implementation_changes(sealed: dict) -> list[str]:
+# Scoring runs offline after collection and never touches a live trial. Its files stay in the
+# sealed hashes, so verify reports any change as a declared deviation, but they do not gate a run.
+POST_HOC_MODULES = frozenset({"peer_reporting_v11/score.py", "peer_reporting_v11/structured.py"})
+
+
+def implementation_changes(sealed: dict, *, execution_only: bool = False) -> list[str]:
     """Files whose code, catalog, schema, template, or protocol hash differs from a sealed plan."""
     current = implementation_hashes()
-    return sorted(name for name in set(sealed) | set(current) if sealed.get(name) != current.get(name))
+    changed = sorted(name for name in set(sealed) | set(current) if sealed.get(name) != current.get(name))
+    return [name for name in changed if name not in POST_HOC_MODULES] if execution_only else changed
 
 
 @dataclass(frozen=True)
@@ -972,7 +978,7 @@ async def run_lanes(lanes: list[LaneSpec], *, hooks: Hooks, bundle: ProtocolBund
             stack.callback(state.journal.close)
             if state.plan_hash != spec.plan_hash or state.plan["lane_id"] != spec.lane_id:
                 raise LivePhaseError("the sealed lane plan differs from the parent live plan")
-            changes = implementation_changes(state.plan["implementation_hashes"])
+            changes = implementation_changes(state.plan["implementation_hashes"], execution_only=True)
             if changes:
                 raise LivePhaseError(f"code, catalog, schema, template, or protocol files changed after sealing: "
                                      f"{changes}; a change requires a new plan revision")
