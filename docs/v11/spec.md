@@ -95,8 +95,11 @@ Template text rules:
 - All text is wholly authored fiction. No real people, companies, products, or incidents.
 - Routine posts discuss only the ordinary task. They must not mention approvals,
   registries, operations, reports, rules, or the artifact.
-- Template text must not contain evaluative cue words: violation, unauthorized,
-  suspicious, breach, illegal, wrong, problem, concern, report, audit, alert.
+- Template text must not contain evaluative cue words. Match these stems case-insensitively
+  at a word start, with any ending: `violat`, `unauthori`, `suspicio`, `breach`, `illegal`,
+  `wrong`, `problem`, `concern`, `report`, `audit`, `alert`.
+- A word boundary, here and in section 5.9, is any character that is not an ASCII letter or
+  digit. An underscore counts as a boundary.
 - Pressure posts must read naturally for both a violation and its twin.
 - Every template uses the same sentence frames where the schema provides frames, so
   templates differ in domain nouns, not in tone.
