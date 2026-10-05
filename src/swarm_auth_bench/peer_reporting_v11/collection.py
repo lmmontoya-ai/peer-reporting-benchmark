@@ -17,15 +17,18 @@ from ..events import content_hash
 from ..peer_reporting.config import read_json
 from ..peer_reporting.storage import atomic_json, check_seal, safe_child, seal
 from .bundle import load_bundle
-from .config import SPLITS, arm_fixture_cells, validate_protocol
+from .config import CALIBRATION_EXTENSION_ARMS, SPLITS, arm_fixture_cells, validate_protocol
 from .incidents import validate_template
-from .ladder import build_split_fixtures, verify_fixture
+from .ladder import build_split_fixtures, calibration_near_miss_types, verify_fixture
 from .lanes import trial_policy, validate_caps_record
 from .prompts import build_instructions, prompt_manifest
 
 STUDY_MANIFEST = "collection-manifest.json"
 ORDER_VERSION = "peer-reporting-v11-paired-rounds-v3"
 ORDER_OFFSETS = ((0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0), (0, 2), (1, 0), (2, 1))
+# The three-prompt cycle modulo two would give the extension a 10/4 prompt split.
+# These six model/prompt offsets give each paired group of six blocks a 6/6 split.
+TWO_PROMPT_ORDER_OFFSETS = ((0, 0), (1, 1), (2, 0), (0, 1), (1, 0), (2, 1))
 INSTANCE_NONCE = re.compile(r"[0-9a-f]{32}")
 
 
@@ -70,7 +73,7 @@ def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
             continue
         groups: dict[tuple, list[str]] = defaultdict(list)
         for fixture_id, row in fixtures.items():
-            if arm in ("collection", "calibration", "low_effort") and row["variant"] in ("violation", "twin"):
+            if arm != "channel_failure" and row["variant"] in ("violation", "twin"):
                 block_key = ("pair", row["template_id"], row["level"], row["near_miss_type"])
             else:
                 block_key = ("fixture", fixture_id)
@@ -79,14 +82,19 @@ def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
                                                               fixture_id))) for group in groups.values()]
         blocks.sort(key=lambda block: (-len(block), content_hash([ORDER_VERSION, seed, arm, block]), block))
         prompts = definition["prompts"]
-        if len(prompts) not in (1, 3):
-            raise ValueError(f"{arm}: order requires one or three prompts")
+        if len(prompts) not in (1, 2, 3):
+            raise ValueError(f"{arm}: order requires one, two, or three prompts")
+        rounds = range(0, 9, 3) if len(prompts) == 1 else range(3 * len(prompts))
+        offsets = TWO_PROMPT_ORDER_OFFSETS if len(prompts) == 2 else ORDER_OFFSETS
         for block_index, block in enumerate(blocks):
-            a_offset, c_offset = ORDER_OFFSETS[block_index % 9]
-            for round_index in range(9) if len(prompts) == 3 else range(0, 9, 3):
+            a_offset, c_offset = offsets[block_index % len(offsets)]
+            for round_index in rounds:
                 if len(prompts) == 3:
                     model = models[(round_index + a_offset) % 3]
                     prompt = protocol["prompt_conditions"][(round_index // 3 + c_offset) % 3]
+                elif len(prompts) == 2:
+                    model = models[(round_index + a_offset) % 3]
+                    prompt = prompts[(round_index // 3 + c_offset) % 2]
                 else:
                     model = models[(round_index // 3 + a_offset) % 3]
                     prompt = prompts[0]
@@ -120,6 +128,8 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, ins
     fixtures, rows = {}, []
     for split in SPLITS:
         split_fixtures = build_split_fixtures(protocol, templates, split)
+        calibration_types = (calibration_near_miss_types(protocol["templates"][split], protocol["seeds"][split],
+                                                        protocol=protocol) if split == "calibration" else {})
         for fixture in split_fixtures:
             fixtures[fixture["fixture_id"]] = fixture
         split_rows = []
@@ -130,6 +140,9 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, ins
             for fixture in split_fixtures:
                 parameters = fixture["parameters"]
                 level, variant = parameters["level"], parameters["variant"]
+                if (arm in CALIBRATION_EXTENSION_ARMS and variant != "ambiguity"
+                        and parameters["near_miss_type"] != calibration_types[parameters["template_id"]][0]):
+                    continue
                 if arm == "smoke":
                     cells = [cell for cell in definition["cells"]
                              if (cell["level"], cell["variant"]) == (level, variant)]

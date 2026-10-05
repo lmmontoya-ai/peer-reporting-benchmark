@@ -9,18 +9,21 @@ from importlib import resources
 from ..peer_reporting.config import MODELS
 from . import FIXTURE_VERSION, PROTOCOL_ID, SPECIFICATION_REVISION, TOOL_SCHEMA_VERSION
 from .incidents import load_template
-from .lanes import EFFORTS, PROMPT_CONDITIONS, WORLD_MODES
+from .lanes import PROMPT_CONDITIONS, WORLD_MODES
 
 SPLITS = ("collection", "calibration", "smoke")
 NEAR_MISS_TYPES = (
     "wrong_digest", "wrong_version", "expired_window", "wrong_operation", "wrong_actor",
     "non_authoritative_registry",
 )
+CALIBRATION_EXTENSION_ARMS = ("calibration_extension_xhigh", "calibration_extension_low")
 ARM_DEFINITIONS = {
     "collection": "L0-L4 x {violation, twin} + benign + ambiguity + accusation",
     "channel_failure": "L1 violation",
     "low_effort": "L1 violation, L1 twin, L2 violation, L2 twin, ambiguity",
     "calibration": "L0, L1, L2 x 3 near-miss types, L3, L4; each violation and twin",
+    **dict.fromkeys(CALIBRATION_EXTENSION_ARMS,
+                    "L2, L3, L4 x {violation, twin} at the first calibration near-miss type, plus ambiguity"),
 }
 
 
@@ -36,6 +39,9 @@ def arm_fixture_cells(protocol: dict, arm: str) -> list[tuple[str, str]]:
         return [("L1", "violation")]
     if arm == "low_effort":
         return [(level, variant) for level in ("L1", "L2") for variant in protocol["ladder_variants"]] + [
+            (protocol["control_variants"]["ambiguity"], "ambiguity")]
+    if arm in CALIBRATION_EXTENSION_ARMS:
+        return [(level, variant) for level in ("L2", "L3", "L4") for variant in protocol["ladder_variants"]] + [
             (protocol["control_variants"]["ambiguity"], "ambiguity")]
     return [(level, variant) for level in protocol["levels"]
             for _ in range(min(3, len(protocol["near_miss_types"])) if level == "L2" else 1)
@@ -113,10 +119,11 @@ def validate_protocol(protocol: dict) -> dict:
             raise ValueError("distractor_grants_allowed_range must be [1, 6]")
         validate_generator_parameters(generator, (load_template(template_id)["focal_slot"] for template_id in ids))
         if set(protocol["arms"]) != {*ARM_DEFINITIONS, "smoke"}:
-            raise ValueError("protocol must define exactly the five study arms")
+            raise ValueError("protocol must define exactly the seven study arms")
         counts = {}
         for arm, definition in protocol["arms"].items():
-            split = "collection" if arm in ("channel_failure", "low_effort") else arm
+            split = ("collection" if arm in ("channel_failure", "low_effort") else
+                     "calibration" if arm in CALIBRATION_EXTENSION_ARMS else arm)
             if definition["split"] != split:
                 raise ValueError(f"{arm}: wrong split")
             if arm == "smoke":
@@ -128,8 +135,9 @@ def validate_protocol(protocol: dict) -> dict:
                     if (set(cell) != {"level", "variant", "prompt", "effort", "world_mode"}
                             or cell["level"] not in protocol["levels"]
                             or cell["variant"] not in protocol["ladder_variants"]
-                            or cell["prompt"] not in PROMPT_CONDITIONS or cell["effort"] not in EFFORTS
-                            or cell["world_mode"] not in WORLD_MODES
+                            or cell["prompt"] not in protocol["prompt_conditions"]
+                            or cell["effort"] not in protocol["efforts"].values()
+                            or cell["world_mode"] not in protocol["world_modes"]
                             or (cell["world_mode"] == "report_store_unavailable"
                                 and (cell["level"], cell["variant"]) != ("L1", "violation"))):
                         raise ValueError("invalid smoke cell")
@@ -145,8 +153,9 @@ def validate_protocol(protocol: dict) -> dict:
                              or definition["fixtures_per_template"] != len(fixtures))):
                     raise ValueError(f"{arm}: fixtures_per_template mismatch")
                 prompts = _unique_strings(definition["prompts"], f"{arm}.prompts")
-                if (any(prompt not in PROMPT_CONDITIONS for prompt in prompts)
-                        or definition["effort"] not in EFFORTS or definition["world_mode"] not in WORLD_MODES):
+                if (any(prompt not in protocol["prompt_conditions"] for prompt in prompts)
+                        or definition["effort"] not in protocol["efforts"].values()
+                        or definition["world_mode"] not in protocol["world_modes"]):
                     raise ValueError(f"{arm}: invalid prompt, effort, or world mode")
                 if (definition["world_mode"] == "report_store_unavailable"
                         and any(cell != ("L1", "violation") for cell in fixtures)):

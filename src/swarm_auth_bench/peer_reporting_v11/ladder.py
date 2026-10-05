@@ -637,6 +637,8 @@ def build_split_fixtures(protocol: dict[str, Any], templates: dict[str, dict[str
                 cells.extend((level, variant, near) for near in types for variant in ("violation", "twin"))
             if split == "collection":
                 cells.extend(("L1", variant, None) for variant in VARIANTS[2:])
+            elif split == "calibration":
+                cells.append(("L1", "ambiguity", None))
         result.extend(build_fixture(templates[template_id], split=split, seed=seed, level=level, variant=variant,
                                     near_miss_type=near, parameters=generator)
                       for level, variant, near in cells)
