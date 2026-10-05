@@ -3,7 +3,6 @@
 import asyncio
 import functools
 import shutil
-import time
 from pathlib import Path
 
 import pytest
@@ -92,11 +91,13 @@ async def test_a_new_root_never_reruns_a_consumed_assignment(compat, tmp_path):
     v1 = tmp_path / "smoke-v1"
     plan_v1 = prepare(v1, build_plan("smoke", study, caps=SERIAL, compatibility_directories=[compat]), study)
     failing = scripted(fixtures, {("gpt-6-astra", "xhigh", "L1", "violation"): lambda f: [NATIVE, *report_steps(f)]})
-    status = await run(v1, plan_v1, Harness(tmp_path / "h1", failing), compatibility_directories=[compat])
+    status = await run(v1, plan_v1, Harness(tmp_path / "h1", failing), compatibility_directories=[compat],
+                       study_directory=study)
     consumed = sorted(record["data"]["attempt_id"] for record in records(v1, "attempt_started"))
     assert status["status"] == "held" and len(consumed) == 3
     resumed = Harness(tmp_path / "h2", scripted(fixtures))
-    assert (await run(v1, plan_v1, resumed, compatibility_directories=[compat]))["status"] == "held"
+    assert (await run(v1, plan_v1, resumed, compatibility_directories=[compat],
+                      study_directory=study))["status"] == "held"
     assert resumed.created == []
 
     with pytest.raises(ValueError, match="registered in this study"):
@@ -115,11 +116,12 @@ async def test_a_new_root_never_reruns_a_consumed_assignment(compat, tmp_path):
     # The superseded root never runs again, and the new root refuses without its prior root.
     again = Harness(tmp_path / "h3", scripted(fixtures))
     with pytest.raises(v11_live.LivePhaseError, match="superseded"):
-        await run(v1, plan_v1, again, compatibility_directories=[compat])
+        await run(v1, plan_v1, again, compatibility_directories=[compat], study_directory=study)
     with pytest.raises(v11_live.EvidenceError, match="prior root"):
-        await run(v2, plan_v2, again, compatibility_directories=[compat])
+        await run(v2, plan_v2, again, compatibility_directories=[compat], study_directory=study)
     assert again.created == []
-    status = await run(v2, plan_v2, again, compatibility_directories=[compat], prior_roots=[v1])
+    status = await run(v2, plan_v2, again, compatibility_directories=[compat], prior_roots=[v1],
+                       study_directory=study)
     assert status["status"] == "complete" and status["live_model_call_starts"] == 9
     started_v2 = {record["data"]["attempt_id"] for record in records(v2, "attempt_started")}
     assert len(started_v2) == 9 and not started_v2 & set(consumed)
@@ -127,14 +129,15 @@ async def test_a_new_root_never_reruns_a_consumed_assignment(compat, tmp_path):
                                                       for attempt in started_v2 | set(consumed)}
 
     # Verify and export recheck the ledger.
-    report = v11_live.verify_live_root(v2, bundle=fake_bundle(), prior_roots=[v1])
+    report = v11_live.verify_live_root(v2, bundle=fake_bundle(), prior_roots=[v1], study_directory=study)
     assert report["consumed_attempt_ledger"] == {"checked": True, "applicable": True, "prior_roots": 1,
                                                  "consumed_attempts": 3, "excluded_assignments": 3, "overlap": []}
     with pytest.raises(v11_live.EvidenceError, match="missing"):
-        v11_live.verify_live_root(v2, bundle=fake_bundle(), prior_roots=[])
+        v11_live.verify_live_root(v2, bundle=fake_bundle(), prior_roots=[], study_directory=study)
     with pytest.raises(v11_live.EvidenceError, match="missing"):
-        export_live_review(v2, tmp_path / "export-refused", bundle=fake_bundle())
-    exported = export_live_review(v2, tmp_path / "export", prior_roots=[v1], bundle=fake_bundle())
+        export_live_review(v2, tmp_path / "export-refused", bundle=fake_bundle(), study_directory=study)
+    exported = export_live_review(v2, tmp_path / "export", prior_roots=[v1], bundle=fake_bundle(),
+                                  study_directory=study)
     assert exported["attempts"] == 9
     assert read_sealed(tmp_path / "export" / "index.json")["consumed_attempt_ledger"]["consumed_attempts"] == 3
 
@@ -157,7 +160,8 @@ async def test_prepare_rechecks_prior_roots_under_their_locks(compat, tmp_path):
             v11_live.prepare_live_root(tmp_path / "smoke-v2", built, study_directory=study, prior_roots=[v1])
     with pytest.raises(ValueError, match="registered in its study"):
         v11_live.prepare_live_root(tmp_path / "smoke-v2", built, prior_roots=[v1])
-    await run(v1, plan_v1, Harness(tmp_path / "h1", scripted(fixtures)), compatibility_directories=[compat])
+    await run(v1, plan_v1, Harness(tmp_path / "h1", scripted(fixtures)), compatibility_directories=[compat],
+              study_directory=study)
     with pytest.raises(v11_live.EvidenceError, match="started attempts after this plan was built"):
         v11_live.prepare_live_root(tmp_path / "smoke-v2", built, study_directory=study, prior_roots=[v1])
     assert not (tmp_path / "smoke-v2").exists() and v11_live.superseded_by(v1, plan_v1) == []
@@ -186,7 +190,7 @@ async def test_limit_hits_settle_at_the_reservation_bound_and_pass_the_smoke_gat
     }
     harness = Harness(tmp_path / "homes", scripted(fixtures, special))
     status = await run(root, plan, harness, compatibility_directories=[compat], clock=lambda: now[0],
-                       sleep=lambda seconds: asyncio.sleep(min(seconds, 0.01)))
+                       sleep=lambda seconds: asyncio.sleep(min(seconds, 0.01)), study_directory=study)
     assert status["status"] == "complete" and status["holds"] == [] and status["live_model_call_starts"] == 12
     expected = {"gpt-6-luna-xhigh": ("trial_observed_token_limit", 61000, 75000),
                 "gpt-6-sol-xhigh": ("tool_request_limit", 5000, 75000),
@@ -211,14 +215,14 @@ async def test_limit_hits_settle_at_the_reservation_bound_and_pass_the_smoke_gat
         assert settled == [{**settled[0], "status": "settled", "actual_tokens": bound,
                             "usage_settlement": "bounded_by_reservation"}]
     # The lane ledgers charge exactly the archived settlements.
-    report = v11_live.verify_live_root(root, bundle=fake_bundle())
+    report = v11_live.verify_live_root(root, bundle=fake_bundle(), study_directory=study)
     for lane, lane_report in report["lanes"].items():
         charged = sum(row["usage_total_tokens"] for row in lane_report["entries"])
         assert lane_report["ledger"]["settled_tokens"] == charged and lane_report["ledger"]["reserved_tokens"] == 0
     assert report["lanes"]["gpt-6-luna-xhigh"]["ledger"]["settled_tokens"] == 75000 + 2000 + 2000
     built = build_plan("collection", study, caps=SERIAL, compatibility_directories=[compat], smoke_directory=root)
     assert len(built[0]["gate_evidence"]["smoke"]["attempt_hashes"]) == 12
-    exported = export_live_review(root, tmp_path / "export", bundle=fake_bundle())
+    exported = export_live_review(root, tmp_path / "export", bundle=fake_bundle(), study_directory=study)
     assert exported["attempts"] == 12
     index = read_sealed(tmp_path / "export" / "index.json")
     attempt = read_sealed(tmp_path / "export" / next(row["attempt_path"] for row in index["rows"]
@@ -301,7 +305,7 @@ async def test_realized_start_order_follows_planned_order_across_lanes(compat, t
     root = tmp_path / "smoke"
     plan = prepare(root, build_plan("smoke", study, caps=SERIAL, compatibility_directories=[compat]), study)
     status = await run(root, plan, Harness(tmp_path / "homes", scripted(fixtures)),
-                       compatibility_directories=[compat])
+                       compatibility_directories=[compat], study_directory=study)
     starts = sorted(records(root, "attempt_started"), key=lambda record: record["data"]["dispatch_seq"])
     assert [record["data"]["planned_order"] for record in starts] == list(range(12))
     assert [record["data"]["dispatch_seq"] for record in starts] == list(range(1, 13))
@@ -315,7 +319,7 @@ async def test_parallel_dispatch_starts_the_lowest_order_of_each_idle_lane(compa
     slow = {("gpt-6-luna", "xhigh", level, variant): (lambda f: [("sleep", 0.05), *report_steps(f)])
             for level, variant in (("L1", "violation"), ("L3", "violation"), ("L4", "twin"))}
     status = await run(root, plan, Harness(tmp_path / "homes", scripted(fixtures, slow)),
-                       compatibility_directories=[compat])
+                       compatibility_directories=[compat], study_directory=study)
     assert status["status"] == "complete" and status["peak_active_attempts"] <= 6
     order = {record["data"]["attempt_id"]: record["data"]["planned_order"]
              for record in records(root, "attempt_started")}
@@ -427,21 +431,23 @@ async def test_a_retained_ledger_stop_holds_before_any_start(compat, tmp_path):
     study, _, fixtures = smoke_study(tmp_path / "study", caps=SERIAL)
     root = tmp_path / "smoke"
     plan = prepare(root, build_plan("smoke", study, caps=SERIAL, compatibility_directories=[compat]), study)
+    now = [1000.0]
 
     async def stop_after_first(*args, **kwargs):
         result = await v11_phase.live_runtime.run_live_observer(*args, **kwargs)
         (root / "STOP").touch()
+        now[0] += 10 * 3600  # the open run itself outlasts the started lane's 3600-second wall
         return result
 
     first = await run(root, plan, Harness(tmp_path / "h1", scripted(fixtures)), compatibility_directories=[compat],
-                      observer=stop_after_first)
-    assert first["live_model_call_starts"] == 1 and "parent_stop_or_forced_deadline" in first["holds"]
+                      observer=stop_after_first, study_directory=study, ledger_clock=lambda: now[0])
+    assert first["live_model_call_starts"] == 1 and "soft_stop" in first["holds"]
     (root / "STOP").unlink()
-    later = time.time() + 10 * 3600  # beyond the started lane's 3600-second wall
     resumed = Harness(tmp_path / "h2", scripted(fixtures))
-    status = await run(root, plan, resumed, compatibility_directories=[compat], ledger_clock=lambda: later)
+    status = await run(root, plan, resumed, compatibility_directories=[compat], ledger_clock=lambda: now[0],
+                       study_directory=study)
     assert resumed.created == [] and status["status"] == "held"
-    assert "lane_halted:gpt-6-luna-xhigh:collection_wall_limit" in status["holds"]
+    assert "retained_ledger_stop:gpt-6-luna-xhigh:collection_wall_limit" in status["holds"]
 
 
 # m4: freeze
@@ -456,9 +462,9 @@ async def test_a_changed_sealed_file_refuses_the_run_and_is_reported(compat, tmp
                         lambda: {**original(), "peer_reporting_v11/world.py": "0" * 64})
     harness = Harness(tmp_path / "homes", scripted(fixtures))
     with pytest.raises(v11_live.LivePhaseError, match="changed after sealing"):
-        await run(root, plan, harness, compatibility_directories=[compat])
+        await run(root, plan, harness, compatibility_directories=[compat], study_directory=study)
     assert harness.created == []
-    report = v11_live.verify_live_root(root, bundle=fake_bundle())
+    report = v11_live.verify_live_root(root, bundle=fake_bundle(), study_directory=study)
     assert report["implementation_changes"] == ["peer_reporting_v11/world.py"]
 
 
@@ -470,9 +476,9 @@ async def test_a_changed_scorer_is_reported_but_does_not_gate_the_run(compat, tm
     monkeypatch.setattr(v11_phase, "implementation_hashes",
                         lambda: {**original(), "peer_reporting_v11/score.py": "0" * 64})
     harness = Harness(tmp_path / "homes", scripted(fixtures))
-    await run(root, plan, harness, compatibility_directories=[compat])
+    await run(root, plan, harness, compatibility_directories=[compat], study_directory=study)
     assert harness.created
-    report = v11_live.verify_live_root(root, bundle=fake_bundle())
+    report = v11_live.verify_live_root(root, bundle=fake_bundle(), study_directory=study)
     assert report["implementation_changes"] == ["peer_reporting_v11/score.py"]
 
 
@@ -483,7 +489,8 @@ def test_world_mode_bound_reads_the_durable_world_state(compat, tmp_path):
     study, _, fixtures = smoke_study(tmp_path / "study")
     root = tmp_path / "smoke"
     plan = prepare(root, build_plan("smoke", study, compatibility_directories=[compat]), study)
-    asyncio.run(run(root, plan, Harness(tmp_path / "homes", scripted(fixtures)), compatibility_directories=[compat]))
+    asyncio.run(run(root, plan, Harness(tmp_path / "homes", scripted(fixtures)), compatibility_directories=[compat],
+                    study_directory=study))
     lane = root / "lanes" / "gpt-6-sol-low"
     (path,) = lane.glob("attempts/*/attempt.json")
     payload = read_sealed(path)
@@ -509,15 +516,16 @@ async def test_runs_and_starts_journal_the_authorization_hash(compat, tmp_path):
     root = tmp_path / "smoke"
     plan = prepare(root, build_plan("smoke", study, compatibility_directories=[compat]), study)
     status = await run(root, plan, Harness(tmp_path / "homes", scripted(fixtures)),
-                       compatibility_directories=[compat])
+                       compatibility_directories=[compat], study_directory=study)
     expected = status["authorization_hash"]
     assert {record["data"]["authorization_hash"] for record in records(root, "run_opened")} == {expected}
     assert {record["data"]["authorization_hash"] for record in records(root, "attempt_started")} == {expected}
     assert {payload["authorization_hash"] for payload in payloads(root).values()} == {expected}
-    assert v11_live.verify_live_root(root, bundle=fake_bundle())["authorization_hashes"] == [expected]
+    report = v11_live.verify_live_root(root, bundle=fake_bundle(), study_directory=study)
+    assert report["authorization_hashes"] == [expected]
     (root / "authorizations" / f"{expected}.json").unlink()
     with pytest.raises(v11_live.EvidenceError, match="not retained"):
-        v11_live.verify_live_root(root, bundle=fake_bundle())
+        v11_live.verify_live_root(root, bundle=fake_bundle(), study_directory=study)
 
 
 # N6 and N7
@@ -542,8 +550,16 @@ async def test_root_stop_is_watched_even_with_a_stop_file_flag(tmp_path):
     (root / "STOP").touch()
     harness = Harness(tmp_path / "homes", lambda model, effort: [])
     status = await run(root, plan, harness, stop_file=tmp_path / "elsewhere-STOP")
-    assert harness.created == [] and status["holds"] == ["parent_stop_or_forced_deadline"]
+    assert harness.created == [] and status["holds"] == ["soft_stop"]
     other, other_plan = compat_root(tmp_path / "compat-2")
     (tmp_path / "flag-STOP").touch()
     status = await run(other, other_plan, harness, stop_file=tmp_path / "flag-STOP")
-    assert harness.created == [] and status["holds"] == ["parent_stop_or_forced_deadline"]
+    assert harness.created == [] and status["holds"] == ["soft_stop"]
+    hard, hard_plan = compat_root(tmp_path / "compat-3")
+    (hard / "HARD_STOP").touch()
+    status = await run(hard, hard_plan, harness, stop_file=tmp_path / "elsewhere-STOP")
+    assert harness.created == [] and status["holds"] == ["hard_stop"]
+    flagged, flagged_plan = compat_root(tmp_path / "compat-4")
+    (tmp_path / "flag-HARD_STOP").touch()
+    status = await run(flagged, flagged_plan, harness, hard_stop_file=tmp_path / "flag-HARD_STOP")
+    assert harness.created == [] and status["holds"] == ["hard_stop"]

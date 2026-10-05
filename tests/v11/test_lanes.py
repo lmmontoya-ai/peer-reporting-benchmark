@@ -50,10 +50,12 @@ def test_caps_record_requires_frozen_status_protocol_tool_cap_and_bounded_concur
         lanes.validate_caps_record(reservation_below_stop)
 
 
-def test_lane_caps_are_serial_with_one_reservation_per_planned_trial():
+def test_lane_caps_are_serial_with_one_reservation_of_headroom_above_the_planned_trials():
     caps = lanes.lane_caps(caps_record(), "collection", 336)
     assert caps["max_concurrency"] == 1
-    assert caps["collection_observed_token_stop_target"] == 336 * 75000
+    assert caps["collection_observed_token_stop_target"] == 337 * 75000  # W09 N-c
+    with pytest.raises(ValueError, match="exceed its planned reservations"):
+        lanes.validate_token_headroom({**caps, "collection_observed_token_stop_target": 336 * 75000}, 336)
     assert caps["collection_wall_seconds"] == 3600 and caps["max_tool_requests_per_trial"] == 32
     with pytest.raises(ValueError):
         lanes.lane_caps(caps_record(), "collection", 0)
@@ -98,27 +100,33 @@ def test_admission_holds_at_cutoff_deadline_and_stop_file_and_never_lift(tmp_pat
     now = [100.0]
     changes = []
     policy = lanes.AdmissionPolicy(admission_cutoff=200, forced_stop_deadline=300, wall_clock=lambda: now[0],
-                                   stop_file=tmp_path / "STOP", on_change=lambda: changes.append(1))
+                                   hard_stop_files=[tmp_path / "HARD_STOP"], on_change=lambda: changes.append(1))
     assert policy.admission_check() is None
     now[0] = 200
     assert policy.admission_check()["holds"] == ["admission_cutoff"]
     assert not policy.force_stop_due()
     now[0] = 150  # a clock moving back never lifts a hold
     assert policy.admission_check() is not None
-    (tmp_path / "STOP").touch()
-    assert policy.force_stop_due()
-    assert policy.admission_check()["holds"] == ["admission_cutoff", "parent_stop_or_forced_deadline"]
+    (tmp_path / "HARD_STOP").touch()
+    assert policy.force_stop_due() and policy.force_stop_reason() == "hard_stop"
+    assert policy.admission_check()["holds"] == ["admission_cutoff", "hard_stop"]
     assert len(changes) == 2
     with pytest.raises(ValueError):
         lanes.AdmissionPolicy(admission_cutoff=300, forced_stop_deadline=300)
 
 
-def test_every_stop_file_is_watched(tmp_path):
+def test_every_stop_file_is_watched_and_soft_stops_never_truncate(tmp_path):
     policy = lanes.AdmissionPolicy(admission_cutoff=10**12, forced_stop_deadline=10**12 + 1,
-                                   stop_files=[tmp_path / "root-STOP", tmp_path / "flag-STOP"])
+                                   stop_files=[tmp_path / "root-STOP", tmp_path / "flag-STOP"],
+                                   hard_stop_files=[tmp_path / "root-HARD_STOP", tmp_path / "flag-HARD_STOP"])
     assert not policy.force_stop_due()
-    (tmp_path / "root-STOP").touch()
-    assert policy.force_stop_due() and policy.admission_check()["holds"] == ["parent_stop_or_forced_deadline"]
+    (tmp_path / "flag-STOP").touch()
+    assert not policy.force_stop_due() and policy.admission_check()["holds"] == ["soft_stop"]
+    (tmp_path / "flag-HARD_STOP").touch()
+    assert policy.force_stop_reason() == "hard_stop"
+    assert policy.admission_check()["holds"] == ["soft_stop", "hard_stop"]
+    deadline = lanes.AdmissionPolicy(admission_cutoff=10, forced_stop_deadline=20, wall_clock=lambda: 20)
+    assert deadline.force_stop_reason() == "forced_stop_deadline"
 
 
 def test_failed_check_or_unsettled_usage_holds_all_admission():

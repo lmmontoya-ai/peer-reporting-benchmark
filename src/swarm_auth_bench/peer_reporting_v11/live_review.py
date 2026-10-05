@@ -13,12 +13,16 @@ Each archived primary attempt becomes one attempt in the shape produced by P1's
   ``duplicate_of_arrival_seq`` (set on a duplicate transport call), for
   ``focal_intent`` and the unavailable report store;
 - ``usage`` (settled and observed tokens, and the settlement label, such as
-  ``bounded_by_reservation``) and ``elapsed_seconds``.
+  ``bounded_by_reservation``) and ``elapsed_seconds``;
+- ``excluded_from_analysis``: true for a failed attempt that an approved
+  amendment accepted (spec 10); such an attempt is also not ``eligible``.
 
-No model, repair, resume, or admission operation is performed. The export first
-rechecks the root's consumed-attempt ledger against its prior roots. Compatibility
-roots are engineering checks and are not exported. Every planned row is kept;
-unrun, incomplete, and quarantined rows have no attempt and never become negatives.
+No model, repair, resume, or admission operation is performed. The export needs
+the study directory in which the root is registered, rechecks the root's
+consumed-attempt ledger against its prior roots, and records the study's registry
+listing and amendments. Compatibility roots are engineering checks and are not
+exported. Every planned row is kept; unrun, incomplete, and quarantined rows have
+no attempt and never become negatives.
 """
 
 from __future__ import annotations
@@ -38,9 +42,13 @@ from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
 from .bundle import ProtocolBundle, load_bundle
 from .live import (
     CONFIGURATION_CHECKS,
+    _row_valid,
     evaluate_transport,
     read_live_plan,
     read_root_fixture,
+    root_registration,
+    study_amendments,
+    study_registry_listing,
     verify_consumed_ledger,
 )
 from .phase import _PhaseState
@@ -94,7 +102,7 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
                 "tool_requests": [], "tool_receipts": [], "model_execution_confirmed": False,
                 "usage": {"total_tokens": settlement["actual_tokens"], "observed_total_tokens": None,
                           "settlement": settlement["status"]},
-                "elapsed_seconds": None}
+                "elapsed_seconds": None, "excluded_from_analysis": False}
     _require(type(result) is dict, "observer result is not an object")
     _require(result["attempt_id"] == payload["attempt_id"]
              and result["instructions_hash"] == content_hash(entry["instructions"])
@@ -132,7 +140,8 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
                  and _text_item(item) == fixture["packet"], "initial packet receipt mismatch")
     check = evaluate_transport(result, fixture=fixture, entry=entry, preflight=payload["preflight"], bundle=bundle,
                                orchestrator_failures=payload["orchestrator"]["evidence_failures"],
-                               observer_error=payload["observer_error"], usage_settlement=settlement["status"])
+                               observer_error=payload["observer_error"], usage_settlement=settlement["status"],
+                               stop_reasons=payload["orchestrator"]["collection_stop_reasons"])
     _require(check == payload["check"], "archived transport classification differs from its evidence")
     eligible = all(check["checks"][key] for key in CONFIGURATION_CHECKS if key != "tools_registered")
     # Later infrastructure failures close the opportunity incompletely; they do
@@ -179,7 +188,7 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
             "usage": {"total_tokens": settlement["actual_tokens"],
                       "observed_total_tokens": (result.get("usage") or {}).get("observed_total_tokens"),
                       "settlement": settlement["status"]},
-            "elapsed_seconds": result.get("elapsed_seconds")}
+            "elapsed_seconds": result.get("elapsed_seconds"), "excluded_from_analysis": False}
 
 
 def _read_attempt(state: _PhaseState, entry: dict, fixture: dict, *, phase: str, bundle: ProtocolBundle
@@ -218,10 +227,34 @@ def _read_attempt(state: _PhaseState, entry: dict, fixture: dict, *, phase: str,
                                          lane=state.plan["lane_id"], bundle=bundle)
 
 
+def _exclude(row: dict, entry: dict, state: _PhaseState, hashes: list[str], errors: list[str]) -> None:
+    """Mark a failed attempt that an amendment accepted; refuse an amendment of an unstarted or valid attempt."""
+    indexed = state.index["entries"][entry["entry_id"]]
+    attempt = indexed["attempt"] or {}
+    summary = {"status": indexed["status"], "check_passed": attempt.get("check_passed"),
+               "usage_settlement": attempt.get("usage_settlement"),
+               "usage_total_tokens": attempt.get("usage_total_tokens")}
+    if indexed["status"] in UNSTARTED or _row_valid(summary):
+        errors.append(f"amendment {hashes} accepts {entry['attempt_id']}, which is not a failed attempt of this root")
+        return
+    row.update(excluded_from_analysis=True, amendment_hashes=hashes)
+    if row["attempt"] is not None:
+        row["attempt"].update(excluded_from_analysis=True, eligible=False)
+
+
 def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
-                      scorer: Callable[[dict], dict] | None = None) -> dict:
-    """Return every planned row; verified archived rows carry their attempt and optional score."""
+                      scorer: Callable[[dict], dict] | None = None, amendments: list[dict] | tuple = ()) -> dict:
+    """Return every planned row; verified archived rows carry their attempt and optional score.
+
+    Failed attempts that one of ``amendments`` accepts are marked
+    ``excluded_from_analysis`` before scoring.
+    """
     bundle = bundle or load_bundle()
+    accepted: dict[str, list[str]] = {}
+    for amendment in amendments:
+        for attempt_id in amendment["attempt_ids"]:
+            accepted.setdefault(attempt_id, []).append(amendment["seal_hash"])
+    amendment_errors: list[str] = []
     directory = Path(directory)
     plan = read_live_plan(directory)
     _require(plan["phase"] != "compatibility",
@@ -247,19 +280,22 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
             for entry in lane_plan["planned_order"]:
                 rows.append({"assignment_id": entry["entry_id"], **_labels(entry, plan["phase"], lane["lane_id"]),
                              "status": "quarantined_lane", "attempt": None, "score": None,
-                             "evidence_error": lane_errors[lane["lane_id"]], "score_error": None})
+                             "evidence_error": lane_errors[lane["lane_id"]], "score_error": None,
+                             "excluded_from_analysis": False})
             continue
         try:
             for entry in state.plan["planned_order"]:
                 row = {"assignment_id": entry["entry_id"], **_labels(entry, plan["phase"], lane["lane_id"]),
                        "status": "unrun", "attempt": None, "score": None, "evidence_error": None,
-                       "score_error": None}
+                       "score_error": None, "excluded_from_analysis": False}
                 try:
                     fixture = read_root_fixture(directory, plan, entry["fixture_id"])
                     row["status"], row["attempt"] = _read_attempt(state, entry, fixture, phase=plan["phase"],
                                                                   bundle=bundle)
                 except _ERRORS as error:
                     row.update(status="quarantined_attempt", attempt=None, evidence_error=str(error))
+                if entry["attempt_id"] in accepted:
+                    _exclude(row, entry, state, sorted(accepted[entry["attempt_id"]]), amendment_errors)
                 if row["attempt"] is not None and scorer is not None:
                     try:
                         row["score"] = scorer(row["attempt"])
@@ -270,30 +306,37 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
             state.journal.close()
     rows.sort(key=lambda row: row["planned_order"])
     return {"adapter_version": ADAPTER_VERSION, "phase": plan["phase"], "plan_hash": plan["seal_hash"],
-            "rows": rows, "lane_errors": lane_errors,
+            "rows": rows, "lane_errors": lane_errors, "amendment_errors": amendment_errors,
             "status_counts": dict(Counter(row["status"] for row in rows)),
             "verified_model_observations": sum(bool(row["attempt"] and row["attempt"]["model_execution_confirmed"])
                                                for row in rows),
             "planned_count": plan["maximum_live_calls"]}
 
 
-def export_live_review(directory: Path, output: Path, *, prior_roots: list[Path] | tuple = (),
-                       bundle: ProtocolBundle | None = None, scorer: Callable[[dict], dict] | None = None,
+def export_live_review(directory: Path, output: Path, *, study_directory: Path | None = None,
+                       prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None,
+                       scorer: Callable[[dict], dict] | None = None,
                        summarize: Callable[[list[dict]], dict] | None = None) -> dict:
     """Write a fresh researcher export: one sealed attempt per archived row and a sealed index.
 
+    ``study_directory`` is the study directory in which the root is registered.
     ``prior_roots`` must be exactly the prior roots sealed in the plan's
-    consumed-attempt ledger; the export refuses if an assignment ran in two roots.
+    consumed-attempt ledger; the export refuses if an assignment ran in two
+    roots. The index carries the study's registry listing and amendments.
     """
     directory, output = Path(directory), Path(output)
     _require(not output.resolve().is_relative_to(directory.resolve())
              and not directory.resolve().is_relative_to(output.resolve()),
              "export must be outside the source live root")
     bundle = bundle or load_bundle()
-    _require(read_live_plan(directory)["phase"] != "compatibility",
+    plan = read_live_plan(directory)
+    _require(plan["phase"] != "compatibility",
              "compatibility attempts are engineering checks, not behavioral observations")
-    ledger = verify_consumed_ledger(directory, read_live_plan(directory), prior_roots, bundle=bundle)
-    data = inspect_live_root(directory, bundle=bundle, scorer=scorer)
+    registration = root_registration(study_directory, plan, require_finalized=False)
+    ledger = verify_consumed_ledger(directory, plan, prior_roots, bundle=bundle)
+    amendments = study_amendments(study_directory) if plan["phase"] == "smoke" else []
+    data = inspect_live_root(directory, bundle=bundle, scorer=scorer, amendments=amendments)
+    _require(not data["amendment_errors"], "; ".join(data["amendment_errors"]))
     output.mkdir(parents=True, exist_ok=False)
     (output / "attempts").mkdir()
     index = []
@@ -312,7 +355,9 @@ def export_live_review(directory: Path, output: Path, *, prior_roots: list[Path]
         "status_counts": data["status_counts"], "lane_errors": data["lane_errors"],
         "verified_model_observations": data["verified_model_observations"],
         "consumed_attempt_ledger": ledger, "scored": scorer is not None, "summary": summary,
-        "semantic_review": "pending_human_review_of_free_text",
+        "semantic_review": "pending_human_review_of_free_text", "study_registration": registration,
+        "study_registry": study_registry_listing(study_directory),
+        "analysis_exclusions": sorted(row["assignment_id"] for row in data["rows"] if row["excluded_from_analysis"]),
     }))
     return {"output": str(output), "phase": data["phase"], "assignments": len(index),
             "attempts": sum("attempt_path" in row for row in index), "status_counts": data["status_counts"],
