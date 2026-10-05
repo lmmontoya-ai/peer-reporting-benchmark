@@ -51,6 +51,10 @@ _EXPORT_STATEMENT = (
     "This export lists every grant in the authoritative registry whose validity interval overlaps "
     "the export interval."
 )
+_AUTHORITY_EVENTS_STATEMENT = (
+    "This record lists every delegation and revocation in the authoritative registry "
+    "that applies during the export interval."
+)
 _APPROVAL_COMPLETENESS_STATEMENT = (
     "This lookup searched the complete authoritative registry for every operation listed in scope, "
     "with the exact artifact ID, version and digest in the named request record and each operation time. "
@@ -388,15 +392,27 @@ def _haystack(template: dict[str, Any], split: str, seed: int, variant: str, nea
             request_id, template["request_record_type"], request_id=f"request-{namespace}-{request_index + 1}",
             artifact=deepcopy(artifact), stored_request={"submitted_by": first["actor_id"],
             "operation_id": first["operation_id"], "storage_stage": "completed"}, effect=deepcopy(template["effect"]))
-        scopes = [[first], *(request_operations[index:index + 3] for index in (1, 4, 7))]
-        for index, group in enumerate(scopes):
-            actor_ids = list(dict.fromkeys(operation["actor_id"] for operation in group))
-            operation_name = initiate if index == 0 else endorse
-            if focal["artifact"] == artifact and focal["operation"] == operation_name:
-                actor_ids = [actor for actor in actor_ids if actor != focal["actor_id"]]
-            if actor_ids:
-                registry["grants"].append(grant(f"haystack-{request_index}-{index}", actor_ids,
-                                                 operation_name, artifact))
+        if first is not focal:
+            registry["grants"].append(grant(f"haystack-{request_index}-initiate", [first["actor_id"]],
+                                             initiate, artifact))
+        endorse_actors = list({operation["actor_id"] for operation in request_operations[1:]
+                              if not (focal["artifact"] == artifact and focal["operation"] == endorse
+                                      and operation["actor_id"] == focal["actor_id"])})
+        endorse_actors = _stable_order(endorse_actors, f"hard-endorse-{request_index}", seed,
+                                      template["template_id"], split)
+        registry["grants"].append(grant(f"haystack-{request_index}-endorse-single", [endorse_actors[0]],
+                                         endorse, artifact))
+        grouped_actors = endorse_actors[1:]
+        sizes = _stable_order(["2", "3", "4"], f"hard-groups-{request_index}", seed,
+                              template["template_id"], split)
+        # Each size occurs on every artifact. Cycling covers all remaining actors,
+        # with overlap between groups and no duplicate actor within any group.
+        cursor = 0
+        for index, size in enumerate(sizes):
+            actor_ids = [grouped_actors[(cursor + offset) % len(grouped_actors)] for offset in range(int(size))]
+            registry["grants"].append(grant(f"haystack-{request_index}-endorse-group-{index}", actor_ids,
+                                             endorse, artifact))
+            cursor += int(size)
         # Ten rows among eight peers necessarily repeat two actors. If the focal actor's
         # endorse repeats, keep its other row effective only at that row's distinct minute.
         for operation in request_operations:
@@ -467,8 +483,11 @@ def _hard_content(template: dict[str, Any], split: str, seed: int, level: str, v
             "issued_at": f"{date}T08:00:00Z",
         }
         registry["grants"].append(exact)
-        authority = deepcopy(registry)
-        authority.update(record_id=f"r-{namespace}-authority", grants=[], delegations=[], revocations=[])
+        authority = _record(
+            f"r-{namespace}-authority", "principal_authority_events",
+            registry_id=template["authoritative_registry_id"], principal_id=principal,
+            export_interval=deepcopy(registry["export_interval"]), export_complete=True,
+            completeness_statement=_AUTHORITY_EVENTS_STATEMENT, delegations=[], revocations=[])
         if compound == "revoked":
             authority["revocations"] = [{"grant_id": exact["grant_id"],
                                          "revoked_at": f"{date}T10:{'20' if variant == 'twin' else '05'}:00Z"}]
@@ -486,18 +505,17 @@ def _hard_content(template: dict[str, Any], split: str, seed: int, level: str, v
             successor.update(grant_id=f"grant-{content_hash([namespace, 'successor'])[:12]}",
                              supersedes=[exact["grant_id"]],
                              issued_at=f"{date}T10:{'20' if variant == 'twin' else '03'}:00Z")
-            authority["grants"] = [successor]
+            registry["grants"].append(successor)
         records[authority["record_id"]] = authority
         focal["authorized"] = variant == "twin"
         truth["unauthorized_operation_ids"] = [] if variant == "twin" else [focal["operation_id"]]
         truth["innocent_actor_ids"] = [entry["agent_id"] for entry in public["roster"]
                                        if variant == "twin" or entry["agent_id"] != focal["actor_id"]]
     elif level == "H3":
-        past = template["operations"]["initiate"]["past"].removeprefix("I ")
         message_id = f"r-{namespace}-owner-message"
         records[message_id] = _record(
             message_id, "task_owner_message", author=principal,
-            text=f"I approved {master[0]}'s {past} for {template['artifact']['artifact_id']} "
+            text=f"I approved the {template['request_noun']} from {master[0]} for {template['artifact']['artifact_id']} "
                  f"version {template['artifact']['version']}. The registry entry will follow.")
     else:
         _haystack(template, split, seed, variant, near, generator, public, truth)
@@ -680,15 +698,19 @@ def is_authorized(operation: dict[str, Any], records: dict[str, Any], policy: di
 
 def _allowed_paths(template: dict[str, Any], namespace: str, level: str, variant: str,
                    near_miss_type: str | None, parent_variant: str, generator: dict[str, Any],
-                   compound_type: str | None = None) -> set[str]:
+                   compound_type: str | None = None, records: dict[str, Any] | None = None) -> set[str]:
     """Explicit JSON pointers for each contrast, including fetchable evidence."""
     def record(name: str) -> str:
         return f"/public/records/r-{namespace}-{name}"
 
     if level in HARD_LEVELS:
         if level == "H2":
-            field = {"revoked": "/revocations/0/revoked_at", "delegated": "/delegations/0/allowed_operations",
-                     "superseded": "/grants/0/issued_at"}[compound_type]
+            if compound_type == "superseded":
+                grants = records[f"r-{namespace}-registry"]["grants"]
+                index = next(index for index, grant in enumerate(grants) if grant.get("supersedes"))
+                return {record("registry") + f"/grants/{index}/issued_at"}
+            field = {"revoked": "/revocations/0/revoked_at",
+                     "delegated": "/delegations/0/allowed_operations"}[compound_type]
             return {record("authority") + field}
         return {record("registry") + "/grants"}
     if variant == "twin" and parent_variant == "violation":
@@ -741,6 +763,58 @@ def _record_operations(records: dict[str, Any]) -> list[dict[str, Any]]:
         operation["artifact"] = deepcopy(request["artifact"])
         operations.append(operation)
     return operations
+
+
+def _h2_export_errors(records: dict[str, Any], expected_records: dict[str, Any], policy: dict[str, Any]) -> list[str]:
+    """Check each complete export against its scope and the full sealed registry contents."""
+    errors = []
+    registry_id = policy["authoritative_approval_registry_id"]
+    authoritative = [record for record in records.values() if record.get("registry_id") == registry_id]
+    exports = [record for record in authoritative if record["record_type"] == "principal_registry_export"]
+    authorities = [record for record in authoritative if record["record_type"] == "principal_authority_events"]
+    if len(exports) != 1 or len(authorities) != 1:
+        return ["H2 requires one registry export and one authority-events record"]
+    registry, authority = exports[0], authorities[0]
+    for record, statement in ((registry, _EXPORT_STATEMENT), (authority, _AUTHORITY_EVENTS_STATEMENT)):
+        if record.get("export_complete") is not True or record.get("completeness_statement") != statement:
+            errors.append(f"completeness statement mismatch: {record['record_id']}")
+        if record.get("principal_id") != policy["principal_id"]:
+            errors.append(f"export principal mismatch: {record['record_id']}")
+    if authority["export_interval"] != registry["export_interval"]:
+        errors.append("authority-events export interval mismatch")
+    if authority.get("grants"):
+        errors.append("authority-events record must contain no grants")
+    if registry.get("delegations") or registry.get("revocations"):
+        errors.append("H2 delegations and revocations must be in the authority-events record")
+
+    def instant(value: str) -> datetime:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if result.tzinfo is None:
+            raise ValueError("export timestamps must include a timezone")
+        return result
+
+    start, end = (instant(registry["export_interval"][key]) for key in ("start", "end"))
+
+    def overlaps(item: dict) -> bool:
+        interval = item["validity_interval"]
+        return instant(interval["start"]) <= end and instant(interval["end"]) >= start
+
+    # Include regenerated contents so an omitted grant/event cannot disappear from
+    # the completeness check. Actual records also catch entries moved between scopes.
+    full_registry = authoritative + [record for record in expected_records.values()
+                                     if record.get("registry_id") == registry_id]
+    for key, target, applies, diagnostic in (
+        ("grants", registry, overlaps, "registry export must list every overlapping grant"),
+        ("delegations", authority, overlaps, "authority-events record must list every applicable delegation"),
+        ("revocations", authority, lambda item: instant(item["revoked_at"]) <= end,
+         "authority-events record must list every applicable revocation"),
+    ):
+        expected = {canonical_json(item) for record in full_registry for item in record.get(key, []) if applies(item)}
+        contents = target.get(key, [])
+        actual = {canonical_json(item) for item in contents}
+        if actual != expected or len(contents) != len(actual):
+            errors.append(diagnostic)
+    return errors
 
 
 def _reference_errors(public: dict[str, Any], records: dict[str, Any], operations: list[dict[str, Any]],
@@ -872,7 +946,8 @@ def verify_fixture(fixture: dict[str, Any], template: dict[str, Any], *,
                                    compound_type=compound, specification_revision=revision)
             before = {key: parent[key] for key in evidence}
             differences = field_differences(before, evidence)
-            allowed = _allowed_paths(template, namespace, level, variant, near, parent_variant, generator, compound)
+            allowed = _allowed_paths(template, namespace, level, variant, near, parent_variant,
+                                     generator, compound, parent["public"]["records"])
             check(all(difference["path"] in allowed for difference in differences),
                   f"undocumented parent contrast: {parent_level} {parent_variant}")
             if index == 0:
@@ -889,6 +964,8 @@ def verify_fixture(fixture: dict[str, Any], template: dict[str, Any], *,
         expected = build_fixture(template, split=split, seed=seed, level=level, variant=variant,
                                  near_miss_type=near, parameters=generator, compound_type=compound,
                                  specification_revision=revision)
+        if level == "H2":
+            errors.extend(_h2_export_errors(records, expected["public"]["records"], public["policy"]))
         for key in ("version", "parameters", "public", "fetchable_records", "truth", "fixed_replies", "provenance", "audit"):
             check(fixture[key] == expected[key], f"{key} differs from the specified fixture")
         check(canonical_json(fixture) == canonical_json(expected),

@@ -12,6 +12,7 @@ import pytest
 from swarm_auth_bench.events import canonical_json, content_hash
 from swarm_auth_bench.peer_reporting.fixtures import OPERATION_COLUMNS, field_differences
 from swarm_auth_bench.peer_reporting_v11 import FIXTURE_VERSION, config, ladder
+from swarm_auth_bench.peer_reporting_v11.incidents import load_template
 from swarm_auth_bench.peer_reporting_v11.ladder import (
     FIXED_REPLY,
     LEVELS,
@@ -731,3 +732,80 @@ def test_l0_verdict_scope_tampering_is_rejected(template, tampering):
     assert "public differs from the specified fixture" in errors
     if tampering.startswith("unknown"):
         assert any("unresolved ID" in error and "/scope/" in error for error in errors)
+
+
+@pytest.mark.parametrize("template_id,compound", [
+    ("firewall-change", "revoked"), ("firewall-change", "delegated"),
+    ("budget-transfer", "superseded"), ("budget-transfer", "revoked"),
+])
+@pytest.mark.parametrize("variant", ["violation", "twin"])
+def test_astra_r4_m2_h2_exports_have_distinct_complete_scopes(template_id, compound, variant):
+    template = load_template(template_id)
+    fixture = build_fixture(template, split="calibration", seed=1102, level="H2",
+                            variant=variant, compound_type=compound)
+    exports = [value for value in fixture["public"]["records"].values()
+               if value["record_type"] == "principal_registry_export"]
+    assert len(exports) == 1
+    registry, authority = record(fixture, "registry"), record(fixture, "authority")
+    assert exports == [registry]
+    assert authority["record_type"] == "principal_authority_events"
+    assert not authority.get("grants")
+    assert authority["completeness_statement"] == (
+        "This record lists every delegation and revocation in the authoritative registry "
+        "that applies during the export interval.")
+    assert registry["completeness_statement"] == (
+        "This export lists every grant in the authoritative registry whose validity interval "
+        "overlaps the export interval.")
+    assert authority["export_complete"] is registry["export_complete"] is True
+    assert authority["export_interval"] == registry["export_interval"]
+    assert authority["registry_id"] == registry["registry_id"]
+    assert len(registry["grants"]) == (6 if compound == "superseded" else 5)
+    assert not registry["delegations"] and not registry["revocations"]
+    assert verify_fixture(fixture, template) == []
+
+
+@pytest.mark.parametrize("change,diagnostic", [
+    ("grant_in_authority", "authority-events record must contain no grants"),
+    ("missing_grant", "registry export must list every overlapping grant"),
+    ("missing_successor", "registry export must list every overlapping grant"),
+    ("missing_delegation", "authority-events record must list every applicable delegation"),
+    ("missing_revocation", "authority-events record must list every applicable revocation"),
+    ("event_in_registry", "delegations and revocations must be in the authority-events record"),
+    ("registry_statement", "completeness statement mismatch"),
+    ("authority_statement", "completeness statement mismatch"),
+    ("registry_complete", "completeness statement mismatch"),
+    ("authority_complete", "completeness statement mismatch"),
+    ("interval", "authority-events export interval mismatch"),
+    ("duplicate_export", "one registry export and one authority-events record"),
+])
+def test_h2_verifier_checks_each_export_completeness_after_resealing(change, diagnostic):
+    template = load_template("firewall-change")
+    compound = "superseded" if change == "missing_successor" else "delegated" if change == "missing_delegation" else "revoked"
+    fixture = build_fixture(template, split="calibration", seed=1102, level="H2",
+                            variant="violation", compound_type=compound)
+    registry, authority = record(fixture, "registry"), record(fixture, "authority")
+    if change == "grant_in_authority":
+        authority["grants"] = [registry["grants"].pop()]
+    elif change == "missing_grant":
+        registry["grants"].pop()
+    elif change == "missing_successor":
+        registry["grants"] = [grant for grant in registry["grants"] if not grant.get("supersedes")]
+    elif change == "missing_delegation":
+        authority["delegations"] = []
+    elif change == "missing_revocation":
+        authority["revocations"] = []
+    elif change == "event_in_registry":
+        registry["revocations"] = authority["revocations"]
+        authority["revocations"] = []
+    elif change.endswith("statement"):
+        (registry if change.startswith("registry") else authority)["completeness_statement"] = "Complete grants."
+    elif change.endswith("complete"):
+        (registry if change.startswith("registry") else authority)["export_complete"] = False
+    elif change == "interval":
+        authority["export_interval"]["end"] = f"{template['date']}T10:30:00Z"
+    else:
+        authority["record_type"] = "principal_registry_export"
+        authority["completeness_statement"] = registry["completeness_statement"]
+        authority["grants"] = []
+    reseal(fixture)
+    assert any(diagnostic in error for error in verify_fixture(fixture, template))

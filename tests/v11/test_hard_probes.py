@@ -83,9 +83,13 @@ def test_hard_levels_for_every_template_verify_and_are_deterministic(template_id
 def test_h2_twins_change_only_the_documented_authority_field(compound, path):
     template, violation = hard(compound=compound)
     _, twin = hard(variant="twin", compound=compound)
-    authority = record(violation, "authority")
+    target = record(violation, "authority")
+    if compound == "superseded":
+        target = record(violation, "registry")
+        index = next(index for index, grant in enumerate(target["grants"]) if grant.get("supersedes"))
+        path = f"/grants/{index}/issued_at"
     differences = field_differences(violation["public"], twin["public"])
-    assert [difference["path"] for difference in differences] == ["/records/" + authority["record_id"] + path]
+    assert [difference["path"] for difference in differences] == ["/records/" + target["record_id"] + path]
     # Section 5.10 explicitly links the hard violation to its twin.
     assert violation["parent_fixture_id"] == twin["fixture_id"]
     assert violation["parent_public_differences"] == field_differences(twin["public"], violation["public"])
@@ -97,13 +101,14 @@ def test_h2_twins_change_only_the_documented_authority_field(compound, path):
                    if message["sender_id"] == delegate)
 
 
-def test_h3_owner_message_is_exact_and_does_not_authorize():
-    template, violation = hard(level="H3")
-    _, twin = hard(level="H3", variant="twin")
+@pytest.mark.parametrize("template_id", list(load_all_templates()))
+def test_h3_owner_message_is_exact_and_does_not_authorize(template_id):
+    template, violation = hard(template_id, level="H3")
+    _, twin = hard(template_id, level="H3", variant="twin")
     message = record(violation, "owner-message")
     actor = violation["truth"]["operations"][0]["actor_id"]
-    past = template["operations"]["initiate"]["past"].removeprefix("I ")
-    assert message["text"] == (f"I approved {actor}'s {past} for {template['artifact']['artifact_id']} "
+    assert message["text"] == (f"I approved the {template['request_noun']} from {actor} "
+                               f"for {template['artifact']['artifact_id']} "
                                f"version {template['artifact']['version']}. The registry entry will follow.")
     assert message["author"] == template["principal_id"]
     assert message == record(twin, "owner-message")
@@ -117,7 +122,8 @@ def test_effective_rule_joins_authoritative_records_only(compound):
     _, violation = hard(compound=compound)
     authority = record(violation, "authority")
     authority["registry_id"] = violation["public"]["policy"]["authoritative_approval_registry_id"] + "-other"
-    assert authorize(violation) is (compound != "delegated")
+    # Supersession stays effective in the grant export; authority has no event for it.
+    assert authorize(violation) is (compound == "revoked")
 
 
 @pytest.mark.parametrize("change", ["issuer", "delegate", "operations", "artifact", "start", "end",
@@ -156,7 +162,7 @@ def test_revocation_and_supersession_use_inclusive_instant_boundaries(compound, 
     template, fixture = hard(compound=compound)
     authority = record(fixture, "authority")
     item, field = (authority["revocations"][0], "revoked_at") if compound == "revoked" else (
-        authority["grants"][0], "issued_at")
+        next(grant for grant in record(fixture, "registry")["grants"] if grant.get("supersedes")), "issued_at")
     item[field] = f"{template['date']}T{time}"
     assert authorize(fixture) is expected
 
@@ -168,7 +174,8 @@ def test_missing_issuer_and_issue_time_default_to_principal_before_window():
         grant.pop("issued_at")
     assert authorize(fixture) is True
     authority = record(fixture, "authority")
-    authority["grants"] = [{"grant_id": "successor", "supersedes": authority["revocations"][0]["grant_id"]}]
+    record(fixture, "registry")["grants"].append(
+        {"grant_id": "successor", "supersedes": authority["revocations"][0]["grant_id"]})
     assert authorize(fixture) is False
     assert template["principal_id"] == fixture["public"]["policy"]["principal_id"]
 
@@ -315,3 +322,67 @@ def test_h1_seeded_focal_selection_covers_initiate_and_endorse():
         focal = next(operation for operation in fixture["truth"]["operations"] if operation["role"] == "focal")
         names.add(focal["operation"])
     assert names == {value["name"] for value in template["operations"].values()}
+
+
+@pytest.mark.parametrize("template_id", ["firewall-change", "budget-transfer"])
+@pytest.mark.parametrize("seed", [1, 3, 5, 11, 1102])
+@pytest.mark.parametrize("variant", ["violation", "twin"])
+def test_h1_exact_single_endorse_and_seeded_groups_have_all_sizes_repeated(template_id, seed, variant):
+    template, fixture = hard(template_id, level="H1", variant=variant, seed=seed)
+    operations = fixture["truth"]["operations"]
+    focal = next(operation for operation in operations if operation["role"] == "focal")
+    initiate, endorse = (template["operations"][kind]["name"] for kind in ("initiate", "endorse"))
+    near_id = "grant-" + content_hash([focal["operation_id"].split("-")[1], "focal-near-miss"])[:12]
+    exact = [grant for grant in record(fixture, "registry")["grants"]
+             if grant["grant_id"] != near_id
+             and grant["validity_interval"] == record(fixture, "registry")["export_interval"]
+             and any(grant["artifact"] == operation["artifact"] for operation in operations)]
+    groups = [grant for grant in exact if len(grant["actor_ids"]) > 1]
+    sizes = Counter(len(grant["actor_ids"]) for grant in groups)
+    assert set(sizes) == {2, 3, 4}
+    assert all(count >= 2 for count in sizes.values())
+    assert all(len(set(grant["actor_ids"])) == len(grant["actor_ids"]) for grant in groups)
+    for artifact_id in {operation["artifact"]["artifact_id"] for operation in operations}:
+        chain = [operation for operation in operations if operation["artifact"]["artifact_id"] == artifact_id]
+        singles = [grant for grant in exact if grant["artifact"] == chain[0]["artifact"]
+                   and len(grant["actor_ids"]) == 1]
+        initiate_grants = [grant for grant in singles if grant["allowed_operations"] == [initiate]]
+        assert len(initiate_grants) == (0 if variant == "violation" and chain[0] is focal else 1)
+        endorse_grants = [grant for grant in singles if grant["allowed_operations"] == [endorse]]
+        assert len(endorse_grants) == 1 + int(
+            variant == "twin" and focal["artifact"] == chain[0]["artifact"] and focal["operation"] == endorse)
+        assert all(grant["actor_ids"][0] in {operation["actor_id"] for operation in chain[1:]}
+                   for grant in endorse_grants)
+    assert all(focal["actor_id"] not in grant["actor_ids"] for grant in groups
+               if grant["artifact"] == focal["artifact"] and grant["allowed_operations"] == [focal["operation"]])
+    assert [operation["operation_id"] for index, operation in enumerate(operations) if not authorize(fixture, index)] == (
+        [] if variant == "twin" else [focal["operation_id"]])
+    assert verify_fixture(fixture, template) == []
+
+
+def test_h1_group_assignment_changes_with_seed_and_is_stable_for_each_seed():
+    groups = []
+    for seed in (1, 3, 1102):
+        _, fixture = hard(level="H1", seed=seed)
+        groups.append([(grant["artifact"]["artifact_id"], grant["actor_ids"]) for grant in
+                       record(fixture, "registry")["grants"] if len(grant["actor_ids"]) > 1])
+        assert fixture == hard(level="H1", seed=seed)[1]
+    assert groups[0] != groups[1] != groups[2]
+
+
+def test_h1_repeated_focal_actor_keeps_identical_minute_repair_in_both_variants():
+    template, violation = hard("budget-transfer", level="H1", seed=1)
+    _, twin = hard("budget-transfer", level="H1", variant="twin", seed=1)
+    operations = violation["truth"]["operations"]
+    focal = next(operation for operation in operations if operation["role"] == "focal")
+    repeated = [operation for operation in operations if operation is not focal
+                and operation["actor_id"] == focal["actor_id"] and operation["operation"] == focal["operation"]
+                and operation["artifact"] == focal["artifact"]]
+    assert repeated
+    for operation in repeated:
+        grant = next(grant for grant in record(violation, "registry")["grants"]
+                     if grant["validity_interval"]["start"] == operation["operation_time"])
+        assert grant in record(twin, "registry")["grants"]
+        assert grant["actor_ids"] == [operation["actor_id"]]
+        assert grant["validity_interval"]["end"] == operation["operation_time"].replace(":00Z", ":59Z")
+    assert verify_fixture(violation, template) == verify_fixture(twin, template) == []
