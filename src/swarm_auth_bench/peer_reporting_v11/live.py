@@ -67,6 +67,12 @@ Study directory additions::
     live-roots/abandoned/<hash>.json   sealed abandonment of a root that never started an attempt
     amendments/<hash>.json             sealed, user-approved amendments of this study
     live-starts/<attempt_id>.json      sealed claim of an attempt start, written once before its session
+    provider-pauses/<attempt_id>.json  sealed provider pause, written once before its attempt is archived
+
+Provider pauses (spec 10, revision 3) are recorded at study level: a root of the
+study writes each pause to ``provider-pauses/`` before it seals the attempt or
+journals the pause, and every root of the study, including a replacement root and
+a root that selects other arms, restores the study's pauses before any dispatch.
 """
 
 from __future__ import annotations
@@ -128,6 +134,7 @@ from .lanes import (
     validate_caps_record,
     validate_effort,
     validate_identifier,
+    validate_pause_record,
     validate_phase,
     validate_world_mode,
 )
@@ -172,6 +179,8 @@ ROOTS_DIRECTORY = "roots"
 ROOT_PATH = re.compile(r"roots/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 START_LEDGER = "live-starts"
 START_CLAIM_KIND = "peer_reporting_v11_attempt_start_claim"
+PAUSE_LEDGER = "provider-pauses"
+PAUSE_KIND = "peer_reporting_v11_study_provider_pause"
 CLEANUP_DIRECTORY = "cleanup-reconciliations"
 CLEANUP_KIND = "peer_reporting_v11_cleanup_reconciliation"
 CLEANUP_BASIS = ("the live environment check verified while this root's coordinator lock and the attempt's lane lock "
@@ -221,7 +230,8 @@ EXECUTION_POLICY = {
                       "_compatibility_authorizations_name_the_resolved_root_path"),
     "study_start_ledger": "claim_each_journaled_start_once_in_the_study_before_its_session_an_existing_claim_refuses",
     "transport_contradictions": ("late_contradictory_requests_and_contradictory_receipts_are_execution_failures"
-                                 "_missing_receipts_are_recorded"),
+                                 "_missing_receipts_are_recorded"
+                                 "_non_retryable_error_notifications_fail_outside_the_overload_exception"),
     "cleanup_debt": "cleared_only_by_a_sealed_cleanup_reconciliation_never_by_an_amendment",
     "execution_check_failure_policy": "stop_all_new_admission",
     "provisional_hold": "set_when_an_observer_result_shows_a_failed_check_before_any_await",
@@ -234,8 +244,9 @@ EXECUTION_POLICY = {
     "hard_stop_or_deadline_policy": ("root_HARD_STOP_hard_stop_file_or_deadline_truncates_active_attempts"
                                      "_consumed_ineligible_not_an_execution_failure"),
     "provider_overload_policy": ("server_overloaded_before_any_tool_request_and_output_is_provider_unavailable"
+                                 "_decided_after_the_last_drain_from_every_reconciled_error"
                                  "_consumed_ineligible_settled_at_reservation_pauses_admission_600s"
-                                 "_third_within_3600s_holds_pauses_journaled"),
+                                 "_third_within_3600s_holds_pauses_recorded_at_study_level_and_journaled"),
     "lane_wall": "counts_only_open_run_time_summed_across_runs",
     "lane_scheduling": ("global_dispatcher_lowest_unstarted_planned_order_whose_lane_is_idle"
                         "_round_barrier_r_plus_2_per_effort"),
@@ -962,6 +973,79 @@ def claim_attempt_start(study_directory: Path, plan: dict, *, root_path: str, la
     return record
 
 
+def study_provider_pauses(study_directory: Path) -> dict[str, dict]:
+    """Every provider pause recorded in a study, by attempt ID (spec 10, revision 3).
+
+    Records are sealed, written once before their attempt is archived, and never
+    removed. This is the run-time read; ``check_study_pauses`` also checks each
+    record against the study instance and its start ledger.
+    """
+    directory = Path(study_directory) / PAUSE_LEDGER
+    if not directory.is_dir():
+        return {}
+    records = {}
+    for path in sorted(directory.glob("*.json")):
+        try:
+            record = read_sealed(path)
+            validate_pause_record(record.get("pause"))
+        except (OSError, ValueError) as error:
+            raise EvidenceError(f"study provider pause {path.name} is corrupt: {error}") from error
+        if (record.get("kind") != PAUSE_KIND or record.get("protocol_id") != PROTOCOL_ID
+                or path.stem != record["pause"]["attempt_id"]):
+            raise EvidenceError(f"study provider pause {path.name} is not a v1.1 provider pause record")
+        records[path.stem] = record
+    return records
+
+
+def record_study_pause(study_directory: Path, plan: dict, *, root_path: str, pause: dict) -> dict:
+    """Spec 10 (revision 3): record a provider pause at study level, once, before its attempt is archived.
+
+    Every root of the study restores these records before any dispatch, so a
+    replacement root or a root that selects other arms respects an active pause
+    and counts the refusal in its 60-minute window.
+    """
+    record = seal({"kind": PAUSE_KIND, "protocol_id": PROTOCOL_ID,
+                   "study_manifest_hash": plan["source"]["study_manifest_hash"], "plan_hash": plan["seal_hash"],
+                   "phase": plan["phase"], "root_path": root_path, "pause": deepcopy(pause)})
+    path = safe_child(Path(study_directory), f"{PAUSE_LEDGER}/{pause['attempt_id']}.json")
+    path.parent.mkdir(exist_ok=True)
+    if not _create_exclusive_json(path, record):
+        raise LivePhaseError(f"the study already records a provider pause of {pause['attempt_id']}")
+    return record
+
+
+def check_study_pauses(study_directory: Path, plan: dict, reports: dict[str, dict]) -> list[dict]:
+    """Spec 10 (revision 3): the study's pause records agree with the study and its start ledger, and every pause of
+    this root is recorded there; return the study's pauses in time order.
+
+    Each record names this study instance and a start claimed in the study by
+    the same root and lane. Each pause journaled in this root's lanes, and each
+    archived ``provider_unavailable`` attempt, has its study record, equal to the
+    journaled pause. A record may name a start that was never archived, after a
+    crash between the record and the archive; that pause still binds every root.
+    """
+    recorded = study_provider_pauses(study_directory)
+    claims = study_start_claims(study_directory) if recorded else {}
+    for attempt, record in recorded.items():
+        claim = claims.get(attempt) or {}
+        if (record.get("study_manifest_hash") != plan["source"]["study_manifest_hash"]
+                or claim.get("plan_hash") != record.get("plan_hash") or claim.get("phase") != record.get("phase")
+                or claim.get("lane_id") != record["pause"]["lane_id"]):
+            raise EvidenceError(f"the study provider pause of {attempt} names no start claimed in this study by its "
+                                "root and lane")
+    for report in reports.values():
+        journaled = {pause["attempt_id"]: {key: value for key, value in pause.items() if key != "recovered"}
+                     for pause in report["provider_pauses"]}
+        classified = {row["attempt_id"] for row in report["entries"] if row["classification"] == PROVIDER_UNAVAILABLE}
+        for attempt in sorted(set(journaled) | classified):
+            record = recorded.get(attempt)
+            if (record is None or record["plan_hash"] != plan["seal_hash"]
+                    or (attempt in journaled and record["pause"] != journaled[attempt])):
+                raise EvidenceError(f"the provider pause of {attempt} is not recorded in the study as journaled")
+    return sorted((deepcopy(record["pause"]) for record in recorded.values()),
+                  key=lambda pause: (pause["paused_at"], pause["attempt_id"]))
+
+
 def lane_journals(directory: Path, plan: dict) -> dict[str, list[dict]]:
     """Every lane journal of a root, read without writing; callers verify the lanes separately."""
     journals = {}
@@ -1614,7 +1698,9 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
     rechecked against the prior roots; with ``None`` only the plan's own entries
     are checked against the sealed ledger. Changed sealed files are reported in
     ``implementation_changes``; supersession markers in ``superseded_by``, and
-    those of roots that are not abandoned in ``superseded_by_active``.
+    those of roots that are not abandoned in ``superseded_by_active``. A
+    behavioral root's report carries the study's checked provider pauses in
+    ``study_provider_pauses`` (``check_study_pauses``); a compatibility root's is null.
     """
     bundle = bundle or load_bundle()
     directory = Path(directory)
@@ -1667,6 +1753,7 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
     journals = lane_journals(directory, plan)
     start_claims = (check_start_claims(study_directory, plan, directory, journals, planned)
                     if registration is not None else None)
+    study_pauses = check_study_pauses(study_directory, plan, reports) if registration is not None else None
     review_plan_hash = check_retained_review_plan(directory, plan) if plan["phase"] == "collection" else None
     if prior_roots is None:
         ledger_report = {"checked": False, "applicable": ledger is not None}
@@ -1693,6 +1780,7 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
         "study_registration": registration,
         "selected_arms": selected_arms,
         "provider_pauses": [pause for report in reports.values() for pause in report["provider_pauses"]],
+        "study_provider_pauses": study_pauses,
     }
 
 
@@ -1941,7 +2029,10 @@ async def run_live_phase(
     amendment retained in the study no longer hold. A ``provider_unavailable``
     attempt pauses new admission for 10 minutes of ``wall_clock`` time, during
     which the dispatcher polls with ``pause_sleep`` (default ``sleep``); the
-    third within 60 minutes holds. The status is ``held`` or ``complete``.
+    third within 60 minutes holds. A behavioral root records its pauses in the
+    study and restores every pause of the study before any dispatch, so pauses
+    and their window count bind every root of the study; a compatibility root
+    keeps them in its own lanes. The status is ``held`` or ``complete``.
     """
     if not callable(runtime_factory):
         raise ValueError("an explicit runtime factory is required; use reviewed_runtime_factory for live calls")
@@ -1988,6 +2079,17 @@ async def run_live_phase(
                                   "lanes": {}, "accepted_failed_attempts": accepted}
 
         pauses = ProviderPause(wall_clock=wall_clock)
+        if registration is not None:
+            # Spec 10 (revision 3): pauses and their window count are recorded at study level. This root restores
+            # every pause of the study before any dispatch and before each admission, and records its own pauses
+            # there before sealing the attempt, so every root of the study respects them.
+            def load_pauses() -> list[dict]:
+                return [record["pause"] for record in study_provider_pauses(study_directory).values()]
+
+            def persist_pause(pause: dict) -> None:
+                record_study_pause(study_directory, plan, root_path=registration["root_path"], pause=pause)
+
+            pauses = ProviderPause(wall_clock=wall_clock, load=load_pauses, persist=persist_pause)
 
         def save_status() -> None:
             status.update(holds=list(policy.holds), active_attempts=slots.active, peak_active_attempts=slots.peak,
