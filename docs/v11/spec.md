@@ -603,6 +603,13 @@ in F trials; every stored observer public post in any trial, flagged or not; and
 stratified sample of violation trials with one per level ×
 prompt × model cell. Use the P1 masked-packet and binding workflow.
 
+"Any trial" means every trial of the collection, channel-failure and low-effort arms.
+Calibration and smoke are engineering phases and are outside the plan.
+[review-rubric.md](review-rubric.md) fixes the rubric, the plan's selection rules and
+sizes, second review, adjudication, and the human-reviewed endpoints. Human-reviewed
+endpoints are reported beside the structured endpoints of section 8 and never replace
+them.
+
 ## 12 Analysis
 
 Report per-cell counts and Wilson intervals for `focal_hit`, `false_alarm`,
