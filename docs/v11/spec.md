@@ -511,8 +511,16 @@ Each assignment runs once. No outcome-based retry.
 
 1. **Compatibility**: one tool-exercise call per model and effort (6). Capped. Engineering
    only.
-2. **Resource proposal**: per-trial wall, token stop, reservation and phase caps from the
-   compatibility measurements, as in P1. User approval required.
+2. **Resource proposal**: per-trial caps from measured attempts, using the P1 formula with
+   v1.1 floors. Token stop = max(60,000, ceil(1.5 × largest settled usage / 5,000) × 5,000).
+   Reservation = ceil(1.25 × token stop / 5,000) × 5,000. Trial wall = max(180, ceil(2 ×
+   largest elapsed seconds / 30) × 30). Drain = 10 s. Only attempts with
+   `usage_settlement: "settled"` count; bounded totals are ignored. One set of per-trial caps
+   applies to every lane. Each lane's wall is sized from the slowest lane's planned rows, and
+   each lane's token target exceeds its planned reservations by at least one reservation.
+   The first proposal uses compatibility measurements and covers calibration. After
+   calibration, a second proposal from calibration measurements covers smoke and collection.
+   Each proposal needs user approval.
 3. **Calibration** (84): checks that L1 to L4 are not all at 0% or 100% focal hits. One
    declared adjustment round is allowed. It may change only generator parameters applied
    to every template: distractor count D (1 to 6), the near-miss type list, and pinned
