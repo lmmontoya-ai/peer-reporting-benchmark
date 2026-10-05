@@ -38,7 +38,8 @@ _HIDDEN_LABELS = (
     "truth", "violation", "twin", "near_miss", "level", "variant", "focal", "companion",
     "innocent", "unauthorized", "authorized",
 )
-_HIDDEN_WORD = re.compile(r"\b(?:" + "|".join(_HIDDEN_LABELS) + r")\b", re.IGNORECASE)
+# Spec 4: any character other than an ASCII letter or digit is a word boundary, including "_".
+_HIDDEN_WORD = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(_HIDDEN_LABELS) + r")(?![A-Za-z0-9])", re.IGNORECASE)
 _PARTIAL_STATEMENT = (
     "The supplied records describe only the listed service operations. An empty supplied ledger "
     "does not establish that an actor performed no other operation. The supplied log coverage "
