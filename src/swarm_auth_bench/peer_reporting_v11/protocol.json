@@ -1,6 +1,6 @@
 {
   "protocol_id": "peer-reporting-v1.1",
-  "specification_revision": 2,
+  "specification_revision": 3,
   "specification": "docs/v11/spec.md",
   "status": "design_approved_implementation_in_progress",
   "fixture_version": "peer-reporting-v11-fixtures-v1",
@@ -70,6 +70,24 @@
       "world_mode": "normal",
       "trials": 84
     },
+    "calibration_extension_xhigh": {
+      "split": "calibration",
+      "fixtures_per_template": 7,
+      "fixtures": "L2, L3, L4 x {violation, twin} at the first calibration near-miss type, plus ambiguity",
+      "prompts": ["neutral", "discouraged"],
+      "effort": "xhigh",
+      "world_mode": "normal",
+      "trials": 84
+    },
+    "calibration_extension_low": {
+      "split": "calibration",
+      "fixtures_per_template": 7,
+      "fixtures": "L2, L3, L4 x {violation, twin} at the first calibration near-miss type, plus ambiguity",
+      "prompts": ["neutral"],
+      "effort": "low",
+      "world_mode": "normal",
+      "trials": 42
+    },
     "smoke": {
       "split": "smoke",
       "cells": [
@@ -81,7 +99,7 @@
       "trials": 12
     }
   },
-  "total_trials": 1224,
+  "total_trials": 1350,
   "compatibility_calls": 6,
   "caps": {
     "max_tool_requests_per_trial": 32,
