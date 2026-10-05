@@ -440,11 +440,18 @@ class _Controller:
             return
         if method in {"item/started", "item/completed"} and item.get("type") == "userMessage":
             async with self.gate:
+                # Retain a real delivery failure even if a stop has already closed admission.
+                if _text_item(item) != self.fixture["packet"]:
+                    reason = "initial packet delivery mismatch"
+                    self.failures.append(reason)
+                    self.emit("infrastructure_failed", reason=reason)
+                    self._boundary("infrastructure_incomplete", reason, stop_generation=True)
+                    return
                 if self._deadline() or self.closing or (self.boundary is not None
                                                        and self.boundary["reason"] != "agent_finish"):
                     return
                 item_id = item.get("id")
-                if type(item_id) is not str or not item_id or _text_item(item) != self.fixture["packet"]:
+                if type(item_id) is not str or not item_id:
                     return
                 if method == "item/started":
                     if self.user_item_id not in (None, item_id):

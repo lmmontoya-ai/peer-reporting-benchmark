@@ -388,6 +388,31 @@ this round still verify and still serve as gate evidence. Calibration, smoke,
 and collection roots, and the study itself, must be rebuilt: studies now need
 `instance_nonce` and row `round`, and plans carry the new execution policy.
 
+### W09 round 3 (spec section 10)
+
+Abandonment (R3-M1). Registrations now seal the resolved `root_path`.
+`abandon-root --root` must name that exact path. A finalized root needs a sealed
+plan matching its registered hash, and abandonment checks its starts and
+supersession under the coordinator and lane locks. Pending registrations may
+lack a plan. The abandonment record retains `root_path` and
+`lane_journal_hashes`. Verify and export also refuse abandoned roots with
+journaled starts. A wrong or missing directory cannot release consumed rows.
+
+Compatibility roots (R3-m1) now seal their own random `root_instance_nonce`,
+so identical builds need separate authorizations. Tools, wire specs, catalogs,
+client, `LIVE_VERSION`, `ADAPTER_VERSION`, and qualification rules are unchanged.
+
+Stops (R3-m2). A scoped user-message item with a packet mismatch records an
+infrastructure failure even after a stop closed admission. Delivery, protocol,
+transport, and storage failures continue to hold as execution failures when a
+hard stop or deadline also truncates the attempt.
+
+Smoke gate (N3-b). In addition to resolving every smoke row, collection needs
+at least one passed, valid, unamended smoke attempt per collection lane.
+Amending all failures of a lane leaves that lane unproven. `test_live_r3.py`
+covers these scenarios through the offline transport, including late failures
+after both stop types and refusal of contradictory abandonment evidence.
+
 ### Compatibility probe
 
 The probe makes one tool-exercise call per lane: six calls. It uses an L1
