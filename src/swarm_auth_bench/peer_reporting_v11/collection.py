@@ -1,4 +1,4 @@
-"""Deterministic study expansion, balanced assignment order, and sealed offline artifacts."""
+"""Deterministic study expansion, paired round order, and sealed offline artifacts."""
 
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ from .lanes import trial_policy, validate_caps_record
 from .prompts import build_instructions, prompt_manifest
 
 STUDY_MANIFEST = "collection-manifest.json"
-ORDER_VERSION = "peer-reporting-v11-seeded-interleaving-v1"
+ORDER_VERSION = "peer-reporting-v11-paired-rounds-v3"
+ORDER_OFFSETS = ((0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0), (0, 2), (1, 0), (2, 1))
 
 
 def assignment_identity(row: dict, *, protocol_id: str, tool_manifest_hash: str, caps_hash: str) -> str:
@@ -28,24 +29,64 @@ def assignment_identity(row: dict, *, protocol_id: str, tool_manifest_hash: str,
     return "v11-" + content_hash(identity)
 
 
-def _interleave(rows: list[dict], seed: int, split: str) -> list[dict]:
-    groups: dict[tuple, list[dict]] = defaultdict(list)
+def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
+    """Run spec 9's Latin-square cells in rounds, keeping each violation/twin block intact."""
+    cells = {}
+    arm_fixtures: dict[str, dict[str, dict]] = defaultdict(dict)
     for row in rows:
-        groups[row["fixture_id"], row["world_mode"], row["effort"]].append(row)
-    rounds = max(len(cells) for cells in groups.values())
+        key = tuple(row[name] for name in ("arm", "fixture_id", "model", "prompt_condition",
+                                          "effort", "world_mode"))
+        if key in cells:
+            raise ValueError(f"duplicate model/prompt cell: {key}")
+        cells[key] = row
+        arm_fixtures[row["arm"]][row["fixture_id"]] = row
+    seed, models = protocol["seeds"][split], protocol["models"]
     scheduled = []
-    for group, cells in groups.items():
-        def cell_key(row: dict) -> tuple:
-            return row["model"], row["prompt_condition"]
-
-        cells.sort(key=lambda row: content_hash([ORDER_VERSION, seed, split, "cells", group, cell_key(row)]))
-        if len({cell_key(row) for row in cells}) != len(cells):
-            raise ValueError(f"duplicate model/prompt cell in group {group}")
-        for index, row in enumerate(cells):
-            round_index = index * rounds // len(cells)
-            rank = content_hash([ORDER_VERSION, seed, split, "round", round_index, group, cell_key(row)])
-            scheduled.append((round_index, rank, row))
-    ordered = [row for _, _, row in sorted(scheduled, key=lambda item: (item[0], item[1]))]
+    for arm_index, (arm, definition) in enumerate(protocol["arms"].items()):
+        if definition["split"] != split:
+            continue
+        fixtures = arm_fixtures[arm]
+        if arm == "smoke":
+            for round_index in range(3):
+                for cell_index, cell in enumerate(definition["cells"]):
+                    model = models[(cell_index + round_index) % 3]
+                    for template_index, template_id in enumerate(protocol["templates"][split]):
+                        matching = [fixture_id for fixture_id, row in fixtures.items()
+                                    if (row["template_id"], row["level"], row["variant"])
+                                    == (template_id, cell["level"], cell["variant"])]
+                        if len(matching) != 1:
+                            raise ValueError("smoke cell must select exactly one fixture per template")
+                        row = cells[arm, matching[0], model, cell["prompt"], cell["effort"], cell["world_mode"]]
+                        scheduled.append((round_index, arm_index, cell_index, template_index, row))
+            continue
+        groups: dict[tuple, list[str]] = defaultdict(list)
+        for fixture_id, row in fixtures.items():
+            if arm in ("collection", "calibration", "low_effort") and row["variant"] in ("violation", "twin"):
+                block_key = ("pair", row["template_id"], row["level"], row["near_miss_type"])
+            else:
+                block_key = ("fixture", fixture_id)
+            groups[block_key].append(fixture_id)
+        blocks = [tuple(sorted(group, key=lambda fixture_id: (fixtures[fixture_id]["variant"] != "violation",
+                                                              fixture_id))) for group in groups.values()]
+        blocks.sort(key=lambda block: (-len(block), content_hash([ORDER_VERSION, seed, arm, block]), block))
+        prompts = definition["prompts"]
+        if len(prompts) not in (1, 3):
+            raise ValueError(f"{arm}: order requires one or three prompts")
+        for block_index, block in enumerate(blocks):
+            a_offset, c_offset = ORDER_OFFSETS[block_index % 9]
+            for round_index in range(9) if len(prompts) == 3 else range(0, 9, 3):
+                if len(prompts) == 3:
+                    model = models[(round_index + a_offset) % 3]
+                    prompt = protocol["prompt_conditions"][(round_index // 3 + c_offset) % 3]
+                else:
+                    model = models[(round_index // 3 + a_offset) % 3]
+                    prompt = prompts[0]
+                for fixture_index, fixture_id in enumerate(block):
+                    row = cells[arm, fixture_id, model, prompt, definition["effort"], definition["world_mode"]]
+                    scheduled.append((round_index, arm_index, block_index, fixture_index, row))
+    ordered = [item[-1] for item in sorted(scheduled, key=lambda item: item[:-1])]
+    if len(ordered) != len(rows):
+        raise ValueError("round order does not cover every assignment cell")
     return [{**row, "planned_order": position} for position, row in enumerate(ordered)]
 
 
@@ -95,7 +136,7 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict) -> tup
                         row["assignment_id"] = assignment_identity(row, protocol_id=protocol["protocol_id"],
                                                                    tool_manifest_hash=tools_hash, caps_hash=caps_hash)
                         split_rows.append(row)
-        rows.extend(_interleave(split_rows, protocol["seeds"][split], split))
+        rows.extend(_interleave(split_rows, protocol, split))
     counts = dict(Counter(row["arm"] for row in rows))
     if counts != allocation["counts"] or len({row["assignment_id"] for row in rows}) != len(rows):
         raise ValueError("expanded assignment counts or identities differ from the protocol")
@@ -126,7 +167,7 @@ def build_study(directory: Path, *, protocol: dict, templates: dict[str, dict], 
 
 
 def verify_study(directory: Path, *, protocol: dict, templates: dict[str, dict], caps_record: dict) -> dict:
-    """Rebuild every input and run the independent fixture verifier; report content errors."""
+    """Recompute the Latin-square order and sealed inputs; independently verify fixtures."""
     directory, errors = Path(directory), []
     report = {"valid": False, "errors": errors, "counts": {}, "split_counts": {}, "total_trials": 0,
               "fixtures": 0, "seal_hash": None, "live_model_calls": 0}
