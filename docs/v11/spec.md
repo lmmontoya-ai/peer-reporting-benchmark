@@ -564,13 +564,26 @@ Execution rules that apply to every live phase:
   consumed-attempt ledger of record: move it, never copy it. Building, running, verifying
   and exporting a live root require the study directory in which the root is registered.
   A gate accepts evidence only from roots registered in the same study directory. Roots are
-  registered as pending before their plan is written and finalized after. A pending root,
+  registered as pending before their plan is written and finalized after. Behavioral
+  roots live under the study directory, and the registry records each root's path
+  relative to it. Run, verify, export, every gate, and prior-root ingestion accept a
+  behavioral root only at its registered path, so a copy elsewhere is refused. Before a
+  session starts, the attempt start is also claimed durably in a study-level start ledger,
+  so no copy of a root can start an assignment that any root of the study has started. A
+  compatibility root's authorization records the root's resolved path, and a run refuses
+  a root at any other path. A pending root,
   or a finalized root whose journals show no start, can be abandoned through a sealed
   abandonment record; an abandoned root never runs. Abandonment checks the journals of the
   root at the path its registration records, and refuses if that path holds no sealed plan
   matching the registered plan hash, unless the registration is still pending. Every root,
   including a compatibility root, seals its own random nonce, so no two roots share a plan
   hash.
+- **Transport contradictions.** A request that reuses a known call ID with different
+  content, names an undeclared tool, or cannot be attributed to the trial is an execution
+  failure, even after admission has closed; valid late work still receives `closed`. At
+  close, every pending tool receipt is reconciled with the response sent for its call. A
+  receipt whose content, success flag, tool, or status contradicts that response is an
+  execution failure. A missing receipt is recorded but is not by itself a failure.
 - **Freeze.** A run refuses to start if any code, catalog, schema, template or protocol
   hash differs from its sealed plan. The offline scoring and review modules
   (`score.py`, `structured.py`, `rubric.py`, `review.py`, `review_plan.py`) are sealed too,
@@ -591,6 +604,13 @@ Execution rules that apply to every live phase:
 - **Binding.** A plan must match its study manifest's caps hash, tool manifest hash and
   protocol ID, and building a plan runs the full study verification. The collection gate
   requires a smoke root whose entries equal the study's smoke rows.
+- **Export.** Export applies the same authorization-evidence check as verify. A row whose
+  retained authorization record is missing, corrupt, or mismatched is quarantined and not
+  scored; other valid rows still export.
+- **Cleanup debt.** An amendment does not clear cleanup debt. Cleanup debt clears only
+  through a sealed cleanup reconciliation that records an environment check showing that
+  no runtime for the attempt remains. An amendment that names an attempt with unresolved
+  cleanup debt is refused until that reconciliation exists.
 - **Timing.** The admission cutoff must precede the forced-stop deadline by at least the
   trial wall plus the drain time.
 
@@ -602,6 +622,20 @@ every stored report in twin, benign, ambiguity and accusation trials; every fina
 in F trials; every stored observer public post in any trial, flagged or not; and a seeded
 stratified sample of violation trials with one per level ×
 prompt × model cell. Use the P1 masked-packet and binding workflow.
+
+Precommitment. Build the review plan from the frozen study after the caps are frozen and
+before collection, with the fixed seed in `protocol.json` (`review_seed: 20261005`); no other
+seed is allowed without a declared protocol change before freeze. The collection live plan
+seals the review plan's hash (`review_plan_hash`). Building and running collection require
+that plan and check the hash. The export index carries `review_plan_hash`. Writing review
+packets verifies the plan by full recomputation and refuses a plan whose hash differs from
+the export's.
+
+Adjudication. An adjudicator must differ from both initial reviewers. Adjudication of a
+disagreement requires both initial reviews. Where the plan selects a trial for second
+review, a final label requires the second review; adjudication cannot replace it. A
+conflict between one reviewer's label and the records is adjudicated by someone other than
+that reviewer.
 
 "Any trial" means every trial of the collection, channel-failure and low-effort arms.
 Calibration and smoke are engineering phases and are outside the plan.

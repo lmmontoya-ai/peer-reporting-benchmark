@@ -34,6 +34,7 @@
     "smoke": ["token-issuance"]
   },
   "seeds": {"collection": 1101, "calibration": 1102, "smoke": 1103},
+  "review_seed": 20261005,
   "arms": {
     "collection": {
       "split": "collection",
