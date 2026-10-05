@@ -4,6 +4,7 @@ import json
 import shutil
 from collections import Counter, defaultdict
 from copy import deepcopy
+from itertools import groupby
 
 import pytest
 
@@ -12,6 +13,7 @@ from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, se
 from swarm_auth_bench.peer_reporting_v11 import collection
 from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
 from swarm_auth_bench.peer_reporting_v11.collection import STUDY_MANIFEST, build_study, verify_study
+from swarm_auth_bench.peer_reporting_v11.config import SPLITS, arm_fixture_cells
 from swarm_auth_bench.peer_reporting_v11.live import load_study, validate_assignment_rows
 
 from .test_config import COUNTS
@@ -65,29 +67,201 @@ def test_identities_bind_all_inputs_and_stay_bounded(wp6_study):
             "assignment_id"]
 
 
-def test_small_groups_are_spread_over_split_rounds(wp6_study):
+def _round_chunks(manifest, split, protocol):
+    """Locate round/arm boundaries from fixture counts, independent of the order generator."""
+    # Use the source protocol: canonical manifest JSON sorts object keys, including arms.
+    rows = [row for row in manifest["assignments"] if row["split"] == split]
+    assert [row["planned_order"] for row in rows] == list(range(len(rows)))
+    arm_sizes = {arm: len({row["fixture_id"] for row in rows if row["arm"] == arm})
+                 for arm, definition in protocol["arms"].items() if definition["split"] == split}
+    position = 0
+    for round_index in range(len(protocol["models"])) if split == "smoke" else range(9):
+        for arm, definition in protocol["arms"].items():
+            if definition["split"] != split:
+                continue
+            if arm == "smoke":
+                size = len(definition["cells"]) * len(protocol["templates"][split])
+            else:
+                if len(definition["prompts"]) == 1 and round_index not in (0, 3, 6):
+                    continue
+                size = arm_sizes[arm]
+            chunk = rows[position:position + size]
+            assert len(chunk) == size
+            assert all(row["arm"] == arm for row in chunk)
+            yield round_index, arm, chunk
+            position += size
+    assert position == len(rows)
+
+
+def _pair_key(row):
+    return tuple(row[key] for key in ("arm", "template_id", "level", "near_miss_type", "model",
+                                     "prompt_condition", "effort", "world_mode"))
+
+
+def test_every_fixture_model_prompt_effort_world_cell_appears_once(wp6_study):
+    directory, manifest, _ = wp6_study
+    protocol = manifest["protocol"]
+    expected = Counter()
+    for fixture_id, reference in manifest["fixtures"].items():
+        parameters = read_sealed(directory / reference["path"])["parameters"]
+        for arm, definition in protocol["arms"].items():
+            if definition["split"] != parameters["split"]:
+                continue
+            if arm == "smoke":
+                cells = [cell for cell in definition["cells"]
+                         if (cell["level"], cell["variant"]) == (parameters["level"], parameters["variant"])]
+            elif (parameters["level"], parameters["variant"]) in arm_fixture_cells(protocol, arm):
+                cells = [{"prompt": prompt, "effort": definition["effort"], "world_mode": definition["world_mode"]}
+                         for prompt in definition["prompts"]]
+            else:
+                continue
+            for cell in cells:
+                for model in protocol["models"]:
+                    expected[fixture_id, model, cell["prompt"], cell["effort"], cell["world_mode"]] += 1
+    actual = Counter(tuple(row[key] for key in ("fixture_id", "model", "prompt_condition", "effort", "world_mode"))
+                     for row in manifest["assignments"])
+    assert actual == expected
+    assert set(actual.values()) == {1}
+    assert len(actual) == sum(COUNTS.values())
+
+
+@pytest.mark.parametrize("split", SPLITS)
+def test_pairs_are_adjacent_in_the_same_model_prompt_and_round(split, wp6_study, wp6_inputs):
     _, manifest, _ = wp6_study
-    for split in ("collection", "calibration", "smoke"):
-        rows = [row for row in manifest["assignments"] if row["split"] == split]
-        assert [row["planned_order"] for row in rows] == list(range(len(rows)))
-        groups = defaultdict(list)
-        for row in rows:
-            groups[row["fixture_id"], row["world_mode"], row["effort"]].append(row)
-        rounds = max(map(len, groups.values()))
-        # Reconstruct each cell's round from its seeded position, then check the global order.
-        row_rounds = {}
-        for group, cells in groups.items():
-            ordered = sorted(cells, key=lambda row: content_hash([
-                collection.ORDER_VERSION, manifest["protocol"]["seeds"][split], split, "cells", group,
-                (row["model"], row["prompt_condition"])]))
-            allocated = [index * rounds // len(cells) for index in range(len(cells))]
-            if split == "collection" and len(cells) == 3:
-                assert allocated == [0, 3, 6]
-            for row, round_index in zip(ordered, allocated, strict=True):
-                row_rounds[row["assignment_id"]] = round_index
-        actual = [row_rounds[row["assignment_id"]] for row in rows]
-        assert actual == sorted(actual)
-        assert set(actual) == set(range(rounds))
+    for _, arm, chunk in _round_chunks(manifest, split, wp6_inputs["protocol"]):
+        if arm not in ("collection", "calibration", "low_effort"):
+            continue
+        for index, row in enumerate(chunk):
+            if row["variant"] == "violation":
+                twin = chunk[index + 1]
+                assert twin["variant"] == "twin"
+                assert _pair_key(twin) == _pair_key(row)
+            elif row["variant"] == "twin":
+                assert index > 0 and chunk[index - 1]["variant"] == "violation"
+                assert _pair_key(chunk[index - 1]) == _pair_key(row)
+
+
+@pytest.mark.parametrize("split", SPLITS)
+def test_every_round_boundary_prefix_contains_complete_pairs(split, wp6_study, wp6_inputs):
+    _, manifest, _ = wp6_study
+    prefix = []
+    for _, chunks in groupby(_round_chunks(manifest, split, wp6_inputs["protocol"]), key=lambda chunk: chunk[0]):
+        for _, _, rows in chunks:
+            prefix.extend(rows)
+        violations, twins = Counter(), Counter()
+        for row in prefix:
+            if row["arm"] not in ("collection", "calibration", "low_effort"):
+                continue
+            if row["variant"] == "violation":
+                violations[_pair_key(row)] += 1
+            elif row["variant"] == "twin":
+                twins[_pair_key(row)] += 1
+        assert violations == twins
+
+
+def _assert_protocol_round_sequence(manifest, protocol, split):
+    for round_index, arm, chunk in _round_chunks(manifest, split, protocol):
+        if arm == "smoke":
+            expected = [(template_id, cell["level"], cell["variant"], protocol["models"][round_index],
+                         cell["prompt"], cell["effort"], cell["world_mode"])
+                        for cell in protocol["arms"][arm]["cells"] for template_id in protocol["templates"][split]]
+            assert [tuple(row[key] for key in ("template_id", "level", "variant", "model", "prompt_condition",
+                                              "effort", "world_mode")) for row in chunk] == expected
+            continue
+        blocks = defaultdict(list)
+        for row in chunk:
+            if arm == "channel_failure" or row["variant"] not in ("violation", "twin"):
+                key = (row["fixture_id"],)
+            else:
+                key = (row["template_id"], row["level"], row["near_miss_type"])
+            blocks[key].append(row)
+        ordered = [sorted(block, key=lambda row: (row["variant"] != "violation", row["fixture_id"]))
+                   for block in blocks.values()]
+        ordered.sort(key=lambda block: (content_hash([collection.ORDER_VERSION, protocol["seeds"][split], arm,
+                                                      [row["fixture_id"] for row in block]]),
+                                       tuple(row["fixture_id"] for row in block)))
+        assert [row["fixture_id"] for row in chunk] == [row["fixture_id"] for block in ordered for row in block]
+        for index, block in enumerate(ordered):
+            a_offset, c_offset = divmod(index % 9, 3)
+            if len(protocol["arms"][arm]["prompts"]) == 3:
+                model = protocol["models"][(round_index + a_offset) % 3]
+                prompt = protocol["prompt_conditions"][(round_index // 3 + c_offset) % 3]
+            else:
+                assert round_index in (0, 3, 6)
+                model = protocol["models"][(round_index // 3 + a_offset) % 3]
+                prompt = protocol["arms"][arm]["prompts"][0]
+            assert all(row["model"] == model and row["prompt_condition"] == prompt for row in block)
+
+
+@pytest.mark.parametrize("split", SPLITS)
+def test_protocol_block_offsets_and_round_sequence(split, wp6_study, wp6_inputs):
+    _, manifest, _ = wp6_study
+    _assert_protocol_round_sequence(manifest, wp6_inputs["protocol"], split)
+
+
+@pytest.mark.parametrize("split", SPLITS)
+def test_round_order_is_independent_of_input_row_order(split, wp6_study, wp6_inputs):
+    _, manifest, _ = wp6_study
+    rows = [row for row in manifest["assignments"] if row["split"] == split]
+    assert collection._interleave(list(reversed(rows)), wp6_inputs["protocol"], split) == rows
+
+
+@pytest.mark.parametrize("split", SPLITS)
+def test_per_round_model_and_prompt_counts_follow_the_exact_spec_cycle(split, wp6_study, wp6_inputs):
+    _, manifest, _ = wp6_study
+    protocol = wp6_inputs["protocol"]
+    # The specified nine-offset cycle does not promise a <= 1 fixture-count spread:
+    # calibration has 14 two-fixture blocks, so its first round is necessarily 12/10/6.
+    expected = {
+        "collection": ((36, 31, 37), (36, 34, 34)),
+        "channel_failure": ((3, 3, 2), (3, 3, 2)),
+        "low_effort": ((15, 16, 9), (40,)),
+        "calibration": ((12, 10, 6), (28,)),
+        "smoke": ((4, 0, 0), (1, 2, 1)),
+    }
+    for round_index, arm, chunk in _round_chunks(manifest, split, protocol):
+        model_counts = Counter(row["model"] for row in chunk)
+        prompt_counts = Counter(row["prompt_condition"] for row in chunk)
+        prompts = protocol["arms"][arm].get("prompts", protocol["prompt_conditions"])
+        models = tuple(model_counts[model] for model in protocol["models"])
+        conditions = tuple(prompt_counts[prompt] for prompt in prompts)
+        initial_models, initial_prompts = expected[arm]
+        model_rotation = round_index if arm == "smoke" or len(prompts) == 3 else round_index // 3
+        prompt_rotation = round_index // 3 if len(prompts) == 3 and arm != "smoke" else 0
+        assert models == tuple(initial_models[(index - model_rotation) % 3] for index in range(3))
+        assert conditions == tuple(initial_prompts[(index - prompt_rotation) % len(prompts)]
+                                   for index in range(len(prompts)))
+        if arm == "channel_failure":
+            assert max(models) - min(models) <= 1
+            assert max(conditions) - min(conditions) <= 1
+
+
+@pytest.mark.parametrize("change", ["models", "arms", "smoke_cells", "seed"])
+def test_order_uses_protocol_list_arm_and_seed_order(change, wp6_study, wp6_inputs):
+    _, manifest, _ = wp6_study
+    protocol = deepcopy(wp6_inputs["protocol"])
+    split = "smoke" if change == "smoke_cells" else "collection"
+    if change == "models":
+        protocol["models"].reverse()
+    elif change == "arms":
+        protocol["arms"] = dict(reversed(list(protocol["arms"].items())))
+    elif change == "smoke_cells":
+        protocol["arms"]["smoke"]["cells"].reverse()
+    else:
+        protocol["seeds"][split] += 1
+    original = [row for row in manifest["assignments"] if row["split"] == split]
+    rows = collection._interleave(original, protocol, split)
+    assert rows != original
+    reordered = {**manifest, "assignments": rows}
+    # Reuse the independent round/formula checks on a real protocol permutation.
+    _assert_protocol_round_sequence(reordered, protocol, split)
+
+
+def test_order_rejects_duplicate_cells(wp6_study, wp6_inputs):
+    _, manifest, _ = wp6_study
+    rows = [row for row in manifest["assignments"] if row["split"] == "collection"]
+    with pytest.raises(ValueError, match="duplicate model/prompt cell"):
+        collection._interleave(rows + [rows[0]], wp6_inputs["protocol"], "collection")
 
 
 @pytest.mark.parametrize("split", ["collection", "calibration", "smoke"])
@@ -100,7 +274,8 @@ def test_wp1_live_reader_accepts_real_manifest(split, wp6_study, wp6_inputs):
     assert all(entry["instructions"] == row["instructions"] for entry, row in zip(entries, rows, strict=True))
 
 
-@pytest.mark.parametrize("tamper", ["row", "fixture", "count", "missing_row", "seal", "malformed"])
+@pytest.mark.parametrize("tamper", ["row", "fixture", "count", "missing_row", "seal", "malformed",
+                                  "order", "planned_order", "twin_order"])
 def test_verify_returns_content_errors(tmp_path, wp6_study, wp6_inputs, tamper):
     source, _, _ = wp6_study
     directory = tmp_path / "tampered"
@@ -122,6 +297,20 @@ def test_verify_returns_content_errors(tmp_path, wp6_study, wp6_inputs, tamper):
         manifest["counts"]["collection"] -= 1
     elif tamper == "missing_row":
         manifest["assignments"].pop()
+    elif tamper == "order":
+        manifest["assignments"].reverse()
+        positions = Counter()
+        for row in manifest["assignments"]:
+            row["planned_order"] = positions[row["split"]]
+            positions[row["split"]] += 1
+    elif tamper == "planned_order":
+        manifest["assignments"][0]["planned_order"] += 1
+    elif tamper == "twin_order":
+        rows = manifest["assignments"]
+        index = next(index for index, row in enumerate(rows) if row["arm"] == "collection"
+                     and row["variant"] == "violation")
+        rows[index], rows[index + 1] = rows[index + 1], rows[index]
+        rows[index]["planned_order"], rows[index + 1]["planned_order"] = index, index + 1
     elif tamper == "malformed":
         manifest["assignments"] = [None]
     atomic_json(path, seal(manifest))
@@ -134,6 +323,8 @@ def test_verify_returns_content_errors(tmp_path, wp6_study, wp6_inputs, tamper):
     assert verified["errors"]
     if tamper in ("count", "missing_row"):
         assert any("count" in error for error in verified["errors"])
+    if tamper in ("order", "planned_order", "twin_order"):
+        assert "manifest assignments differs from recomputed study" in verified["errors"]
 
 
 def test_build_refuses_unfrozen_caps_without_writing(tmp_path, wp6_inputs):
