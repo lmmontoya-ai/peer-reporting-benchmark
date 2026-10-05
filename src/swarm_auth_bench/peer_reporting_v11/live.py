@@ -1952,6 +1952,13 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
     if type(report) is not dict or report.get("valid") is not True:
         raise EvidenceError(f"study verification failed: {(report or {}).get('errors')}")
     rows, fixtures, source = load_study(study_directory, phase)
+    # Spec 9 (revision 3): a closed arm never runs again, in any study, because its assignment IDs
+    # do not depend on the study instance.
+    closed = set((manifest.get("protocol") or {}).get("closed_arms", []))
+    if selected_arms is not None and closed & set(selected_arms):
+        raise ValueError(f"arms {sorted(closed & set(selected_arms))} are closed and never run again")
+    if selected_arms is None and closed & {row["arm"] for row in rows}:
+        raise ValueError(f"this {phase} split includes closed arms {sorted(closed)}; select the open arms with --arm")
     if selected_arms is not None:
         available = sorted({row["arm"] for row in rows})
         unknown = sorted(set(selected_arms) - set(available))

@@ -482,6 +482,27 @@ async def test_a_calibration_root_selects_arms_and_other_phases_refuse_a_selecti
                    arms=["calibration", "calibration_extension_low"], prior_roots=prior)
 
 
+def test_a_closed_arm_is_never_planned_and_its_split_needs_an_explicit_selection(compat, tmp_path):
+    rows, fixtures = [], {}
+    for arm_index, (arm, cells) in enumerate(CALIBRATION_ARMS):
+        arm_rows, arm_fixtures = study_rows("calibration", cells=cells, template_id="release-request", seed=1102)
+        for row in arm_rows:
+            row.update(arm=arm, assignment_id=f"cl-{content_hash([arm, row['assignment_id']])[:20]}",
+                       round=row["round"] + 2 * arm_index)
+        rows += arm_rows
+        fixtures.update(arm_fixtures)
+    for position, row in enumerate(rows):
+        row["planned_order"] = position
+    study = write_study(tmp_path / "study", rows, fixtures, caps=SERIAL, protocol={"closed_arms": ["calibration"]})
+    with pytest.raises(ValueError, match="select the open arms"):
+        build_plan("calibration", study, caps=SERIAL, compatibility_directories=[compat])
+    with pytest.raises(ValueError, match="are closed and never run again"):
+        build_plan("calibration", study, caps=SERIAL, compatibility_directories=[compat],
+                   arms=["calibration", "calibration_extension_low"])
+    extension = build_plan("calibration", study, caps=SERIAL, compatibility_directories=[compat], arms=EXTENSION)
+    assert plan_arms(extension) == set(EXTENSION)
+
+
 def test_verify_and_export_refuse_a_selection_that_differs_from_the_planned_rows():
     plan = {"phase": "calibration", "selected_arms": ["calibration_extension_xhigh"]}
     assert v11_live.check_arm_selection(plan, {"calibration_extension_xhigh"}) == ["calibration_extension_xhigh"]

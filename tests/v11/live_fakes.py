@@ -328,7 +328,8 @@ def study_rows(split: str = "smoke", cells=SMOKE_CELLS, template_id: str = "toke
 
 
 def write_study(directory: Path, rows: list[dict], fixtures: dict, *, caps: dict | None = None,
-                tool_manifest_hash: str | None = None, instance_nonce: str = "0" * 32) -> Path:
+                tool_manifest_hash: str | None = None, instance_nonce: str = "0" * 32,
+                protocol: dict | None = None) -> Path:
     """A sealed fake study. A different ``instance_nonce`` stands for a rebuild: same rows, another seal."""
     directory = Path(directory)
     (directory / "fixtures").mkdir(parents=True)
@@ -340,7 +341,7 @@ def write_study(directory: Path, rows: list[dict], fixtures: dict, *, caps: dict
         "kind": "fake_v11_study", "protocol_id": PROTOCOL_ID, "instance_nonce": instance_nonce,
         "caps_hash": content_hash(caps or caps_record()),
         "tool_manifest_hash": tool_manifest_hash or fake_bundle().tool_manifest_hash,
-        "assignments": rows, "fixtures": index}))
+        "assignments": rows, "fixtures": index, **({"protocol": protocol} if protocol is not None else {})}))
     return directory
 
 

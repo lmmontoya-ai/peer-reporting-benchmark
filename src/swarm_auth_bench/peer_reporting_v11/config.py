@@ -120,6 +120,10 @@ def validate_protocol(protocol: dict) -> dict:
         validate_generator_parameters(generator, (load_template(template_id)["focal_slot"] for template_id in ids))
         if set(protocol["arms"]) != {*ARM_DEFINITIONS, "smoke"}:
             raise ValueError("protocol must define exactly the seven study arms")
+        closed = protocol.get("closed_arms", [])
+        if (type(closed) is not list or len(set(closed)) != len(closed)
+                or any(arm not in protocol["arms"] for arm in closed)):
+            raise ValueError("closed_arms must list distinct protocol arms")
         counts = {}
         for arm, definition in protocol["arms"].items():
             split = ("collection" if arm in ("channel_failure", "low_effort") else

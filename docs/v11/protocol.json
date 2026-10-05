@@ -100,6 +100,7 @@
     }
   },
   "total_trials": 1350,
+  "closed_arms": ["calibration"],
   "compatibility_calls": 6,
   "caps": {
     "max_tool_requests_per_trial": 32,
