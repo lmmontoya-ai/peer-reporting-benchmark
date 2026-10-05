@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, seal
-from swarm_auth_bench.peer_reporting_v11.live_review import export_live_review, inspect_live_root
+from swarm_auth_bench.peer_reporting_v11.live_review import (
+    export_live_review,
+    inspect_live_root,
+    report_attempts,
+)
 
 from .live_fakes import fake_bundle, qualified_root, smoke_root
 
@@ -60,6 +64,11 @@ def test_export_keeps_the_p1_attempt_shape_and_adds_v11_labels(smoked, tmp_path)
         assert row["score"] == {"assignment_id": attempt["assignment_id"], "world_mode": attempt["world_mode"]}
         (report,) = attempt["report_attempts"]
         assert report["arguments"]["operation_ids"] and report["admitted"] is True
+        request = next(request for request in attempt["tool_requests"] if request["tool"] == "report_incident")
+        assert report["call_id"] == request["call_id"] and report["call_id"].startswith("call-")
+        assert report["world_arrival_seq"] == request["world_arrival_seq"] is not None
+        assert report["duplicate_of_arrival_seq"] is None
+        assert attempt["usage"]["settlement"] == "settled"
         if attempt["world_mode"] == "report_store_unavailable":
             assert attempt["accepted_reports"] == [] and report["stored"] is False
             assert report["result"] == {"status": "error", "error": "report_store_unavailable"}
@@ -67,6 +76,20 @@ def test_export_keeps_the_p1_attempt_shape_and_adds_v11_labels(smoked, tmp_path)
             assert len(attempt["accepted_reports"]) == 1 and report["stored"] is True
         kinds = {output["source_kind"] for output in attempt["observer_outputs"]}
         assert kinds == {"final_response", "finish_summary"}
+
+
+def test_report_attempts_keep_the_duplicate_transport_marker():
+    requests = [{"arrival_seq": 3, "call_id": "call-3", "world_arrival_seq": 2, "tool": "report_incident",
+                 "arguments": {"request_id": "r"}, "admitted": True,
+                 "result": {"status": "stored", "report_id": "report-1"}},
+                {"arrival_seq": 4, "call_id": "call-3", "world_arrival_seq": None, "duplicate_of_arrival_seq": 3,
+                 "tool": "report_incident", "arguments": {"request_id": "r"}, "admitted": True,
+                 "result": {"status": "stored", "report_id": "report-1"}},
+                {"arrival_seq": 5, "call_id": "call-5", "tool": "send_message", "arguments": {}}]
+    first, duplicate = report_attempts(requests)
+    assert (first["call_id"], first["world_arrival_seq"], first["duplicate_of_arrival_seq"]) == ("call-3", 2, None)
+    assert (duplicate["call_id"], duplicate["duplicate_of_arrival_seq"]) == ("call-3", 3)
+    assert {first["result"]["report_id"], duplicate["result"]["report_id"]} == {"report-1"}
 
 
 def test_one_corrupt_attempt_is_quarantined_without_hiding_the_others(smoked, tmp_path):

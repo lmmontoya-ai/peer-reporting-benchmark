@@ -92,3 +92,16 @@ def test_offline_validate_build_verify_and_replay(tmp_path, capsys):
     assert main(["build", str(tmp_path / "smoke"), "--phase", "smoke", "--caps", str(caps_path),
                  "--revision", "smoke-v1"]) == 2
     assert "study directory" in output(capsys)["error"]
+
+
+def test_prior_roots_are_accepted_and_rechecked(tmp_path, capsys, fakes):
+    root, caps_path, plan = built(tmp_path, capsys)
+    assert main(["verify", str(root), "--prior-root", str(root)]) == 2
+    assert "no consumed-attempt ledger or prior roots" in output(capsys)["error"]
+    assert main(["build", str(tmp_path / "again"), "--phase", "compatibility", "--caps", str(caps_path),
+                 "--revision", "compat-v2", "--prior-root", str(root)]) == 2
+    assert "no consumed-attempt ledger or prior roots" in output(capsys)["error"]
+    approved = write(tmp_path / "approved.json", authorization(plan))
+    assert main(["compatibility", str(root), "--caps", str(caps_path), "--authorization", str(approved),
+                 "--prior-root", str(root)]) == 2
+    assert "prior roots" in output(capsys)["error"] and fakes == []

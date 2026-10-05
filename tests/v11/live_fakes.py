@@ -19,7 +19,7 @@ from swarm_auth_bench.events import canonical_json, content_hash
 from swarm_auth_bench.peer_reporting import schemas as p1_schemas
 from swarm_auth_bench.peer_reporting.config import MODELS
 from swarm_auth_bench.peer_reporting.fixtures import build_fixture as p1_build_fixture
-from swarm_auth_bench.peer_reporting.storage import atomic_json, seal
+from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, seal
 from swarm_auth_bench.peer_reporting.world import (
     GENESIS_HASH,
     IDEMPOTENT_TOOLS,
@@ -80,6 +80,7 @@ class FakeV11World(PeerWorld):
         assert world_mode in {"normal", "report_store_unavailable"}
         super().__init__(fixture, directory, trial_id=trial_id, max_tool_requests=max_tool_requests)
         self.world_mode = world_mode
+        self._commit({**deepcopy(self._state), "world_mode": world_mode})  # the real V11World records it too
         self._records = {**self._records, **deepcopy(fixture.get("fetchable_records") or {})}
         FakeV11World.created.append({"trial_id": trial_id, "world_mode": world_mode,
                                      "max_tool_requests": max_tool_requests})
@@ -313,16 +314,41 @@ def study_rows(split: str = "smoke", cells=SMOKE_CELLS, template_id: str = "toke
     return rows, fixtures
 
 
-def write_study(directory: Path, rows: list[dict], fixtures: dict) -> Path:
+def write_study(directory: Path, rows: list[dict], fixtures: dict, *, caps: dict | None = None,
+                tool_manifest_hash: str | None = None) -> Path:
     directory = Path(directory)
     (directory / "fixtures").mkdir(parents=True)
     index = {}
     for fixture_id, fixture in fixtures.items():
         atomic_json(directory / f"fixtures/{fixture_id}.json", seal(fixture))
         index[fixture_id] = {"path": f"fixtures/{fixture_id}.json", "content_hash": content_hash(fixture)}
-    atomic_json(directory / v11_live.STUDY_MANIFEST, seal({"kind": "fake_v11_study", "protocol_id": PROTOCOL_ID,
-                                                          "assignments": rows, "fixtures": index}))
+    atomic_json(directory / v11_live.STUDY_MANIFEST, seal({
+        "kind": "fake_v11_study", "protocol_id": PROTOCOL_ID, "caps_hash": content_hash(caps or caps_record()),
+        "tool_manifest_hash": tool_manifest_hash or fake_bundle().tool_manifest_hash,
+        "assignments": rows, "fixtures": index}))
     return directory
+
+
+def fake_study_verifier(directory: Path, caps: dict) -> dict:
+    """Stands in for ``collection.verify_study``, which needs the real templates; checks the seals only."""
+    manifest = read_sealed(Path(directory) / v11_live.STUDY_MANIFEST)
+    for reference in manifest["fixtures"].values():
+        fixture = read_sealed(Path(directory) / reference["path"])
+        fixture.pop("seal_hash")
+        if content_hash(fixture) != reference["content_hash"]:
+            return {"valid": False, "errors": [f"fixture {reference['path']} differs from the manifest"]}
+    fake_study_verifier.calls.append((Path(directory), content_hash(caps)))
+    return {"valid": True, "errors": []}
+
+
+fake_study_verifier.calls = []
+
+
+def build_plan(phase: str, study: Path, **kwargs) -> tuple[dict, dict, dict]:
+    """``build_phase_plan`` over a fake study with the test caps and bundle."""
+    values = {"revision": f"{phase}-v1", "study_directory": study, "bundle": fake_bundle(),
+              "study_verifier": fake_study_verifier, **kwargs}
+    return v11_live.build_phase_plan(phase, values.pop("caps", None) or caps_record(), **values)
 
 
 # Scripted app-server transport (the real V11 peer runtime over an in-memory wire)
@@ -456,6 +482,8 @@ class FakeTransport(V11PeerRuntime):
             elif step[0] == "message":
                 await self._push("item/completed", {**scope, "item": {
                     "id": "agent-item-1", "type": "agentMessage", "text": step[1]}})
+            elif step[0] == "raw":  # an arbitrary scoped notification, e.g. a native tool item
+                await self._push(step[1], {**scope, **step[2]})
             elif step[0] == "sleep":
                 await asyncio.sleep(step[1])
             elif step[0] == "stall":
@@ -544,10 +572,9 @@ def smoke_root(base: Path, compatibility: Path) -> dict:
     rows, fixtures = study_rows("smoke")
     collection_rows, collection_fixtures = study_rows("collection", template_id="release-request", seed=1101)
     study = write_study(base / "study", rows + collection_rows, {**fixtures, **collection_fixtures})
-    built = v11_live.build_phase_plan("smoke", caps_record(), revision="smoke-v1", study_directory=study,
-                                      compatibility_directories=[compatibility], bundle=fake_bundle())
+    built = build_plan("smoke", study, compatibility_directories=[compatibility])
     root = base / "smoke"
-    v11_live.prepare_live_root(root, built)
+    v11_live.prepare_live_root(root, built, study_directory=study)
     plan = v11_live.read_live_plan(root)
     FakeV11World.created.clear()
     harness = Harness(base / "smoke-homes", packet_scripts(fixtures))

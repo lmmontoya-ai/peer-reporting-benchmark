@@ -10,15 +10,21 @@ Differences from P1:
 - each entry carries its reasoning effort, world mode, and prompt condition, and
   the observer, preflight, evaluation, and archive receive them;
 - the v1.1 bundle supplies the tools and the world audit;
-- coordinator hooks bound concurrency across lanes (``slot``), refuse new
-  admission (``admission_check``, consulted before preflight and again with no
-  await before the durable start), force-stop active attempts (``external_stop``),
-  and see every archived attempt (``on_archived``);
-- there are no admission amendments: unknown usage always holds admission.
+- ``run_lanes`` opens every lane of a root and admits work through one global
+  dispatcher: when a slot is free, it starts the lowest unstarted planned order
+  whose lane is idle (spec section 9);
+- coordinator hooks refuse new admission (``admission_check``, consulted before
+  preflight and again with no await before the durable start), set holds
+  (``hold``), force-stop active attempts (``external_stop``), and see every
+  archived attempt (``on_archived``);
+- there are no admission amendments. Unknown final usage after a clean close
+  settles at the larger of observed usage and the reservation
+  (``bounded_by_reservation``); any other unknown usage holds admission.
 
 A lane seals its plan before any model call, reserves budget before the start,
 writes ``attempt_started`` before the authenticated session, consumes each
-attempt once, and never retries an outcome.
+attempt once, and never retries an outcome. After an observer returns, nothing
+awaits until its archive and hold decision are complete.
 """
 
 from __future__ import annotations
@@ -28,11 +34,11 @@ import hashlib
 import json
 import re
 import time
-from contextlib import asynccontextmanager
+from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from ..events import canonical_json, content_hash
 from ..long_events import StreamingEventLog, iter_events
@@ -60,6 +66,7 @@ from ..peer_reporting.live_integrity import verify_ledger_history
 from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
 from . import live_runtime
 from .bundle import ProtocolBundle
+from .lanes import BOUNDED_USAGE, GlobalSlots, attempt_hold_kinds
 
 LIVE_VERSION = "peer-reporting-v11-live-phases-v1"
 PLAN_KIND = "peer_reporting_v11_lane_phase_plan"
@@ -83,11 +90,6 @@ def implementation_hashes() -> dict[str, str]:
             for path in paths if path.is_file() and "__pycache__" not in path.parts}
 
 
-@asynccontextmanager
-async def _no_slot() -> AsyncIterator[None]:
-    yield
-
-
 @dataclass
 class Hooks:
     """Injected transport and coordinator behavior. Live use passes the reviewed factory explicitly."""
@@ -101,12 +103,13 @@ class Hooks:
     ledger_clock: Callable[[], float] = time.time
     poll_seconds: float = 1.0
     admission_check: Callable[[], dict | None] = field(default=lambda: None)
-    slot: Callable[[], Any] = _no_slot
+    hold: Callable[[str], None] = field(default=lambda reason: None)
     external_stop: asyncio.Event | None = None
     on_archived: Callable[[dict], None] = field(default=lambda payload: None)
+    authorization_hash: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("runtime_factory", "preflight", "environment_check", "observer", "admission_check", "slot",
+        for name in ("runtime_factory", "preflight", "environment_check", "observer", "admission_check", "hold",
                      "on_archived"):
             if not callable(getattr(self, name)):
                 raise ValueError(f"hook {name} must be callable; live use requires an explicit runtime factory")
@@ -118,8 +121,8 @@ class Hooks:
 class _PhaseState:
     """Verified retained lane evidence. Callers mutate it only under the lane lock."""
 
-    def __init__(self, directory: Path, *, bundle: ProtocolBundle, ledger_clock: Callable[[], float] = time.time
-                 ) -> None:
+    def __init__(self, directory: Path, *, bundle: ProtocolBundle | None,
+                 ledger_clock: Callable[[], float] = time.time) -> None:
         self.directory = Path(directory)
         self.bundle = bundle
         try:
@@ -347,6 +350,19 @@ def create_lane_phase(directory: Path, plan: dict) -> str:
     return sealed["seal_hash"]
 
 
+def _known_total(result: Any, usage_failures: list[str]) -> int | None:
+    total = ((result or {}).get("usage") or {}).get("total_tokens")
+    return total if type(total) is int and total >= 0 and not usage_failures else None
+
+
+def clean_shutdown(result: Any, observer_error: str | None, failures: list[str]) -> bool:
+    """Spec 10: the world closed and the runtime shut down cleanly, with no failure recorded."""
+    return (isinstance(result, dict) and observer_error is None and not failures
+            and result.get("runtime_closed") is True and result.get("queue_reconciled") is True
+            and result.get("world_checkpoint") is not None and not result.get("infrastructure_failures")
+            and result.get("termination_kind") != "infrastructure_incomplete")
+
+
 class _PhaseRun:
     def __init__(self, state: _PhaseState, hooks: Hooks, *, bundle: ProtocolBundle,
                  inputs: Callable[[dict], tuple[dict, str]], evaluate: Callable[..., dict],
@@ -354,8 +370,10 @@ class _PhaseRun:
         self.state, self.hooks, self.bundle = state, hooks, bundle
         self.plan, self.index, self.journal = state.plan, state.index, state.journal
         self.directory = state.directory
+        self.lane_id = self.plan["lane_id"]
         self.caps = deepcopy(state.caps)
         self.inputs, self.evaluate, self.binary_check = inputs, evaluate, binary_check
+        self.halted: dict | None = None
 
     @property
     def ledger(self) -> BudgetLedger | None:
@@ -476,51 +494,35 @@ class _PhaseRun:
         self.journal.append("environment_verified", environment=result)
         return result
 
-    def _pending(self) -> list[dict]:
+    def pending(self) -> list[dict]:
         return [entry for entry in self.plan["planned_order"]
                 if self.index["entries"][entry["entry_id"]]["status"] in UNSTARTED]
 
-    async def run(self, *, implementation_changes: list[str]) -> dict:
+    def open(self) -> None:
         self.journal.append("run_opened", resumed=True, live_version=LIVE_VERSION,
-                            call_starts=self.state.call_starts, implementation_changes=implementation_changes)
-        halted = None
-        task = asyncio.current_task()
-        cancelled = False
-        pending = self._pending()
-        initial_hold = self.hooks.admission_check() if pending else None
-        if initial_hold is not None:
-            halted = initial_hold
-            self.journal.append("admission_held", entry_id=pending[0]["entry_id"], **initial_hold)
-        elif pending and await self._environment() is None:
-            halted = {"reason": "environment_unverified"}
-        elif pending:
-            for entry in self.plan["planned_order"]:
-                if self.index["entries"][entry["entry_id"]]["status"] not in UNSTARTED:
-                    continue
-                if self.state.call_starts >= self.plan["maximum_live_calls"]:
-                    halted = {"reason": "maximum_live_calls_reached"}
-                    break
-                async with self.hooks.slot():
-                    hold = self.hooks.admission_check() or self._ledger_hold(refresh=True)
-                    if hold is not None:
-                        halted = hold
-                        self.journal.append("admission_held", entry_id=entry["entry_id"], **hold)
-                        break
-                    halted = await self._run_entry(entry)
-                # The adapter absorbs cancellation to reconcile its attempt; the lane must still stop.
-                if task is not None and task.cancelling():
-                    cancelled = True
-                    halted = {"reason": "cancelled"}
-                if halted is not None:
-                    break
-        self.index["last_run"] = {"halted": halted, "resumed": True}
-        self.journal.append("run_closed", halted=halted, call_starts=self.state.call_starts)
-        self._save()
-        if cancelled:
-            raise asyncio.CancelledError()
-        return lane_report(self.state)
+                            call_starts=self.state.call_starts, authorization_hash=self.hooks.authorization_hash)
 
-    async def _run_entry(self, entry: dict) -> dict | None:
+    async def environment_verified(self) -> bool:
+        return await self._environment() is not None
+
+    def admission_hold(self) -> dict | None:
+        """Refusal before preflight: the call maximum, the global hold, then this lane's ledger."""
+        if self.state.call_starts >= self.plan["maximum_live_calls"]:
+            return {"reason": "maximum_live_calls_reached"}
+        return self.hooks.admission_check() or self._ledger_hold(refresh=True)
+
+    def halt(self, entry: dict, hold: dict) -> None:
+        """Record why this lane admits nothing more in this run."""
+        self.halted = hold
+        self.journal.append("admission_held", entry_id=entry["entry_id"], **hold)
+        self._save()
+
+    def close(self) -> None:
+        self.index["last_run"] = {"halted": self.halted, "resumed": True}
+        self.journal.append("run_closed", halted=self.halted, call_starts=self.state.call_starts)
+        self._save()
+
+    async def run_entry(self, entry: dict, *, dispatch_seq: int) -> dict | None:
         state = self.index["entries"][entry["entry_id"]]
         model, effort, attempt_id = entry["model"], entry["reasoning_effort"], entry["attempt_id"]
         attempt_dir = self.directory / "attempts" / attempt_id
@@ -580,7 +582,8 @@ class _PhaseRun:
                 started = self.journal.append(
                     "attempt_started", entry_id=entry["entry_id"], attempt_id=attempt_id, model=model,
                     reasoning_effort=effort, world_mode=entry["world_mode"], reservation_id=reservation,
-                    call_start_number=self.state.call_starts + 1,
+                    call_start_number=self.state.call_starts + 1, dispatch_seq=dispatch_seq,
+                    planned_order=entry["planned_order"], authorization_hash=self.hooks.authorization_hash,
                     after_preflight_repair=bool(state["preflight_failures"]))
             except Exception:
                 ledger.settle(reservation, 0)  # no start record, so no session start was attempted
@@ -672,24 +675,63 @@ class _PhaseRun:
         check_ledger()  # a stop reached during preflight must apply before session start
         watcher = asyncio.create_task(monitor())
         try:
-            result = await self.hooks.observer(
-                fixture, instructions, directory=attempt_dir, attempt_id=attempt_id, requested_model=model,
-                reasoning_effort=entry["reasoning_effort"], world_mode=entry["world_mode"], bundle=self.bundle,
-                caps=deepcopy(self.caps), qualification=deepcopy(preflight), runtime=runtime,
-                collection_stop=stop, clock=self.hooks.clock, sleep=self.hooks.sleep,
-                event_sink=event_sink, usage_callback=usage_callback)
-        except Exception as error:
-            observer_error = f"{type(error).__name__}: {error}"[:2000]
-            failures.append(f"observer raised: {observer_error}")
+            try:
+                result = await self.hooks.observer(
+                    fixture, instructions, directory=attempt_dir, attempt_id=attempt_id, requested_model=model,
+                    reasoning_effort=entry["reasoning_effort"], world_mode=entry["world_mode"], bundle=self.bundle,
+                    caps=deepcopy(self.caps), qualification=deepcopy(preflight), runtime=runtime,
+                    collection_stop=stop, clock=self.hooks.clock, sleep=self.hooks.sleep,
+                    event_sink=event_sink, usage_callback=usage_callback)
+            except Exception as error:
+                observer_error = f"{type(error).__name__}: {error}"[:2000]
+                failures.append(f"observer raised: {observer_error}")
+            # No await from here until the archive and its hold decision: another lane's
+            # post-preflight admission check cannot run in between (spec 10, provisional hold).
+            watcher.cancel()
+            self._archive(entry, state, preflight, fixture, instructions, reservation, attempt_dir, result=result,
+                          observer_error=observer_error, failures=failures, usage_failures=usage_failures,
+                          stop_reasons=stop_reasons, sink_log=sink_log)
+        except BaseException as error:
+            self.hooks.hold(f"attempt_unarchived:{attempt_id}:{type(error).__name__}")
+            raise
         finally:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
-        sink_closed = True
-        try:
-            sink_log.close()
-        except Exception as error:
-            sink_closed = False
-            failures.append(f"event sink close: {type(error).__name__}: {error}")
+
+    def _settle(self, reservation: str, total: int | None, result: Any, observer_error: str | None,
+                failures: list[str]) -> dict:
+        """Settle the reservation: known usage, the reservation bound after a clean close, or unresolved."""
+        ledger = self.ledger
+        if total is not None:
+            try:
+                ledger.settle(reservation, total)
+                return {"status": "settled", "actual_tokens": total}
+            except ValueError as error:
+                failures.append(f"usage settlement conflict: {error}")
+                ledger.settle(reservation, None)
+                return {"status": "unresolved", "actual_tokens": None, "conflict": str(error)}
+        if clean_shutdown(result, observer_error, failures):
+            current = self.state.ledger_state()["attempts"][reservation]
+            reported = (result.get("usage") or {}).get("observed_total_tokens")
+            observed = max(current["observed"], reported if type(reported) is int and reported >= 0 else 0)
+            bound = max(observed, current["reservation"])
+            try:
+                ledger.settle(reservation, bound)
+            except ValueError as error:
+                failures.append(f"usage settlement conflict: {error}")
+                ledger.settle(reservation, None)
+                return {"status": "unresolved", "actual_tokens": None, "conflict": str(error)}
+            return {"status": BOUNDED_USAGE, "actual_tokens": bound, "observed_tokens": observed,
+                    "reservation_tokens": current["reservation"]}
+        ledger.settle(reservation, None)
+        return {"status": "unresolved", "actual_tokens": None}
+
+    def _archive(self, entry: dict, state: dict, preflight: dict, fixture: dict, instructions: str,
+                 reservation: str, attempt_dir: Path, *, result: Any, observer_error: str | None,
+                 failures: list[str], usage_failures: list[str], stop_reasons: list[str],
+                 sink_log: StreamingEventLog) -> None:
+        """Settle, evaluate, seal, and journal one attempt. Synchronous: it never yields to another lane."""
+        attempt_id, model = entry["attempt_id"], entry["model"]
         if result is not None and not isinstance(result, dict):
             failures.append("observer returned a non-object result")
             result = None
@@ -697,19 +739,31 @@ class _PhaseRun:
             result, exact = _json_value(result)
             if not exact:
                 failures.append("observer result was not exact JSON; non-JSON values were kept as text")
-        usage = (result or {}).get("usage") or {}
-        total = usage.get("total_tokens")
-        if type(total) is not int or total < 0 or usage_failures:
-            total = None
-        try:
-            ledger.settle(reservation, total)
-            settlement = {"status": "settled" if total is not None else "unresolved", "actual_tokens": total}
-        except ValueError as error:
-            ledger.settle(reservation, None)
-            settlement = {"status": "unresolved", "actual_tokens": None, "conflict": str(error)}
-        self.journal.append("usage_settled", attempt_id=attempt_id, reservation_id=reservation, **settlement)
+        total = _known_total(result, usage_failures)
+        # Provisional hold: the moment the observer result shows a failed check. Later steps only
+        # add failures, so the final decision in on_archived never lifts it.
+        provisional = ("settled" if total is not None
+                       else BOUNDED_USAGE if clean_shutdown(result, observer_error, failures) else "unresolved")
         check = self.evaluate(result, fixture=fixture, entry=entry, preflight=preflight, bundle=self.bundle,
-                              orchestrator_failures=failures, observer_error=observer_error)
+                              orchestrator_failures=list(failures), observer_error=observer_error,
+                              usage_settlement=provisional)
+        for kind in attempt_hold_kinds(check["passed"], check["failure_reasons"], provisional):
+            self.hooks.hold(f"{kind}:{attempt_id}")
+        sink_closed = True
+        try:
+            sink_log.close()
+        except Exception as error:
+            sink_closed = False
+            failures.append(f"event sink close: {type(error).__name__}: {error}")
+        settlement = self._settle(reservation, total, result, observer_error, failures)
+        details = {key: value for key, value in settlement.items() if key not in {"status", "actual_tokens"}}
+        self.journal.append("usage_settled", attempt_id=attempt_id, reservation_id=reservation,
+                            status="settled" if settlement["actual_tokens"] is not None else "unresolved",
+                            actual_tokens=settlement["actual_tokens"], usage_settlement=settlement["status"],
+                            **details)
+        check = self.evaluate(result, fixture=fixture, entry=entry, preflight=preflight, bundle=self.bundle,
+                              orchestrator_failures=failures, observer_error=observer_error,
+                              usage_settlement=settlement["status"])
         sink_checkpoint = {"count": sink_log.count, "final_hash": sink_log.last_hash, "closed": sink_closed}
         payload = {
             "kind": ATTEMPT_KIND, "live_version": LIVE_VERSION, "phase": self.plan["phase"],
@@ -718,6 +772,7 @@ class _PhaseRun:
             "reasoning_effort": entry["reasoning_effort"], "world_mode": entry["world_mode"],
             "prompt_condition": entry["prompt_condition"], "reservation_id": reservation,
             "started_journal_seq": state["attempt"]["started_journal_seq"], "preflight": preflight,
+            "authorization_hash": self.hooks.authorization_hash,
             "instructions_hash": content_hash(instructions), "fixture_hash": content_hash(fixture),
             "observer_result": result, "observer_error": observer_error,
             "orchestrator": {"evidence_failures": failures, "usage_failures": usage_failures,
@@ -752,6 +807,7 @@ def lane_report(state: _PhaseState) -> dict:
             "classification": attempt.get("classification") if archived else None,
             "failure_reasons": attempt.get("failure_reasons"),
             "usage_total_tokens": attempt.get("usage_total_tokens"),
+            "usage_settlement": attempt.get("usage_settlement") if archived else None,
             "observed_total_tokens": attempt.get("observed_total_tokens"),
             "elapsed_seconds": attempt.get("elapsed_seconds"), "tool_request_count": attempt.get("tool_request_count"),
             **{key: entry.get(key) for key in ENTRY_LABELS},
@@ -760,12 +816,16 @@ def lane_report(state: _PhaseState) -> dict:
     for row in entries:
         counts[row["status"]] = counts.get(row["status"], 0) + 1
     passed = [row for row in entries if row["status"] == "archived" and row["check_passed"] is True]
+    starts = state.journal.of_kind("attempt_started")
     return {
         "phase": plan["phase"], "lane_id": plan["lane_id"], "model": plan["model"],
         "reasoning_effort": plan["reasoning_effort"], "directory": str(state.directory), "plan_hash": state.plan_hash,
         "live_model_call_starts": state.call_starts, "maximum_live_calls": plan["maximum_live_calls"],
         "planned_order": [entry["attempt_id"] for entry in plan["planned_order"]],
-        "realized_order": [record["data"]["attempt_id"] for record in state.journal.of_kind("attempt_started")],
+        "realized_order": [record["data"]["attempt_id"] for record in starts],
+        "dispatch_order": [[record["data"].get("dispatch_seq"), record["data"]["attempt_id"]] for record in starts],
+        "authorization_hashes": sorted({record["data"].get("authorization_hash") for record in starts
+                                        + state.journal.of_kind("run_opened")} - {None}),
         "status_counts": counts, "entries": entries,
         "qualified": (len(passed) == len(entries) and all(type(row["usage_total_tokens"]) is int for row in passed))
         if plan["phase"] == "compatibility" else None,
@@ -780,29 +840,159 @@ def lane_report(state: _PhaseState) -> dict:
     }
 
 
-async def run_lane_phase(directory: Path, *, plan_hash: str, hooks: Hooks, bundle: ProtocolBundle,
-                         inputs: Callable[[dict], tuple[dict, str]], evaluate: Callable[..., dict],
-                         binary_check: Callable[[str, dict], None] | None = None) -> dict:
-    """Resume one sealed lane under its lock; the plan must be the one the parent plan sealed."""
-    directory = Path(directory)
-    if not (directory / PLAN_FILE).is_file():
-        raise EvidenceError("no sealed lane plan exists; refusing to create one at run time")
-    with _exclusive(directory / LOCK_FILE):
-        state = _PhaseState(directory, bundle=bundle, ledger_clock=hooks.ledger_clock)
-        try:
-            if state.plan_hash != plan_hash:
+def implementation_changes(sealed: dict) -> list[str]:
+    """Files whose code, catalog, schema, template, or protocol hash differs from a sealed plan."""
+    current = implementation_hashes()
+    return sorted(name for name in set(sealed) | set(current) if sealed.get(name) != current.get(name))
+
+
+@dataclass(frozen=True)
+class LaneSpec:
+    """One sealed lane of a live root, as its parent plan names it."""
+
+    lane_id: str
+    directory: Path
+    plan_hash: str
+    binary_check: Callable[[str, dict], None] | None = None
+
+
+def next_dispatch(pending: list[tuple[int, str, dict]], idle: Callable[[str], bool]) -> tuple[int, str, dict] | None:
+    """Spec 9: the lowest unstarted planned order whose lane is idle. ``pending`` is sorted by planned order."""
+    return next((item for item in pending if idle(item[1])), None)
+
+
+async def _attempt(run: _PhaseRun, entry: dict, sequence: int, hooks: Hooks, errors: dict[str, str]) -> dict | None:
+    """One dispatched attempt. Every hold it causes is set before the task ends and its slot is released."""
+    lane = run.lane_id
+    try:
+        halted = await run.run_entry(entry, dispatch_seq=sequence)
+    except Exception as error:
+        errors[lane] = f"{type(error).__name__}: {str(error)[:500]}"
+        hooks.hold(f"lane_error:{lane}:{type(error).__name__}:{str(error)[:500]}")
+        return {"reason": "lane_error", "error": errors[lane]}
+    except BaseException as error:
+        hooks.hold(f"lane_interrupted:{lane}:{type(error).__name__}")
+        raise
+    if halted is not None and halted.get("reason") != "global_admission_hold":
+        hooks.hold(f"lane_halted:{lane}:{halted.get('reason')}")
+    return halted
+
+
+async def _dispatch(runs: dict[str, _PhaseRun], hooks: Hooks, slots: GlobalSlots, errors: dict[str, str],
+                    realized: list[str]) -> None:
+    pending = sorted(((entry["planned_order"], lane, entry) for lane, run in runs.items() for entry in run.pending()),
+                     key=lambda item: (item[0], item[1]))
+    stop = hooks.admission_check() if pending else None
+    if stop is None and pending:
+        # Every lane with work checks its environment and its retained ledger before any start.
+        for lane, run in runs.items():
+            remaining = run.pending()
+            if not remaining:
+                continue
+            refusal = None if await run.environment_verified() else {"reason": "environment_unverified"}
+            refusal = refusal or run._ledger_hold(refresh=True)
+            if refusal is not None:
+                run.halt(remaining[0], refusal)
+                hooks.hold(f"lane_halted:{lane}:{refusal['reason']}")
+        stop = hooks.admission_check()
+    sequence = sum(run.state.call_starts for run in runs.values())
+    active: dict[asyncio.Task, str] = {}
+    try:
+        while stop is None:
+            while slots.free:
+                item = next_dispatch(pending, lambda lane: lane not in active.values() and runs[lane].halted is None)
+                if item is None:
+                    break
+                _, lane, entry = item
+                run = runs[lane]
+                refusal = run.admission_hold()
+                if refusal is not None:
+                    if refusal.get("reason") != "global_admission_hold":
+                        run.halt(entry, refusal)
+                        hooks.hold(f"lane_halted:{lane}:{refusal['reason']}")
+                    break
+                pending.remove(item)
+                slots.try_acquire()
+                sequence += 1
+                realized.append(entry["attempt_id"])
+                active[asyncio.create_task(_attempt(run, entry, sequence, hooks, errors))] = lane
+            if not active:
+                break
+            done, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                lane = active.pop(task)
+                slots.release()
+                halted = task.result()
+                if halted is not None:
+                    runs[lane].halted = halted
+            stop = hooks.admission_check()
+    except BaseException:
+        stop = stop or {"reason": "dispatch_interrupted"}
+        for task in active:
+            task.cancel()
+        raise
+    finally:
+        if active:
+            outcomes = await asyncio.gather(*active, return_exceptions=True)
+            for lane, outcome in zip(active.values(), outcomes):
+                slots.release()
+                if isinstance(outcome, dict) and runs[lane].halted is None:
+                    runs[lane].halted = outcome
+        # Every lane that still has unstarted work records why it admitted nothing more.
+        stop = stop or hooks.admission_check()
+        for lane, run in runs.items():
+            remaining = [item[2] for item in pending if item[1] == lane]
+            if remaining and run.halted is None and stop is not None:
+                try:
+                    run.halt(remaining[0], stop)
+                except Exception:
+                    pass
+
+
+async def run_lanes(lanes: list[LaneSpec], *, hooks: Hooks, bundle: ProtocolBundle, slots: GlobalSlots,
+                    inputs: Callable[[dict], tuple[dict, str]], evaluate: Callable[..., dict]) -> dict:
+    """Run, or resume, every lane of one root under one global dispatcher.
+
+    Each lane is opened under its own lock, reconciled, and verified before any
+    start. When a slot is free, the dispatcher starts the lowest unstarted
+    planned order whose lane is idle; each lane runs one attempt at a time and at
+    most ``slots.limit`` attempts run at once. Any hold stops all new dispatch.
+    Returns ``{"lanes": {lane_id: report}, "realized_order": [...]}``.
+    """
+    errors: dict[str, str] = {}
+    realized: list[str] = []
+    with ExitStack() as stack:
+        runs: dict[str, _PhaseRun] = {}
+        for spec in lanes:
+            directory = Path(spec.directory)
+            if not (directory / PLAN_FILE).is_file():
+                raise EvidenceError("no sealed lane plan exists; refusing to create one at run time")
+            stack.enter_context(_exclusive(directory / LOCK_FILE))
+            state = _PhaseState(directory, bundle=bundle, ledger_clock=hooks.ledger_clock)
+            stack.callback(state.journal.close)
+            if state.plan_hash != spec.plan_hash or state.plan["lane_id"] != spec.lane_id:
                 raise LivePhaseError("the sealed lane plan differs from the parent live plan")
-            sealed_sources = state.plan["implementation_hashes"]
-            current_sources = implementation_hashes()
-            changes = sorted(name for name in set(sealed_sources) | set(current_sources)
-                             if sealed_sources.get(name) != current_sources.get(name))
+            changes = implementation_changes(state.plan["implementation_hashes"])
+            if changes:
+                raise LivePhaseError(f"code, catalog, schema, template, or protocol files changed after sealing: "
+                                     f"{changes}; a change requires a new plan revision")
             run = _PhaseRun(state, hooks, bundle=bundle, inputs=inputs, evaluate=evaluate,
-                            binary_check=binary_check)
+                            binary_check=spec.binary_check)
             run.reconcile()
             state.verify_attempts()
-            return await run.run(implementation_changes=changes)
+            runs[spec.lane_id] = run
+        for run in runs.values():
+            run.open()
+        try:
+            await _dispatch(runs, hooks, slots, errors, realized)
         finally:
-            state.journal.close()
+            for lane, run in runs.items():
+                try:
+                    run.close()
+                except Exception as error:
+                    errors.setdefault(lane, f"{type(error).__name__}: {str(error)[:500]}")
+        reports = {lane: {**lane_report(run.state), "error": errors.get(lane)} for lane, run in runs.items()}
+    return {"lanes": reports, "realized_order": realized}
 
 
 def verify_lane_phase(directory: Path, *, bundle: ProtocolBundle) -> dict:

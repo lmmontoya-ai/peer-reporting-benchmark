@@ -9,10 +9,14 @@ Each archived primary attempt becomes one attempt in the shape produced by P1's
   assignment labels (``phase``, ``lane_id``, ``split``, ``arm``, ``template_id``,
   ``level``, ``variant``, ``near_miss_type``, ``planned_order``);
 - ``report_attempts``: every ``report_incident`` request, stored or not, with its
-  raw arguments and result, for ``focal_intent`` and the unavailable report store;
-- ``usage`` (settled and observed tokens) and ``elapsed_seconds``.
+  raw arguments, result, transport ``call_id``, ``world_arrival_seq``, and
+  ``duplicate_of_arrival_seq`` (set on a duplicate transport call), for
+  ``focal_intent`` and the unavailable report store;
+- ``usage`` (settled and observed tokens, and the settlement label, such as
+  ``bounded_by_reservation``) and ``elapsed_seconds``.
 
-No model, repair, resume, or admission operation is performed. Compatibility
+No model, repair, resume, or admission operation is performed. The export first
+rechecks the root's consumed-attempt ledger against its prior roots. Compatibility
 roots are engineering checks and are not exported. Every planned row is kept;
 unrun, incomplete, and quarantined rows have no attempt and never become negatives.
 """
@@ -32,7 +36,13 @@ from ..peer_reporting.live_archive import verify_archived_index
 from ..peer_reporting.live_runtime import _text_item
 from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
 from .bundle import ProtocolBundle, load_bundle
-from .live import CONFIGURATION_CHECKS, evaluate_transport, read_live_plan, read_root_fixture
+from .live import (
+    CONFIGURATION_CHECKS,
+    evaluate_transport,
+    read_live_plan,
+    read_root_fixture,
+    verify_consumed_ledger,
+)
 from .phase import _PhaseState
 
 ADAPTER_VERSION = "peer-reporting-v11-live-review-v1"
@@ -53,8 +63,15 @@ def _labels(entry: dict, phase: str, lane: str) -> dict:
 
 
 def report_attempts(tool_requests: list[dict]) -> list[dict]:
-    """Every report_incident request in arrival order, whether or not the world stored it."""
-    return [{"arrival_seq": request["arrival_seq"], "arguments": deepcopy(request.get("arguments")),
+    """Every report_incident request in arrival order, whether or not the world stored it.
+
+    A duplicate transport call carries ``duplicate_of_arrival_seq`` and receives
+    the first call's result; count reports by distinct ``report_id``.
+    """
+    return [{"arrival_seq": request["arrival_seq"], "call_id": request.get("call_id"),
+             "world_arrival_seq": request.get("world_arrival_seq"),
+             "duplicate_of_arrival_seq": request.get("duplicate_of_arrival_seq"),
+             "arguments": deepcopy(request.get("arguments")),
              "admitted": request.get("admitted"), "result": deepcopy(request.get("result")),
              "stored": (request.get("result") or {}).get("status") == "stored"}
             for request in tool_requests if request.get("tool") == "report_incident"]
@@ -75,7 +92,8 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
                 "termination_kind": "infrastructure_incomplete", "accepted_reports": [], "report_attempts": [],
                 "observer_outputs": [], "observed_peer_messages": [], "task_submissions": [],
                 "tool_requests": [], "tool_receipts": [], "model_execution_confirmed": False,
-                "usage": {"total_tokens": settlement["actual_tokens"], "observed_total_tokens": None},
+                "usage": {"total_tokens": settlement["actual_tokens"], "observed_total_tokens": None,
+                          "settlement": settlement["status"]},
                 "elapsed_seconds": None}
     _require(type(result) is dict, "observer result is not an object")
     _require(result["attempt_id"] == payload["attempt_id"]
@@ -114,7 +132,7 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
                  and _text_item(item) == fixture["packet"], "initial packet receipt mismatch")
     check = evaluate_transport(result, fixture=fixture, entry=entry, preflight=payload["preflight"], bundle=bundle,
                                orchestrator_failures=payload["orchestrator"]["evidence_failures"],
-                               observer_error=payload["observer_error"])
+                               observer_error=payload["observer_error"], usage_settlement=settlement["status"])
     _require(check == payload["check"], "archived transport classification differs from its evidence")
     eligible = all(check["checks"][key] for key in CONFIGURATION_CHECKS if key != "tools_registered")
     # Later infrastructure failures close the opportunity incompletely; they do
@@ -159,7 +177,8 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
             "tool_requests": deepcopy(result["tool_requests"]), "tool_receipts": deepcopy(result["tool_receipts"]),
             "model_execution_confirmed": result["execution_kind"] == "live_model",
             "usage": {"total_tokens": settlement["actual_tokens"],
-                      "observed_total_tokens": (result.get("usage") or {}).get("observed_total_tokens")},
+                      "observed_total_tokens": (result.get("usage") or {}).get("observed_total_tokens"),
+                      "settlement": settlement["status"]},
             "elapsed_seconds": result.get("elapsed_seconds")}
 
 
@@ -258,14 +277,22 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
             "planned_count": plan["maximum_live_calls"]}
 
 
-def export_live_review(directory: Path, output: Path, *, bundle: ProtocolBundle | None = None,
-                       scorer: Callable[[dict], dict] | None = None,
+def export_live_review(directory: Path, output: Path, *, prior_roots: list[Path] | tuple = (),
+                       bundle: ProtocolBundle | None = None, scorer: Callable[[dict], dict] | None = None,
                        summarize: Callable[[list[dict]], dict] | None = None) -> dict:
-    """Write a fresh researcher export: one sealed attempt per archived row and a sealed index."""
+    """Write a fresh researcher export: one sealed attempt per archived row and a sealed index.
+
+    ``prior_roots`` must be exactly the prior roots sealed in the plan's
+    consumed-attempt ledger; the export refuses if an assignment ran in two roots.
+    """
     directory, output = Path(directory), Path(output)
     _require(not output.resolve().is_relative_to(directory.resolve())
              and not directory.resolve().is_relative_to(output.resolve()),
              "export must be outside the source live root")
+    bundle = bundle or load_bundle()
+    _require(read_live_plan(directory)["phase"] != "compatibility",
+             "compatibility attempts are engineering checks, not behavioral observations")
+    ledger = verify_consumed_ledger(directory, read_live_plan(directory), prior_roots, bundle=bundle)
     data = inspect_live_root(directory, bundle=bundle, scorer=scorer)
     output.mkdir(parents=True, exist_ok=False)
     (output / "attempts").mkdir()
@@ -284,7 +311,7 @@ def export_live_review(directory: Path, output: Path, *, bundle: ProtocolBundle 
         "source_plan_hash": data["plan_hash"], "planned_count": data["planned_count"], "rows": index,
         "status_counts": data["status_counts"], "lane_errors": data["lane_errors"],
         "verified_model_observations": data["verified_model_observations"],
-        "scored": scorer is not None, "summary": summary,
+        "consumed_attempt_ledger": ledger, "scored": scorer is not None, "summary": summary,
         "semantic_review": "pending_human_review_of_free_text",
     }))
     return {"output": str(output), "phase": data["phase"], "assignments": len(index),
