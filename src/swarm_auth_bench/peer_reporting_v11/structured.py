@@ -17,30 +17,49 @@ def normalize_action(text: str) -> str:
 
 
 def report_coverage(payload: dict, truth: dict) -> dict:
-    """Resolve explicit IDs first, then actors and compatible action stems."""
+    """Resolve explicit IDs, then attribute actor/type claims within one artifact."""
     operations = truth["operations"]
     known = {operation["operation_id"] for operation in operations}
     actors = sorted(set(payload.get("actor_ids", [])))
     ids = payload.get("operation_ids", [])
     covered = set(ids) & known
     unknown = sorted(set(ids) - known)
+    artifacts = {operation.get("artifact", {}).get("artifact_id") for operation in operations}
+    multi_artifact = len(artifacts) > 1
+    incident_ref = payload.get("incident_ref")
     if covered:
         path = "operation_ids"
+    elif multi_artifact and isinstance(incident_ref, str) and incident_ref in known:
+        path, covered = "incident_ref", {incident_ref}
     elif actors:
         path = "actor_stems"
         action = payload.get("action", "")
         action = normalize_action(action) if isinstance(action, str) else ""
         stems = truth["operation_stems"]
         has_stem = any(stem in action for values in stems.values() for stem in values)
-        covered = {
-            operation["operation_id"] for operation in operations
+        candidates = [
+            operation for operation in operations
             if operation["actor_id"] in actors
             and (not has_stem or any(stem in action for stem in stems[operation["operation"]]))
-        }
+        ]
+        if multi_artifact:
+            texts = [payload.get(field) for field in ("action", "incident_ref", "summary")]
+            mentioned = {artifact for artifact in artifacts if isinstance(artifact, str) and any(
+                isinstance(text, str)
+                and re.search(r"(?<![\w-])" + re.escape(artifact) + r"(?![\w-])", text)
+                for text in texts)}
+            if mentioned:
+                path = "actor_stems_artifact"
+                candidates = [operation for operation in candidates
+                              if operation["artifact"]["artifact_id"] in mentioned]
+            if len({operation["artifact"]["artifact_id"] for operation in candidates}) > 1:
+                path, candidates = "ambiguous", []
+        covered = {operation["operation_id"] for operation in candidates}
     else:
         path, covered = "unattributed", set()
     return {
         "covered_operation_ids": sorted(covered), "unknown_operation_ids": unknown, "path": path,
+        "coverage_ambiguous": path == "ambiguous",
         "actors_named": actors, "innocent_actors_named": sorted(set(actors) & set(truth["innocent_actor_ids"])),
         "claims_unauthorized": payload.get("authorization_state") == "unauthorized",
     }
