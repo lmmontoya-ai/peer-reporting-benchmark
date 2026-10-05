@@ -16,7 +16,8 @@ from .lanes import trial_policy, validate_caps_record
 from .prompts import build_instructions, prompt_manifest
 
 STUDY_MANIFEST = "collection-manifest.json"
-ORDER_VERSION = "peer-reporting-v11-paired-rounds-v2"
+ORDER_VERSION = "peer-reporting-v11-paired-rounds-v3"
+ORDER_OFFSETS = ((0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0), (0, 2), (1, 0), (2, 1))
 
 
 def assignment_identity(row: dict, *, protocol_id: str, tool_manifest_hash: str, caps_hash: str) -> str:
@@ -29,7 +30,7 @@ def assignment_identity(row: dict, *, protocol_id: str, tool_manifest_hash: str,
 
 
 def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
-    """Run spec 9's offset cells in rounds, keeping each violation/twin block intact."""
+    """Run spec 9's Latin-square cells in rounds, keeping each violation/twin block intact."""
     cells = {}
     arm_fixtures: dict[str, dict[str, dict]] = defaultdict(dict)
     for row in rows:
@@ -46,8 +47,9 @@ def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
             continue
         fixtures = arm_fixtures[arm]
         if arm == "smoke":
-            for round_index, model in enumerate(models):
+            for round_index in range(3):
                 for cell_index, cell in enumerate(definition["cells"]):
+                    model = models[(cell_index + round_index) % 3]
                     for template_index, template_id in enumerate(protocol["templates"][split]):
                         matching = [fixture_id for fixture_id, row in fixtures.items()
                                     if (row["template_id"], row["level"], row["variant"])
@@ -66,12 +68,12 @@ def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
             groups[block_key].append(fixture_id)
         blocks = [tuple(sorted(group, key=lambda fixture_id: (fixtures[fixture_id]["variant"] != "violation",
                                                               fixture_id))) for group in groups.values()]
-        blocks.sort(key=lambda block: (content_hash([ORDER_VERSION, seed, arm, block]), block))
+        blocks.sort(key=lambda block: (-len(block), content_hash([ORDER_VERSION, seed, arm, block]), block))
         prompts = definition["prompts"]
         if len(prompts) not in (1, 3):
             raise ValueError(f"{arm}: order requires one or three prompts")
         for block_index, block in enumerate(blocks):
-            a_offset, c_offset = divmod(block_index % 9, 3)
+            a_offset, c_offset = ORDER_OFFSETS[block_index % 9]
             for round_index in range(9) if len(prompts) == 3 else range(0, 9, 3):
                 if len(prompts) == 3:
                     model = models[(round_index + a_offset) % 3]
@@ -165,7 +167,7 @@ def build_study(directory: Path, *, protocol: dict, templates: dict[str, dict], 
 
 
 def verify_study(directory: Path, *, protocol: dict, templates: dict[str, dict], caps_record: dict) -> dict:
-    """Rebuild every input and run the independent fixture verifier; report content errors."""
+    """Recompute the Latin-square order and sealed inputs; independently verify fixtures."""
     directory, errors = Path(directory), []
     report = {"valid": False, "errors": errors, "counts": {}, "split_counts": {}, "total_trials": 0,
               "fixtures": 0, "seal_hash": None, "live_model_calls": 0}

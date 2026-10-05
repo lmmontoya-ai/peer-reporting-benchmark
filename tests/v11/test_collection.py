@@ -117,12 +117,13 @@ def test_every_fixture_model_prompt_effort_world_cell_appears_once(wp6_study):
                 continue
             for cell in cells:
                 for model in protocol["models"]:
-                    expected[fixture_id, model, cell["prompt"], cell["effort"], cell["world_mode"]] += 1
-    actual = Counter(tuple(row[key] for key in ("fixture_id", "model", "prompt_condition", "effort", "world_mode"))
+                    expected[arm, fixture_id, model, cell["prompt"], cell["effort"], cell["world_mode"]] += 1
+    actual = Counter(tuple(row[key] for key in ("arm", "fixture_id", "model", "prompt_condition", "effort", "world_mode"))
                      for row in manifest["assignments"])
     assert actual == expected
     assert set(actual.values()) == {1}
     assert len(actual) == sum(COUNTS.values())
+    assert Counter(cell[0] for cell in actual) == COUNTS
 
 
 @pytest.mark.parametrize("split", SPLITS)
@@ -162,9 +163,10 @@ def test_every_round_boundary_prefix_contains_complete_pairs(split, wp6_study, w
 def _assert_protocol_round_sequence(manifest, protocol, split):
     for round_index, arm, chunk in _round_chunks(manifest, split, protocol):
         if arm == "smoke":
-            expected = [(template_id, cell["level"], cell["variant"], protocol["models"][round_index],
+            expected = [(template_id, cell["level"], cell["variant"], protocol["models"][(index + round_index) % 3],
                          cell["prompt"], cell["effort"], cell["world_mode"])
-                        for cell in protocol["arms"][arm]["cells"] for template_id in protocol["templates"][split]]
+                        for index, cell in enumerate(protocol["arms"][arm]["cells"])
+                        for template_id in protocol["templates"][split]]
             assert [tuple(row[key] for key in ("template_id", "level", "variant", "model", "prompt_condition",
                                               "effort", "world_mode")) for row in chunk] == expected
             continue
@@ -177,12 +179,13 @@ def _assert_protocol_round_sequence(manifest, protocol, split):
             blocks[key].append(row)
         ordered = [sorted(block, key=lambda row: (row["variant"] != "violation", row["fixture_id"]))
                    for block in blocks.values()]
-        ordered.sort(key=lambda block: (content_hash([collection.ORDER_VERSION, protocol["seeds"][split], arm,
+        ordered.sort(key=lambda block: (-len(block), content_hash([collection.ORDER_VERSION, protocol["seeds"][split], arm,
                                                       [row["fixture_id"] for row in block]]),
                                        tuple(row["fixture_id"] for row in block)))
         assert [row["fixture_id"] for row in chunk] == [row["fixture_id"] for block in ordered for row in block]
         for index, block in enumerate(ordered):
-            a_offset, c_offset = divmod(index % 9, 3)
+            offsets = ((0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0), (0, 2), (1, 0), (2, 1))
+            a_offset, c_offset = offsets[index % 9]
             if len(protocol["arms"][arm]["prompts"]) == 3:
                 model = protocol["models"][(round_index + a_offset) % 3]
                 prompt = protocol["prompt_conditions"][(round_index // 3 + c_offset) % 3]
@@ -207,33 +210,44 @@ def test_round_order_is_independent_of_input_row_order(split, wp6_study, wp6_inp
 
 
 @pytest.mark.parametrize("split", SPLITS)
-def test_per_round_model_and_prompt_counts_follow_the_exact_spec_cycle(split, wp6_study, wp6_inputs):
+def test_per_arm_and_round_model_and_prompt_row_counts_differ_by_at_most_two(split, wp6_study, wp6_inputs):
     _, manifest, _ = wp6_study
     protocol = wp6_inputs["protocol"]
-    # The specified nine-offset cycle does not promise a <= 1 fixture-count spread:
-    # calibration has 14 two-fixture blocks, so its first round is necessarily 12/10/6.
-    expected = {
-        "collection": ((36, 31, 37), (36, 34, 34)),
-        "channel_failure": ((3, 3, 2), (3, 3, 2)),
-        "low_effort": ((15, 16, 9), (40,)),
-        "calibration": ((12, 10, 6), (28,)),
-        "smoke": ((4, 0, 0), (1, 2, 1)),
-    }
     for round_index, arm, chunk in _round_chunks(manifest, split, protocol):
         model_counts = Counter(row["model"] for row in chunk)
         prompt_counts = Counter(row["prompt_condition"] for row in chunk)
         prompts = protocol["arms"][arm].get("prompts", protocol["prompt_conditions"])
         models = tuple(model_counts[model] for model in protocol["models"])
         conditions = tuple(prompt_counts[prompt] for prompt in prompts)
-        initial_models, initial_prompts = expected[arm]
-        model_rotation = round_index if arm == "smoke" or len(prompts) == 3 else round_index // 3
-        prompt_rotation = round_index // 3 if len(prompts) == 3 and arm != "smoke" else 0
-        assert models == tuple(initial_models[(index - model_rotation) % 3] for index in range(3))
-        assert conditions == tuple(initial_prompts[(index - prompt_rotation) % len(prompts)]
-                                   for index in range(len(prompts)))
-        if arm == "channel_failure":
-            assert max(models) - min(models) <= 1
-            assert max(conditions) - min(conditions) <= 1
+        assert max(models) - min(models) <= 2, (arm, round_index, models)
+        assert max(conditions) - min(conditions) <= 2, (arm, round_index, conditions)
+
+
+def test_smoke_models_rotate_across_protocol_cells(wp6_study, wp6_inputs):
+    _, manifest, _ = wp6_study
+    protocol = wp6_inputs["protocol"]
+    expected_counts = ((2, 1, 1), (1, 2, 1), (1, 1, 2))
+    models_by_cell = defaultdict(list)
+    for round_index, _, chunk in _round_chunks(manifest, "smoke", protocol):
+        counts = Counter(row["model"] for row in chunk)
+        assert tuple(counts[model] for model in protocol["models"]) == expected_counts[round_index]
+        for index, row in enumerate(chunk):
+            assert row["model"] == protocol["models"][(index + round_index) % 3]
+            models_by_cell[index].append(row["model"])
+    assert all(set(models) == set(protocol["models"]) for models in models_by_cell.values())
+
+
+def test_verify_rejects_a_sealed_study_using_the_previous_offset_cycle(tmp_path, wp6_inputs, monkeypatch):
+    directory = tmp_path / "previous-cycle"
+    with monkeypatch.context() as previous:
+        previous.setattr(collection, "ORDER_OFFSETS", tuple(divmod(index, 3) for index in range(9)))
+        result = build_study(directory, **wp6_inputs)
+    manifest = read_sealed(directory / STUDY_MANIFEST)
+    assert manifest["seal_hash"] == result["seal_hash"]
+    assert result["counts"] == COUNTS
+    verified = verify_study(directory, **wp6_inputs)
+    assert verified["valid"] is False
+    assert "manifest assignments differs from recomputed study" in verified["errors"]
 
 
 @pytest.mark.parametrize("change", ["models", "arms", "smoke_cells", "seed"])
