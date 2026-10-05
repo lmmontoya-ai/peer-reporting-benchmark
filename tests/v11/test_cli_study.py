@@ -18,7 +18,7 @@ def test_build_and_verify_study_commands(tmp_path, wp6_inputs, capsys, monkeypat
     directory = tmp_path / "study"
     assert main(["build-study", str(directory), "--caps", str(caps_path)]) == 0
     built = json.loads(capsys.readouterr().out)
-    assert built["total_trials"] == 1350 and built["live_model_calls"] == 0
+    assert built["total_trials"] == 1446 and built["live_model_calls"] == 0
     assert main(["verify-study", str(directory), "--caps", str(caps_path)]) == 0
     verified = json.loads(capsys.readouterr().out)
     assert verified["valid"] and verified["seal_hash"] == built["seal_hash"]
