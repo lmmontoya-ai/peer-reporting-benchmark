@@ -12,7 +12,12 @@ from .live_fakes import authorization, caps_record
 
 
 def sealed_plan(**changes):
-    return seal({"phase": "smoke", "caps_hash": "c" * 64, "maximum_live_calls": 12, **changes})
+    return seal({"phase": "smoke", "caps_hash": "c" * 64, "maximum_live_calls": 12, "caps": caps_record(), **changes})
+
+
+def archived(attempt_id, passed, reasons, settlement):
+    return {"attempt_id": attempt_id, "check": {"passed": passed, "failure_reasons": reasons},
+            "orchestrator": {"usage_settlement": {"status": settlement}}}
 
 
 def test_lanes_are_every_model_at_each_effort_xhigh_first():
@@ -80,6 +85,15 @@ def test_authorization_must_be_sealed_approved_and_name_exactly_this_plan():
         lanes.validate_authorization(extra, plan)
 
 
+def test_cutoff_must_precede_the_deadline_by_the_trial_wall_plus_drain():
+    plan = sealed_plan()  # trial wall 60 s, drain 5 s
+    assert lanes.validate_authorization(authorization(plan, cutoff=1000, deadline=1065), plan)
+    with pytest.raises(ValueError, match="trial wall plus the drain"):
+        lanes.validate_authorization(authorization(plan, cutoff=1000, deadline=1064), plan)
+    with pytest.raises(ValueError, match="lacks the trial wall"):
+        lanes.validate_authorization(authorization(plan), {**plan, "caps": {}})
+
+
 def test_admission_holds_at_cutoff_deadline_and_stop_file_and_never_lift(tmp_path):
     now = [100.0]
     changes = []
@@ -99,25 +113,52 @@ def test_admission_holds_at_cutoff_deadline_and_stop_file_and_never_lift(tmp_pat
         lanes.AdmissionPolicy(admission_cutoff=300, forced_stop_deadline=300)
 
 
-def test_failed_check_or_unknown_final_usage_holds_all_admission():
+def test_every_stop_file_is_watched(tmp_path):
+    policy = lanes.AdmissionPolicy(admission_cutoff=10**12, forced_stop_deadline=10**12 + 1,
+                                   stop_files=[tmp_path / "root-STOP", tmp_path / "flag-STOP"])
+    assert not policy.force_stop_due()
+    (tmp_path / "root-STOP").touch()
+    assert policy.force_stop_due() and policy.admission_check()["holds"] == ["parent_stop_or_forced_deadline"]
+
+
+def test_failed_check_or_unsettled_usage_holds_all_admission():
     policy = lanes.AdmissionPolicy(admission_cutoff=10**12, forced_stop_deadline=10**12 + 1)
-    policy.accept_archived({"attempt_id": "a", "check": {"passed": True, "checks": {"usage_known": True}}})
+    policy.accept_archived(archived("a", True, [], "settled"))
     assert policy.admission_check() is None
-    policy.accept_archived({"attempt_id": "b", "check": {"passed": False, "checks": {"usage_known": False}}})
+    policy.accept_archived(archived("b", False, ["runtime_closed", "usage_known"], "unresolved"))
     assert policy.holds == ["execution_check_failure:b", "unknown_final_usage:b"]
     assert policy.admission_check()["reason"] == "global_admission_hold"
+    conflict = lanes.AdmissionPolicy(admission_cutoff=10**12, forced_stop_deadline=10**12 + 1)
+    conflict.accept_archived(archived("c", True, [], "unresolved"))  # a settlement conflict alone still holds
+    assert conflict.holds == ["unknown_final_usage:c"]
+
+
+def test_bounded_settlement_alone_does_not_hold():
+    policy = lanes.AdmissionPolicy(admission_cutoff=10**12, forced_stop_deadline=10**12 + 1)
+    policy.accept_archived(archived("a", True, [], "bounded_by_reservation"))  # a behavioral transport check
+    policy.accept_archived(archived("b", False, ["usage_known"], "bounded_by_reservation"))  # an unqualified probe
+    assert policy.holds == []
+    policy.accept_archived(archived("c", False, ["usage_known", "valid_close"], "bounded_by_reservation"))
+    assert policy.holds == ["execution_check_failure:c"]
+    assert lanes.attempt_hold_kinds(False, ["usage_known"], "unresolved") == ["execution_check_failure",
+                                                                              "unknown_final_usage"]
 
 
 def test_retained_lane_evidence_holds_on_failed_unknown_or_incomplete_rows():
     policy = lanes.AdmissionPolicy(admission_cutoff=10**12, forced_stop_deadline=10**12 + 1)
     clean = {"halted": {"reason": "global_admission_hold"}, "unreconciled_starts": [], "ledger": {},
-             "entries": [{"attempt_id": "a", "status": "archived", "check_passed": True, "usage_total_tokens": 5},
+             "entries": [{"attempt_id": "a", "status": "archived", "check_passed": True, "usage_total_tokens": 5,
+                          "usage_settlement": "settled", "failure_reasons": []},
+                         {"attempt_id": "g", "status": "archived", "check_passed": True,
+                          "usage_total_tokens": 75000, "usage_settlement": "bounded_by_reservation",
+                          "failure_reasons": []},
                          {"attempt_id": "b", "status": "unrun"},
                          {"attempt_id": "c", "status": "not_started_preflight_failed"}]}
     policy.accept_lane_report("lane", clean, retained=True)
     assert policy.holds == []
     dirty = {"halted": None, "unreconciled_starts": ["d"], "ledger": {"unresolved_reservations": ["e~r1"]},
-             "entries": [{"attempt_id": "e", "status": "archived", "check_passed": True, "usage_total_tokens": None},
+             "entries": [{"attempt_id": "e", "status": "archived", "check_passed": True, "usage_total_tokens": None,
+                          "usage_settlement": "unresolved", "failure_reasons": []},
                          {"attempt_id": "f", "status": "incomplete_interrupted"}]}
     policy.accept_lane_report("lane", dirty, retained=True)
     assert policy.holds == ["retained_unreconciled_start:d", "retained_unsettled_lane_reservation:lane",
@@ -125,6 +166,21 @@ def test_retained_lane_evidence_holds_on_failed_unknown_or_incomplete_rows():
     live = lanes.AdmissionPolicy(admission_cutoff=10**12, forced_stop_deadline=10**12 + 1)
     live.accept_lane_report("lane", {"halted": {"reason": "preflight_failed"}, "entries": []})
     assert live.holds == ["lane_halted:lane:preflight_failed"]
+
+
+def test_a_retained_ledger_stop_holds_at_run_start():
+    policy = lanes.AdmissionPolicy(admission_cutoff=10**12, forced_stop_deadline=10**12 + 1)
+    ledger = {"stop_generation": True, "stop_reason": "collection_wall_limit", "unresolved_reservations": [],
+              "active_reservations": []}
+    finished = {"halted": None, "unreconciled_starts": [], "ledger": ledger, "entries": [
+        {"attempt_id": "a", "status": "archived", "check_passed": True, "usage_total_tokens": 75000,
+         "usage_settlement": "settled", "failure_reasons": []}]}
+    policy.accept_lane_report("lane", finished, retained=True)
+    policy.accept_lane_report("lane", {**finished, "entries": [{"attempt_id": "b", "status": "unrun"}]})
+    assert policy.holds == []  # a finished lane, or the end-of-run report, does not hold on the flag alone
+    policy.accept_lane_report("lane", {**finished, "entries": [{"attempt_id": "b", "status": "unrun"}]},
+                              retained=True)
+    assert policy.holds == ["retained_ledger_stop:lane:collection_wall_limit"]
 
 
 async def test_global_slots_never_exceed_the_limit():
@@ -139,6 +195,11 @@ async def test_global_slots_never_exceed_the_limit():
 
     await asyncio.gather(*(attempt(number) for number in range(7)))
     assert slots.peak == 2 and slots.active == 0 and slots.admitted == 7
+    assert slots.try_acquire() and slots.try_acquire() and not slots.try_acquire()
+    slots.release()
+    slots.release()
+    with pytest.raises(RuntimeError):
+        slots.release()
     for bad in (0, 7, True, 2.0):
         with pytest.raises(ValueError):
             lanes.GlobalSlots(bad)

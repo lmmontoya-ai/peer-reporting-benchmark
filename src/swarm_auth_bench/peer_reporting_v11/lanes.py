@@ -6,11 +6,14 @@ ledger. A global slot limits the attempts that run at once across all lanes to
 ``global_max_concurrency`` (at most six).
 
 The admission policy is ported from an earlier unpublished multi-lane study. Any
-failed execution check, including unknown final usage, holds all new admission.
-So do the admission cutoff, the forced-stop deadline, a parent stop file, a
-halted lane, and retained incomplete or failed evidence. Active attempts finish
-within their own caps. At the forced-stop deadline they are truncated and
-drained. A hold is never lifted inside a run, and an archived failed or unknown
+failed execution check holds all new admission. So do an unsettled usage
+record, the admission cutoff, the forced-stop deadline, a parent stop file, a
+halted lane, a stopped lane ledger, and retained incomplete or failed evidence.
+Unknown final usage alone does not hold when the world closed and the runtime
+shut down cleanly: the attempt settles at the larger of its observed usage and
+its reservation (``bounded_by_reservation``, spec section 10). Active attempts
+finish within their own caps. At the forced-stop deadline they are truncated
+and drained. A hold is never lifted inside a run, and an archived failed
 attempt holds every later run of the same plan.
 
 This module performs no model call and imports no v1.1 content module.
@@ -26,7 +29,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Iterable
 
 from ..events import content_hash
 from ..peer_reporting.config import MODELS, validate_caps
@@ -50,6 +53,8 @@ AUTHORIZATION_FIELDS = frozenset({
     "admission_cutoff_utc", "forced_stop_deadline_utc", "authorization", "recorded_utc", "seal_hash",
 })
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+BOUNDED_USAGE = "bounded_by_reservation"
+SETTLED_USAGE = ("settled", BOUNDED_USAGE)
 
 
 def validate_effort(value: Any) -> str:
@@ -189,12 +194,34 @@ def validate_authorization(record: Any, plan: dict) -> dict:
     parse_utc(record["recorded_utc"], "recorded_utc")
     cutoff = parse_utc(record["admission_cutoff_utc"], "admission_cutoff_utc")
     deadline = parse_utc(record["forced_stop_deadline_utc"], "forced_stop_deadline_utc")
-    if cutoff >= deadline:
-        raise ValueError("the admission cutoff must precede the forced-stop deadline")
+    trial = (plan.get("caps") or {}).get("trial") or {}
+    window = [trial.get(key) for key in ("max_trial_wall_seconds", "drain_grace_seconds")]
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in window):
+        raise ValueError("the sealed plan lacks the trial wall and drain caps")
+    # A trial admitted at the cutoff must be able to close and drain before the deadline.
+    if cutoff + sum(window) > deadline:
+        raise ValueError("the admission cutoff must precede the forced-stop deadline by at least the trial wall "
+                         "plus the drain time")
     return {**deepcopy(record), "admission_cutoff": cutoff, "forced_stop_deadline": deadline}
 
 
 # Global admission policy
+
+
+def attempt_hold_kinds(check_passed: Any, failure_reasons: Any, usage_settlement: Any) -> list[str]:
+    """Why an archived attempt holds all new admission; empty when it does not.
+
+    A failed execution check holds, except a check whose only failure is unknown
+    usage after a clean close that settled at the reservation bound. Any
+    settlement other than ``settled`` or ``bounded_by_reservation`` holds.
+    """
+    kinds = []
+    bounded_only = usage_settlement == BOUNDED_USAGE and set(failure_reasons or []) <= {"usage_known"}
+    if check_passed is not True and not bounded_only:
+        kinds.append("execution_check_failure")
+    if usage_settlement not in SETTLED_USAGE:
+        kinds.append("unknown_final_usage")
+    return kinds
 
 
 class AdmissionPolicy:
@@ -202,11 +229,12 @@ class AdmissionPolicy:
 
     def __init__(self, *, admission_cutoff: float, forced_stop_deadline: float,
                  wall_clock: Callable[[], float] = time.time, stop_file: Path | None = None,
-                 on_change: Callable[[], None] | None = None) -> None:
+                 stop_files: Iterable[Path] = (), on_change: Callable[[], None] | None = None) -> None:
         if not admission_cutoff < forced_stop_deadline:
             raise ValueError("the admission cutoff must precede the forced-stop deadline")
         self.admission_cutoff, self.forced_stop_deadline = admission_cutoff, forced_stop_deadline
-        self.wall_clock, self.stop_file, self.on_change = wall_clock, stop_file, on_change
+        self.wall_clock, self.on_change = wall_clock, on_change
+        self.stop_files = [Path(path) for path in ([stop_file] if stop_file is not None else []) + list(stop_files)]
         self.holds: list[str] = []
 
     def hold(self, reason: str) -> None:
@@ -216,8 +244,7 @@ class AdmissionPolicy:
                 self.on_change()
 
     def force_stop_due(self) -> bool:
-        return ((self.stop_file is not None and Path(self.stop_file).exists())
-                or self.wall_clock() >= self.forced_stop_deadline)
+        return any(path.exists() for path in self.stop_files) or self.wall_clock() >= self.forced_stop_deadline
 
     def admission_check(self) -> dict | None:
         """Return a hold record, or None when a new attempt may be admitted now."""
@@ -228,16 +255,14 @@ class AdmissionPolicy:
         return {"reason": "global_admission_hold", "holds": list(self.holds)} if self.holds else None
 
     def accept_archived(self, payload: dict) -> None:
-        """Stop all new admission after a failed execution check or unknown final usage."""
+        """Stop all new admission after a failed execution check or an unsettled usage record."""
         check = payload.get("check") or {}
-        attempt_id = payload.get("attempt_id")
-        if check.get("passed") is not True:
-            self.hold(f"execution_check_failure:{attempt_id}")
-        if (check.get("checks") or {}).get("usage_known") is not True:
-            self.hold(f"unknown_final_usage:{attempt_id}")
+        settlement = ((payload.get("orchestrator") or {}).get("usage_settlement") or {}).get("status")
+        for kind in attempt_hold_kinds(check.get("passed"), check.get("failure_reasons"), settlement):
+            self.hold(f"{kind}:{payload.get('attempt_id')}")
 
     def accept_lane_report(self, lane: str, report: dict, *, retained: bool = False) -> None:
-        """Hold on any lane halt, unreconciled start, unsettled reservation, or failed or unknown row."""
+        """Hold on any lane halt, stopped ledger, unreconciled start, unsettled reservation, or failed row."""
         prefix = "retained_" if retained else ""
         halted = report.get("halted")
         if halted and halted.get("reason") not in {None, "global_admission_hold"} and not retained:
@@ -245,40 +270,72 @@ class AdmissionPolicy:
         for attempt_id in report.get("unreconciled_starts") or []:
             self.hold(f"{prefix}unreconciled_start:{attempt_id}")
         ledger = report.get("ledger") or {}
+        unstarted = any(row["status"] in {"unrun", "not_started_preflight_failed"}
+                        for row in report.get("entries") or [])
+        # A stopped lane ledger halts its lane at its next admission; at run start it holds every lane.
+        # A finished lane may end exactly at its token target, which also sets the stop flag.
+        if retained and unstarted and ledger.get("stop_generation"):
+            self.hold(f"{prefix}ledger_stop:{lane}:{ledger.get('stop_reason')}")
         if ledger.get("unresolved_reservations") or ledger.get("active_reservations"):
             self.hold(f"{prefix}unsettled_lane_reservation:{lane}")
         for row in report.get("entries") or []:
-            if row["status"] == "archived" and (row.get("check_passed") is not True
-                                                 or type(row.get("usage_total_tokens")) is not int):
+            if row["status"] == "archived" and (
+                    attempt_hold_kinds(row.get("check_passed"), row.get("failure_reasons"),
+                                       row.get("usage_settlement"))
+                    or type(row.get("usage_total_tokens")) is not int):
                 self.hold(f"{prefix}failed_or_unknown_attempt:{row['attempt_id']}")
             elif row["status"] not in {"archived", "unrun", "not_started_preflight_failed"}:
                 self.hold(f"{prefix}incomplete_attempt:{row['attempt_id']}")
 
 
 class GlobalSlots:
-    """Bound concurrent attempts across lanes; each slot covers preflight through archive."""
+    """Bound concurrent attempts across lanes; each slot covers preflight through archive.
+
+    The coordinator's dispatcher takes a slot with ``try_acquire`` only when it
+    starts an attempt, and the attempt releases it after its archive.
+    """
 
     def __init__(self, limit: int) -> None:
         if type(limit) is not int or not 1 <= limit <= MAX_GLOBAL_CONCURRENCY:
             raise ValueError(f"global concurrency must be an integer from 1 to {MAX_GLOBAL_CONCURRENCY}")
         self.limit = limit
-        self._semaphore: asyncio.Semaphore | None = None
         self.active = 0
         self.peak = 0
         self.admitted = 0
+        self._waiters: list[asyncio.Future] = []
+
+    @property
+    def free(self) -> bool:
+        return self.active < self.limit
+
+    def try_acquire(self) -> bool:
+        if not self.free:
+            return False
+        self.active += 1
+        self.admitted += 1
+        self.peak = max(self.peak, self.active)
+        return True
+
+    def release(self) -> None:
+        if self.active < 1:
+            raise RuntimeError("released a global slot that was not held")
+        self.active -= 1
+        while self._waiters:
+            waiter = self._waiters.pop(0)
+            if not waiter.done():
+                waiter.set_result(None)
+                break
 
     @asynccontextmanager
     async def slot(self) -> AsyncIterator[None]:
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(self.limit)
-        async with self._semaphore:
-            self.active += 1
-            self.admitted += 1
-            self.peak = max(self.peak, self.active)
-            try:
-                yield
-            finally:
-                self.active -= 1
+        while not self.try_acquire():
+            waiter = asyncio.get_running_loop().create_future()
+            self._waiters.append(waiter)
+            await waiter
+        try:
+            yield
+        finally:
+            self.release()
 
 
 def caps_hash(record: dict) -> str:

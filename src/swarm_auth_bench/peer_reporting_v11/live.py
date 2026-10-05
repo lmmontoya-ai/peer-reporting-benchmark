@@ -2,11 +2,20 @@
 
 Importing this module starts nothing. ``build_*_plan`` and ``prepare_live_root``
 seal a phase offline: per-lane plans, fixture copies, frozen caps, tool and
-catalog bindings, and gate evidence. ``run_live_phase`` refuses to start unless
-the caps are frozen and equal the sealed caps, a sealed user authorization names
-this exact plan, the gates still pass, and the tools still match. It then runs
-one serial lane per model and effort, with at most ``global_max_concurrency``
-attempts at once, under the stop-all-new-admission policy in ``lanes``.
+catalog bindings, the study binding, the consumed-attempt ledger, and gate
+evidence. ``run_live_phase`` refuses to start unless the caps are frozen and
+equal the sealed caps, a sealed user authorization names this exact plan, no
+sealed file changed, the root is not superseded, the consumed-attempt ledger
+still holds, the gates still pass, and the tools still match. It then admits
+work through one global dispatcher over one serial lane per model and effort,
+with at most ``global_max_concurrency`` attempts at once, under the
+stop-all-new-admission policy in ``lanes``.
+
+Consumed attempts (spec 10). Every root built from a study is registered in the
+study's ``live-roots/`` directory. A later root of the same study and phase must
+name every registered root of that phase as a prior root. It excludes every
+assignment with a journaled ``attempt_started`` in any of them, and it marks each
+prior root superseded so that the prior root can never run again.
 
 Live use needs an explicit runtime factory (``reviewed_runtime_factory``) and, by
 default, a verified gVisor Linux guest. Tests inject fakes for both.
@@ -17,6 +26,7 @@ Root layout::
     fixtures/<fixture_id>.json   sealed fixture copies
     lanes/<lane_id>/             sealed lane phase (plan, index, journal, ledger, attempts)
     authorizations/<hash>.json   sealed authorization records used by runs
+    superseded/<hash>.json       sealed marker: a later root of this study and phase replaced this one
     status.json                  coordinator status (informational; evidence is in the lanes)
 """
 
@@ -26,6 +36,7 @@ import asyncio
 import hashlib
 import re
 import time
+from contextlib import ExitStack
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -34,6 +45,7 @@ from ..events import content_hash
 from ..peer_reporting.catalog import reviewed_catalog
 from ..peer_reporting.config import MODELS
 from ..peer_reporting.live import (
+    LOCK_FILE,
     EvidenceError,
     GateError,
     LivePhaseError,
@@ -48,9 +60,12 @@ from ..peer_reporting.score import VALID_CLOSE_KINDS
 from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
 from ..runtime import SUPPORTED_CODEX_VERSION
 from . import PROTOCOL_ID, SPECIFICATION_REVISION, live_runtime
-from .bundle import ProtocolBundle, load_bundle
+from .bundle import ProtocolBundle, load_bundle, require_v11_tools
 from .lanes import (
+    BOUNDED_USAGE,
     PROMPT_CONDITIONS,
+    SETTLED_USAGE,
+    TOOL_REQUEST_CAP,
     AdmissionPolicy,
     GlobalSlots,
     lane_caps,
@@ -68,10 +83,13 @@ from .phase import (
     LIVE_VERSION,
     PLAN_KIND,
     Hooks,
+    LaneSpec,
+    _PhaseState,
     create_lane_phase,
+    implementation_changes,
     implementation_hashes,
     plain_json,
-    run_lane_phase,
+    run_lanes,
     verify_lane_phase,
 )
 
@@ -80,6 +98,12 @@ LIVE_PLAN_FILE = "live-plan.json"
 STATUS_FILE = "status.json"
 COORDINATOR_LOCK = "coordinator.lock"
 STUDY_MANIFEST = "collection-manifest.json"
+STUDY_REGISTRY = "live-roots"
+REGISTRY_KIND = "peer_reporting_v11_live_root_registration"
+SUPERSEDED_DIRECTORY = "superseded"
+SUPERSEDED_KIND = "peer_reporting_v11_root_superseded"
+ATTEMPT_SUFFIX = "-live-1"
+LEDGER_POLICY = "exclude_every_journaled_attempt_start_in_prior_roots_of_the_same_study_and_phase"
 COMPATIBILITY_FIXTURE = {"template_id": "token-issuance", "split": "smoke", "seed": 1100, "level": "L1",
                          "variant": "violation", "near_miss_type": None}
 QUALIFIER_VERSION = "peer-reporting-v11-qualifier-v1"
@@ -115,14 +139,21 @@ ASSIGNMENT_FIELDS = ("assignment_id", "split", "arm", "model", "effort", "prompt
                      "template_id", "level", "variant", "near_miss_type", "fixture_id", "planned_order")
 EXECUTION_POLICY = {
     "attempts_per_assignment": 1, "outcome_based_retries": False, "consumed_attempts_rerun": False,
+    "consumed_attempt_ledger": LEDGER_POLICY,
     "execution_check_failure_policy": "stop_all_new_admission",
-    "unknown_usage_policy": "stop_all_new_admission_until_new_plan",
+    "provisional_hold": "set_when_an_observer_result_shows_a_failed_check_before_any_await",
+    "unknown_usage_policy": "settle_at_max_observed_and_reservation_after_clean_close_else_stop_all_new_admission",
+    "settlement_conflict_policy": "record_failure_and_stop_all_new_admission",
     "unreconciled_start_policy": "stop_all_new_admission",
     "active_on_admission_hold": "finish_within_existing_individual_caps",
     "deadline_or_parent_stop_policy": "request_collection_stop_for_all_active_attempts_then_drain",
-    "lane_scheduling": "one_serial_lane_per_model_and_effort_global_slot_per_attempt",
+    "lane_scheduling": "global_dispatcher_lowest_unstarted_planned_order_whose_lane_is_idle",
+    "freeze": "refuse_to_run_after_any_code_catalog_schema_template_or_protocol_change",
     "every_live_phase_requires_user_authorization": True,
 }
+# Spec 10: the world closed and the runtime shut down cleanly.
+CLEAN_CLOSE_CHECKS = ("queue_reconciled", "runtime_closed", "no_infrastructure_failure",
+                      "orchestrator_evidence_intact")
 
 
 # Runtime construction and preflight
@@ -205,7 +236,10 @@ def _transport_checks(result: dict, *, fixture: dict, entry: dict, preflight: di
                                    and metadata.get("reasoning_effort") == effort
                                    and (preflight or {}).get("reasoning_effort") == effort
                                    and (result.get("preflight") or {}).get("reasoning_effort") == effort),
-        "world_mode_bound": result.get("world_mode") == entry["world_mode"],
+        # The world's own durable record, not the adapter's echo of its argument.
+        "world_mode_bound": (result.get("world_mode") == entry["world_mode"]
+                             and world.get("world_mode") == entry["world_mode"]
+                             and world.get("max_tool_requests") == TOOL_REQUEST_CAP),
         "reviewed_catalog": catalog.get("catalog_sha256") == reviewed_catalog(model)[1]["catalog_sha256"],
         "exact_tool_manifest": (result.get("tool_manifest_hash") == bundle.tool_manifest_hash
                                 and result.get("tool_descriptors_hash") == bundle.tool_descriptors_hash
@@ -233,8 +267,13 @@ PROTOCOL_CHECKS = ("all_six_tools_usable", "operation_ids_exercised", "task_acce
 
 def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, preflight: dict,
                            bundle: ProtocolBundle, orchestrator_failures: list[str],
-                           observer_error: str | None = None) -> dict:
-    """Engineering pass/fail. The requested report is a tool check, not a behavioral observation."""
+                           observer_error: str | None = None, usage_settlement: str | None = None) -> dict:
+    """Engineering pass/fail. The requested report is a tool check, not a behavioral observation.
+
+    Qualification always needs known usage, so a ``bounded_by_reservation``
+    settlement leaves the lane unqualified (``usage_unavailable``). Whether that
+    holds admission is the admission policy's decision, not this check's.
+    """
     base = {"kind": "engineering_qualification", "retry_permitted": False, "behavioral_observation": False,
             "report_propensity_measured": False}
     if not isinstance(result, dict):
@@ -281,18 +320,26 @@ def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, p
 
 def evaluate_transport(result: dict | None, *, fixture: dict, entry: dict, preflight: dict,
                        bundle: ProtocolBundle, orchestrator_failures: list[str],
-                       observer_error: str | None = None) -> dict:
-    """Validity of a behavioral opportunity; semantic outcomes stay pending scoring and review."""
+                       observer_error: str | None = None, usage_settlement: str | None = None) -> dict:
+    """Validity of a behavioral opportunity; semantic outcomes stay pending scoring and review.
+
+    Spec 10: unknown final usage alone does not fail the opportunity when the
+    settlement is ``bounded_by_reservation`` and the world closed and the runtime
+    shut down cleanly. ``checks.usage_known`` stays false; every other check,
+    including the usual close rules, still applies.
+    """
     base = {"kind": "transport_validity", "behavioral_outcome": "pending_scoring_and_review"}
     if not isinstance(result, dict):
         return {**base, "passed": False, "checks": {}, "failure_reasons": [f"observer_failed: {observer_error}"],
-                "termination_kind": "infrastructure_incomplete"}
+                "usage_bounded_by_reservation": False, "termination_kind": "infrastructure_incomplete"}
     checks = _transport_checks(result, fixture=fixture, entry=entry, preflight=preflight, bundle=bundle,
                                failures=orchestrator_failures)
     checks["valid_close"] = result.get("termination_kind") in VALID_CLOSE_KINDS
-    return {**base, "passed": all(checks.values()), "checks": checks,
-            "failure_reasons": [name for name, passed in checks.items() if not passed],
-            "termination_kind": result.get("termination_kind")}
+    bounded = (usage_settlement == BOUNDED_USAGE and not checks["usage_known"]
+               and all(checks[name] for name in CLEAN_CLOSE_CHECKS))
+    reasons = [name for name, passed in checks.items() if not passed and not (bounded and name == "usage_known")]
+    return {**base, "passed": not reasons, "checks": checks, "failure_reasons": reasons,
+            "usage_bounded_by_reservation": bounded, "termination_kind": result.get("termination_kind")}
 
 
 def evaluator(phase: str) -> Callable[..., dict]:
@@ -318,7 +365,7 @@ def _messages_hash(instructions: str, fixture: dict) -> str:
 
 def _entry(row: dict, fixture: dict, instructions: str) -> dict:
     return {
-        "entry_id": row["assignment_id"], "attempt_id": f"{row['assignment_id']}-live-1", "model": row["model"],
+        "entry_id": row["assignment_id"], "attempt_id": row["assignment_id"] + ATTEMPT_SUFFIX, "model": row["model"],
         "reasoning_effort": row["effort"], "world_mode": row["world_mode"],
         "prompt_condition": row["prompt_condition"], "planned_index": None, "planned_order": row["planned_order"],
         "split": row["split"], "arm": row["arm"], "template_id": row["template_id"], "level": row["level"],
@@ -328,10 +375,19 @@ def _entry(row: dict, fixture: dict, instructions: str) -> dict:
     }
 
 
+def _empty_ledger() -> dict:
+    return {"policy": LEDGER_POLICY, "prior_roots": [], "consumed_attempt_ids": [], "excluded_assignment_ids": []}
+
+
 def _assemble(phase: str, revision: str, caps_record: dict, bundle: ProtocolBundle, entries: list[dict],
-              fixtures: dict[str, dict], *, source: dict, gate_evidence: dict) -> tuple[dict, dict, dict]:
+              fixtures: dict[str, dict], *, source: dict, gate_evidence: dict, consumed_attempts: dict | None = None,
+              smoke_assignment_ids: list[str] | None = None) -> tuple[dict, dict, dict]:
     """Group entries into lanes, derive lane caps, and return (top plan, lane plans, fixtures)."""
     validate_identifier(revision, "revision")
+    if consumed_attempts is not None:
+        overlap = sorted({entry["attempt_id"] for entry in entries} & set(consumed_attempts["consumed_attempt_ids"]))
+        if overlap:
+            raise ValueError(f"plan attempt IDs overlap the study's consumed-attempt ledger: {overlap[:5]}")
     bindings = _binding_fields(bundle, [entry["model"] for entry in entries])
     code = implementation_hashes()
     lanes, lane_plans = [], {}
@@ -364,15 +420,18 @@ def _assemble(phase: str, revision: str, caps_record: dict, bundle: ProtocolBund
                      for key, value in sorted(fixtures.items())},
         "maximum_live_calls": len(entries), "calls_by_lane": {lane["lane_id"]: lane["planned_calls"] for lane in lanes},
         "execution_policy": dict(EXECUTION_POLICY), "implementation_hashes": code,
+        "consumed_attempts": deepcopy(consumed_attempts),
         "behavioral_observation": phase != "compatibility", "count_in_collection_denominator": phase == "collection",
     }
+    if phase == "collection":
+        top["smoke_assignment_ids"] = sorted(smoke_assignment_ids or [])
     return plain_json(top), lane_plans, plain_json(fixtures)
 
 
 def build_compatibility_plan(caps_record: dict, *, revision: str, bundle: ProtocolBundle | None = None
                              ) -> tuple[dict, dict, dict]:
     """One engineering tool-exercise call per model and effort (six lanes). Nothing is written or called."""
-    bundle = bundle or load_bundle()
+    bundle = require_v11_tools(bundle or load_bundle())
     caps_record = validate_caps_record(caps_record, require_frozen=False)
     spec = COMPATIBILITY_FIXTURE
     template = bundle.load_template(spec["template_id"])
@@ -448,21 +507,51 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
 
 
 def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict], caps_record: dict, *,
-                          revision: str, source: dict, gate_evidence: dict,
-                          bundle: ProtocolBundle | None = None) -> tuple[dict, dict, dict]:
+                          revision: str, source: dict, gate_evidence: dict, bundle: ProtocolBundle | None = None,
+                          consumed_attempts: dict | None = None, smoke_assignment_ids: list[str] | None = None
+                          ) -> tuple[dict, dict, dict]:
     """Seal calibration, smoke, or collection rows into lanes. Nothing is written or called."""
-    bundle = bundle or load_bundle()
+    bundle = require_v11_tools(bundle or load_bundle())
     caps_record = validate_caps_record(caps_record, require_frozen=False)
     entries = validate_assignment_rows(phase, rows, fixtures, caps_record, bundle)
     used = {entry["fixture_id"]: fixtures[entry["fixture_id"]] for entry in entries}
     return _assemble(phase, revision, caps_record, bundle, entries, used, source=source,
-                     gate_evidence=gate_evidence)
+                     gate_evidence=gate_evidence, consumed_attempts=consumed_attempts or _empty_ledger(),
+                     smoke_assignment_ids=smoke_assignment_ids)
+
+
+def read_study_manifest(study_directory: Path) -> dict:
+    try:
+        return read_sealed(Path(study_directory) / STUDY_MANIFEST)
+    except (OSError, ValueError) as error:
+        raise EvidenceError(f"sealed study manifest missing or corrupt: {error}") from error
+
+
+def check_study_binding(manifest: dict, caps_record: dict, bundle: ProtocolBundle) -> None:
+    """Spec 10: a plan must match its study's caps hash, tool manifest hash, and protocol ID."""
+    differences = [name for name, expected in (("protocol_id", PROTOCOL_ID), ("caps_hash", content_hash(caps_record)),
+                                               ("tool_manifest_hash", bundle.tool_manifest_hash))
+                   if manifest.get(name) != expected]
+    if differences:
+        raise ValueError(f"the study manifest's {differences} differ from the protocol, the supplied caps, or the "
+                         "current tools; no plan was built")
+
+
+def verify_sealed_study(study_directory: Path, caps_record: dict) -> dict:
+    """Run the full study verification (rebuild and fixture verifier) through its public signature."""
+    from . import collection, config, incidents
+
+    report = collection.verify_study(Path(study_directory), protocol=config.load_protocol(),
+                                     templates=incidents.load_all_templates(), caps_record=caps_record)
+    if report.get("valid") is not True:
+        raise EvidenceError(f"study verification failed: {list(report.get('errors') or [])[:10]}")
+    return report
 
 
 def load_study(study_directory: Path, phase: str) -> tuple[list[dict], dict[str, dict], dict]:
     """Read one phase's rows and fixtures from a sealed v1.1 study manifest (P1 manifest shape)."""
     directory = Path(study_directory)
-    manifest = read_sealed(directory / STUDY_MANIFEST)
+    manifest = read_study_manifest(directory)
     rows = [deepcopy(row) for row in manifest["assignments"] if row.get("split") == phase]
     fixtures = {}
     for row in rows:
@@ -475,25 +564,205 @@ def load_study(study_directory: Path, phase: str) -> tuple[list[dict], dict[str,
                             "protocol_id": manifest.get("protocol_id")}
 
 
+# Consumed-attempt ledger
+
+
+def registered_roots(study_directory: Path) -> list[dict]:
+    """Every live root registered in a study, any phase. Registrations are sealed and never removed."""
+    registry = Path(study_directory) / STUDY_REGISTRY
+    if not registry.is_dir():
+        return []
+    entries = []
+    for path in sorted(registry.glob("*.json")):
+        try:
+            record = read_sealed(path)
+        except (OSError, ValueError) as error:
+            raise EvidenceError(f"study root registration {path.name} is corrupt: {error}") from error
+        if record.get("kind") != REGISTRY_KIND or path.stem != record.get("plan_hash"):
+            raise EvidenceError(f"study root registration {path.name} is not a v1.1 registration")
+        entries.append(record)
+    return entries
+
+
+def superseded_by(directory: Path, plan: dict) -> list[str]:
+    """Plan hashes of later roots that replaced this root; a superseded root never runs again."""
+    markers = Path(directory) / SUPERSEDED_DIRECTORY
+    if not markers.is_dir():
+        return []
+    hashes = []
+    for path in sorted(markers.glob("*.json")):
+        try:
+            record = read_sealed(path)
+        except (OSError, ValueError) as error:
+            raise EvidenceError(f"supersession marker {path.name} is corrupt: {error}") from error
+        if (record.get("kind") != SUPERSEDED_KIND or record.get("superseded_plan_hash") != plan["seal_hash"]
+                or path.stem != record.get("superseding_plan_hash")):
+            raise EvidenceError(f"supersession marker {path.name} does not name this root")
+        hashes.append(record["superseding_plan_hash"])
+    return hashes
+
+
+def consumed_attempts_in_root(directory: Path, *, bundle: ProtocolBundle | None = None) -> tuple[dict, set[str]]:
+    """A root's plan and every attempt with a journaled ``attempt_started`` in any of its lanes.
+
+    Each lane's journal hash chain, index checkpoint, and budget history are
+    checked, so a truncated journal cannot hide a start.
+    """
+    directory = Path(directory)
+    plan = read_live_plan(directory)
+    consumed: set[str] = set()
+    for lane in plan["lanes"]:
+        state = _PhaseState(safe_child(directory, lane["path"]), bundle=bundle)
+        try:
+            if state.plan_hash != lane["plan_hash"]:
+                raise EvidenceError(f"lane {lane['lane_id']} differs from the sealed live plan")
+            consumed |= {record["data"]["attempt_id"] for record in state.journal.of_kind("attempt_started")}
+        finally:
+            state.journal.close()
+    return plan, consumed
+
+
+def prior_root_ledger(prior_roots: list[Path] | tuple, *, phase: str, source: dict, study_directory: Path,
+                      bundle: ProtocolBundle | None = None) -> dict:
+    """The consumed-attempt ledger for a new root: every registered root of this study and phase must be named."""
+    records, consumed_all, seen = [], set(), set()
+    for root in prior_roots:
+        plan, consumed = consumed_attempts_in_root(root, bundle=bundle)
+        if plan["seal_hash"] in seen:
+            raise ValueError(f"prior root {root} is listed twice")
+        if plan["phase"] != phase or plan.get("source") != source:
+            raise ValueError(f"prior root {root} belongs to another phase or study")
+        seen.add(plan["seal_hash"])
+        records.append({"plan_hash": plan["seal_hash"], "revision": plan["revision"],
+                        "consumed_attempt_ids": sorted(consumed)})
+        consumed_all |= consumed
+    registered = {entry["plan_hash"] for entry in registered_roots(study_directory) if entry.get("phase") == phase}
+    if registered != seen:
+        raise ValueError(f"name every {phase} root registered in this study as a prior root; missing "
+                         f"{sorted(registered - seen)}, unregistered {sorted(seen - registered)}")
+    return {"policy": LEDGER_POLICY, "prior_roots": sorted(records, key=lambda record: record["plan_hash"]),
+            "consumed_attempt_ids": sorted(consumed_all), "excluded_assignment_ids": []}
+
+
+def _planned_attempt_ids(directory: Path, plan: dict) -> set[str]:
+    planned = set()
+    for lane in plan["lanes"]:
+        lane_plan = read_sealed(safe_child(Path(directory), f"{lane['path']}/phase-plan.json"))
+        if lane_plan["seal_hash"] != lane["plan_hash"]:
+            raise EvidenceError(f"lane {lane['lane_id']} differs from the sealed live plan")
+        planned |= {entry["attempt_id"] for entry in lane_plan["planned_order"]}
+    return planned
+
+
+def verify_consumed_ledger(directory: Path, plan: dict, prior_roots: list[Path] | tuple, *,
+                           bundle: ProtocolBundle | None = None) -> dict:
+    """Recheck a root's sealed consumed-attempt ledger against its prior roots (run, verify, export).
+
+    The supplied prior roots must be exactly the sealed ones. Each must still
+    show exactly its sealed starts and carry this root's supersession marker. No
+    planned attempt may appear among the consumed attempts.
+    """
+    ledger = plan.get("consumed_attempts")
+    if ledger is None:
+        if prior_roots:
+            raise EvidenceError("compatibility roots have no consumed-attempt ledger or prior roots")
+        return {"checked": True, "applicable": False}
+    sealed = {record["plan_hash"]: record for record in ledger["prior_roots"]}
+    supplied: set[str] = set()
+    consumed_all: set[str] = set()
+    for root in prior_roots:
+        prior_plan, consumed = consumed_attempts_in_root(root, bundle=bundle)
+        identity = prior_plan["seal_hash"]
+        if identity not in sealed or identity in supplied:
+            raise EvidenceError(f"{root} is not a prior root sealed in this plan, or it is listed twice")
+        if sorted(consumed) != sealed[identity]["consumed_attempt_ids"]:
+            raise EvidenceError(f"prior root {root} started attempts after this plan was sealed")
+        if plan["seal_hash"] not in superseded_by(root, prior_plan):
+            raise EvidenceError(f"prior root {root} lacks the supersession marker for this plan")
+        supplied.add(identity)
+        consumed_all |= consumed
+    if supplied != set(sealed):
+        raise EvidenceError(f"supply every prior root sealed in this plan; missing {sorted(set(sealed) - supplied)}")
+    overlap = sorted(_planned_attempt_ids(directory, plan) & (consumed_all | set(ledger["consumed_attempt_ids"])))
+    if overlap:
+        raise EvidenceError(f"planned attempts overlap the consumed-attempt ledger: {overlap[:5]}")
+    return {"checked": True, "applicable": True, "prior_roots": len(sealed), "consumed_attempts": len(consumed_all),
+            "excluded_assignments": len(ledger["excluded_assignment_ids"]), "overlap": []}
+
+
 # Sealed live roots
 
 
-def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict]) -> dict:
-    """Write a fresh sealed root. The top plan is written last, so it marks a complete root."""
+def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_directory: Path | None = None,
+                      prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None) -> dict:
+    """Write a fresh sealed root. The top plan is written last, so it marks a complete root.
+
+    A behavioral root is registered in its study. Under the study registry lock
+    and each prior root's coordinator and lane locks, the prior roots must still
+    show exactly the sealed consumed attempts. Each prior root then receives a
+    supersession marker, so it never runs again.
+    """
     top, lane_plans, fixtures = plan
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=False)
-    (directory / "fixtures").mkdir()
-    for fixture_id, fixture in fixtures.items():
-        atomic_json(safe_child(directory, f"fixtures/{fixture_id}.json"), seal(fixture))
-    for lane in top["lanes"]:
-        if create_lane_phase(safe_child(directory, lane["path"]), lane_plans[lane["lane_id"]]) != lane["plan_hash"]:
-            raise EvidenceError(f"lane {lane['lane_id']} sealed under another hash")
-    sealed = seal(top)
-    atomic_json(directory / LIVE_PLAN_FILE, sealed)
-    return {"directory": str(directory), "phase": top["phase"], "plan_hash": sealed["seal_hash"],
+    ledger = top.get("consumed_attempts")
+    with ExitStack() as stack:
+        supplied: dict[str, Path] = {}
+        if ledger is None:
+            if prior_roots or study_directory is not None:
+                raise ValueError("compatibility roots have no study registration or prior roots")
+        else:
+            if study_directory is None:
+                raise ValueError("a behavioral root must be registered in its study directory")
+            study_directory = Path(study_directory)
+            if read_study_manifest(study_directory)["seal_hash"] != top["source"]["study_manifest_hash"]:
+                raise EvidenceError("the study directory differs from the plan's sealed study manifest")
+            (study_directory / STUDY_REGISTRY).mkdir(exist_ok=True)
+            stack.enter_context(_exclusive(study_directory / STUDY_REGISTRY / "registry.lock"))
+            sealed = {record["plan_hash"]: record for record in ledger["prior_roots"]}
+            for root in prior_roots:
+                root = Path(root)
+                prior_plan = read_live_plan(root)
+                stack.enter_context(_exclusive(root / COORDINATOR_LOCK))  # a running prior root refuses
+                for lane in prior_plan["lanes"]:
+                    stack.enter_context(_exclusive(safe_child(root, lane["path"]) / LOCK_FILE))
+                prior_plan, consumed = consumed_attempts_in_root(root, bundle=bundle)
+                identity = prior_plan["seal_hash"]
+                if identity not in sealed or identity in supplied:
+                    raise ValueError(f"{root} is not a prior root sealed in this plan, or it is listed twice")
+                if sorted(consumed) != sealed[identity]["consumed_attempt_ids"]:
+                    raise EvidenceError(f"prior root {root} started attempts after this plan was built; rebuild it")
+                supplied[identity] = root
+            if set(supplied) != set(sealed):
+                raise ValueError("supply every prior root sealed in this plan; missing "
+                                 f"{sorted(set(sealed) - set(supplied))}")
+            registered = {entry["plan_hash"] for entry in registered_roots(study_directory)
+                          if entry.get("phase") == top["phase"]}
+            if registered != set(sealed):
+                raise LivePhaseError("the study registered another root of this phase after this plan was built")
+        directory.mkdir(parents=True, exist_ok=False)
+        (directory / "fixtures").mkdir()
+        for fixture_id, fixture in fixtures.items():
+            atomic_json(safe_child(directory, f"fixtures/{fixture_id}.json"), seal(fixture))
+        for lane in top["lanes"]:
+            if create_lane_phase(safe_child(directory, lane["path"]), lane_plans[lane["lane_id"]]) != lane["plan_hash"]:
+                raise EvidenceError(f"lane {lane['lane_id']} sealed under another hash")
+        sealed_top = seal(top)
+        if ledger is not None:
+            for identity, root in supplied.items():
+                (root / SUPERSEDED_DIRECTORY).mkdir(exist_ok=True)
+                atomic_json(safe_child(root, f"{SUPERSEDED_DIRECTORY}/{sealed_top['seal_hash']}.json"), seal({
+                    "kind": SUPERSEDED_KIND, "superseded_plan_hash": identity,
+                    "superseding_plan_hash": sealed_top["seal_hash"], "phase": top["phase"],
+                    "superseding_revision": top["revision"]}))
+            atomic_json(safe_child(study_directory, f"{STUDY_REGISTRY}/{sealed_top['seal_hash']}.json"), seal({
+                "kind": REGISTRY_KIND, "plan_hash": sealed_top["seal_hash"], "phase": top["phase"],
+                "revision": top["revision"], "study_manifest_hash": top["source"]["study_manifest_hash"],
+                "prior_plan_hashes": sorted(supplied)}))
+        atomic_json(directory / LIVE_PLAN_FILE, sealed_top)
+    return {"directory": str(directory), "phase": top["phase"], "plan_hash": sealed_top["seal_hash"],
             "caps_hash": top["caps_hash"], "maximum_live_calls": top["maximum_live_calls"],
-            "calls_by_lane": top["calls_by_lane"], "live_model_calls": 0}
+            "calls_by_lane": top["calls_by_lane"], "live_model_calls": 0, "prior_roots": len(supplied),
+            "excluded_assignments": len((ledger or {}).get("excluded_assignment_ids", []))}
 
 
 def read_live_plan(directory: Path) -> dict:
@@ -525,8 +794,28 @@ def lane_inputs(directory: Path, plan: dict) -> Callable[[dict], tuple[dict, str
     return inputs
 
 
-def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None) -> dict:
-    """Verify a sealed root and every lane's retained evidence without writing anything."""
+def _verify_authorizations(directory: Path, plan: dict, reports: dict) -> list[str]:
+    """Every authorization hash journaled by a run or a start names a retained record for this plan."""
+    hashes = sorted({value for report in reports.values() for value in report["authorization_hashes"]})
+    for value in hashes:
+        try:
+            record = read_sealed(safe_child(directory, f"authorizations/{value}.json"))
+        except (OSError, ValueError) as error:
+            raise EvidenceError(f"journaled authorization {value} is not retained: {error}") from error
+        if record["seal_hash"] != value or record.get("live_plan_hash") != plan["seal_hash"]:
+            raise EvidenceError(f"journaled authorization {value} does not name this plan")
+    return hashes
+
+
+def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
+                     prior_roots: list[Path] | tuple | None = None) -> dict:
+    """Verify a sealed root and every lane's retained evidence without writing anything.
+
+    With ``prior_roots`` (a list, possibly empty) the consumed-attempt ledger is
+    rechecked against the prior roots; with ``None`` only the plan's own entries
+    are checked against the sealed ledger. Changed sealed files are reported in
+    ``implementation_changes``; supersession markers in ``superseded_by``.
+    """
     bundle = bundle or load_bundle()
     directory = Path(directory)
     plan = read_live_plan(directory)
@@ -560,6 +849,14 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None) -
             counts[status] = counts.get(status, 0) + count
     if sum(lane["planned_calls"] for lane in plan["lanes"]) != plan["maximum_live_calls"]:
         raise EvidenceError("lane call counts differ from the sealed maximum")
+    ledger = plan.get("consumed_attempts")
+    planned = {attempt for report in reports.values() for attempt in report["planned_order"]}
+    if ledger is not None and planned & set(ledger["consumed_attempt_ids"]):
+        raise EvidenceError("planned attempts overlap the sealed consumed-attempt ledger")
+    if prior_roots is None:
+        ledger_report = {"checked": False, "applicable": ledger is not None}
+    else:
+        ledger_report = verify_consumed_ledger(directory, plan, prior_roots, bundle=bundle)
     return {
         "phase": plan["phase"], "plan_hash": plan["seal_hash"], "caps_hash": plan["caps_hash"],
         "maximum_live_calls": plan["maximum_live_calls"],
@@ -568,6 +865,10 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None) -
         "qualified_lanes": sorted(lane for lane, report in reports.items() if report["qualified"])
         if plan["phase"] == "compatibility" else None,
         "behavioral_observation": plan["behavioral_observation"],
+        "authorization_hashes": _verify_authorizations(directory, plan, reports),
+        "implementation_changes": implementation_changes(plan["implementation_hashes"]),
+        "superseded_by": superseded_by(directory, plan),
+        "consumed_attempt_ledger": ledger_report,
     }
 
 
@@ -614,7 +915,12 @@ def compatibility_evidence(directories: list[Path] | tuple, *, bundle: ProtocolB
     return evidence, notes
 
 
-def smoke_evidence(directory: Path, *, bundle: ProtocolBundle, source: dict) -> tuple[dict | None, list[str]]:
+def smoke_evidence(directory: Path, *, bundle: ProtocolBundle, source: dict,
+                   smoke_assignment_ids: list[str] | tuple = ()) -> tuple[dict | None, list[str]]:
+    """Spec 10: one smoke root whose entries equal the study's smoke rows, every attempt archived and passed.
+
+    An attempt settled ``bounded_by_reservation`` after a clean close counts as valid.
+    """
     try:
         report = verify_live_root(directory, bundle=bundle)
         plan = read_live_plan(directory)
@@ -623,8 +929,10 @@ def smoke_evidence(directory: Path, *, bundle: ProtocolBundle, source: dict) -> 
     if plan["phase"] != "smoke" or plan["source"] != source:
         return None, ["smoke: smoke evidence belongs to another phase or study"]
     rows = [row for lane in report["lanes"].values() for row in lane["entries"]]
+    if sorted(row["entry_id"] for row in rows) != sorted(smoke_assignment_ids):
+        return None, ["smoke: the smoke root's entries differ from the study's smoke rows"]
     valid = [row for row in rows if row["status"] == "archived" and row["check_passed"] is True
-             and type(row["usage_total_tokens"]) is int]
+             and row["usage_settlement"] in SETTLED_USAGE and type(row["usage_total_tokens"]) is int]
     if report["unreconciled_starts"] or len(valid) != plan["maximum_live_calls"]:
         return None, [f"smoke: {len(valid)} of {plan['maximum_live_calls']} smoke records are valid"]
     hashes = {}
@@ -638,7 +946,7 @@ def smoke_evidence(directory: Path, *, bundle: ProtocolBundle, source: dict) -> 
 
 def check_phase_gates(phase: str, lanes: list[str], *, bundle: ProtocolBundle, source: dict,
                       compatibility_directories: list[Path] | tuple = (),
-                      smoke_directory: Path | None = None) -> dict:
+                      smoke_directory: Path | None = None, smoke_assignment_ids: list[str] | tuple = ()) -> dict:
     """Evaluate a phase's prerequisites from retained evidence. Nothing is written."""
     validate_phase(phase)
     if phase == "compatibility":
@@ -654,7 +962,8 @@ def check_phase_gates(phase: str, lanes: list[str], *, bundle: ProtocolBundle, s
             failures.append("smoke: collection requires retained smoke evidence")
             evidence["smoke"] = None
         else:
-            smoke, smoke_failures = smoke_evidence(smoke_directory, bundle=bundle, source=source)
+            smoke, smoke_failures = smoke_evidence(smoke_directory, bundle=bundle, source=source,
+                                                   smoke_assignment_ids=smoke_assignment_ids)
             failures += smoke_failures
             evidence["smoke"] = smoke
     return {"passed": not failures, "failures": failures, "evidence": evidence}
@@ -662,21 +971,50 @@ def check_phase_gates(phase: str, lanes: list[str], *, bundle: ProtocolBundle, s
 
 def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_directory: Path | None = None,
                      compatibility_directories: list[Path] | tuple = (), smoke_directory: Path | None = None,
-                     bundle: ProtocolBundle | None = None) -> tuple[dict, dict, dict]:
-    """Build a phase plan; behavioral phases bind their study rows and their passing gate evidence."""
-    bundle = bundle or load_bundle()
+                     prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None,
+                     study_verifier: Callable[[Path, dict], Any] | None = None) -> tuple[dict, dict, dict]:
+    """Build a phase plan; behavioral phases bind their study, its consumed-attempt ledger, and their gates.
+
+    A behavioral plan requires the study manifest's caps hash, tool manifest hash,
+    and protocol ID to equal the supplied caps, the current tools, and the
+    protocol, and it runs the full study verification. ``prior_roots`` must name
+    every root of this study and phase registered so far; every assignment with a
+    journaled start in any of them is excluded. ``study_verifier`` replaces the
+    full verification only in tests with fake studies. Nothing is written.
+    """
+    bundle = require_v11_tools(bundle or load_bundle())
     if validate_phase(phase) == "compatibility":
+        if prior_roots:
+            raise ValueError("compatibility roots have no consumed-attempt ledger or prior roots")
         return build_compatibility_plan(caps_record, revision=revision, bundle=bundle)
     if study_directory is None:
         raise ValueError(f"{phase} requires a sealed study directory")
+    caps_record = validate_caps_record(caps_record, require_frozen=False)
+    manifest = read_study_manifest(study_directory)
+    check_study_binding(manifest, caps_record, bundle)
+    report = (study_verifier or verify_sealed_study)(Path(study_directory), caps_record)
+    if type(report) is not dict or report.get("valid") is not True:
+        raise EvidenceError(f"study verification failed: {(report or {}).get('errors')}")
     rows, fixtures, source = load_study(study_directory, phase)
+    ledger = prior_root_ledger(prior_roots, phase=phase, source=source, study_directory=study_directory,
+                               bundle=bundle)
+    consumed = set(ledger["consumed_attempt_ids"])
+    ledger["excluded_assignment_ids"] = sorted(row["assignment_id"] for row in rows
+                                               if row["assignment_id"] + ATTEMPT_SUFFIX in consumed)
+    if ledger["excluded_assignment_ids"] and len(ledger["excluded_assignment_ids"]) == len(rows):
+        raise ValueError(f"every {phase} assignment of this study is already consumed")
+    rows = [row for row in rows if row["assignment_id"] + ATTEMPT_SUFFIX not in consumed]
+    smoke_ids = sorted(row["assignment_id"] for row in manifest["assignments"]
+                       if row.get("split") == "smoke") if phase == "collection" else None
     needed = sorted({lane_id(row["model"], row["effort"]) for row in rows})
     gates = check_phase_gates(phase, needed, bundle=bundle, source=source,
-                              compatibility_directories=compatibility_directories, smoke_directory=smoke_directory)
+                              compatibility_directories=compatibility_directories, smoke_directory=smoke_directory,
+                              smoke_assignment_ids=smoke_ids or ())
     if not gates["passed"]:
         raise GateError(gates["failures"])
     return build_assignment_plan(phase, rows, fixtures, caps_record, revision=revision, source=source,
-                                 gate_evidence=gates["evidence"], bundle=bundle)
+                                 gate_evidence=gates["evidence"], bundle=bundle, consumed_attempts=ledger,
+                                 smoke_assignment_ids=smoke_ids)
 
 
 # Coordinator
@@ -702,17 +1040,21 @@ async def run_live_phase(
     observer: Callable[..., Awaitable[dict]] | None = None, clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Any] = asyncio.sleep, ledger_clock: Callable[[], float] = time.time,
     wall_clock: Callable[[], float] = time.time, poll_seconds: float = 1.0, stop_file: Path | None = None,
-    bundle: ProtocolBundle | None = None,
+    prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None,
 ) -> dict:
     """Run, or resume, every lane of a sealed phase under one user authorization.
 
-    Every refusal before the lanes start makes no model call. Once started, any
-    failed execution check or unknown final usage holds all new admission; active
-    attempts finish within their caps. The status is ``held`` or ``complete``.
+    Every refusal before the lanes start makes no model call: changed sealed
+    files, a superseded root, a broken consumed-attempt ledger (pass the prior
+    roots sealed in the plan), failed gates, or changed tools. Once started, one
+    global dispatcher admits work in planned order. Any failed execution check or
+    unsettled usage holds all new admission; active attempts finish within their
+    caps. Both ``root/STOP`` and ``stop_file`` stop the run. The status is
+    ``held`` or ``complete``.
     """
     if not callable(runtime_factory):
         raise ValueError("an explicit runtime factory is required; use reviewed_runtime_factory for live calls")
-    bundle = bundle or load_bundle()
+    bundle = require_v11_tools(bundle or load_bundle())
     directory = Path(directory)
     plan = read_live_plan(directory)
     record = validate_caps_record(caps_record, require_frozen=True)
@@ -720,12 +1062,19 @@ async def run_live_phase(
         raise LivePhaseError("supplied caps differ from the sealed live plan; no model session was created")
     approval = validate_authorization(authorization, plan)
     with _exclusive(directory / COORDINATOR_LOCK):
-        verification = verify_live_root(directory, bundle=bundle)
+        changes = implementation_changes(plan["implementation_hashes"])
+        if changes:
+            raise LivePhaseError(f"code, catalog, schema, template, or protocol files changed after sealing: "
+                                 f"{changes}; a change requires a new plan revision")
+        verification = verify_live_root(directory, bundle=bundle, prior_roots=prior_roots)
+        if verification["superseded_by"]:
+            raise LivePhaseError(f"this root was superseded by {verification['superseded_by']} and never runs again")
         _require_current_bindings(plan, bundle)
         lanes_needed = [lane["lane_id"] for lane in plan["lanes"]]
         gates = check_phase_gates(plan["phase"], lanes_needed, bundle=bundle, source=plan["source"],
                                   compatibility_directories=compatibility_directories,
-                                  smoke_directory=smoke_directory)
+                                  smoke_directory=smoke_directory,
+                                  smoke_assignment_ids=plan.get("smoke_assignment_ids") or ())
         if not gates["passed"]:
             raise GateError(gates["failures"])
         if gates["evidence"] != plan["gate_evidence"]:
@@ -741,10 +1090,10 @@ async def run_live_phase(
                           admitted_slots=slots.admitted)
             atomic_json(directory / STATUS_FILE, status)
 
+        stop_files = [directory / "STOP"] + ([Path(stop_file)] if stop_file is not None else [])
         policy = AdmissionPolicy(admission_cutoff=approval["admission_cutoff"],
                                  forced_stop_deadline=approval["forced_stop_deadline"], wall_clock=wall_clock,
-                                 stop_file=Path(stop_file) if stop_file is not None else directory / "STOP",
-                                 on_change=save_status)
+                                 stop_files=stop_files, on_change=save_status)
         for lane, report in verification["lanes"].items():
             policy.accept_lane_report(lane, report, retained=True)
         save_status()
@@ -772,23 +1121,10 @@ async def run_live_phase(
                       environment_check=environment_check or verify_live_environment,
                       observer=observer or live_runtime.run_live_observer, clock=clock, sleep=sleep,
                       ledger_clock=ledger_clock, poll_seconds=poll_seconds, admission_check=policy.admission_check,
-                      slot=slots.slot, external_stop=external_stop, on_archived=on_archived)
-
-        async def lane_task(lane: dict) -> dict:
-            try:
-                report = await run_lane_phase(
-                    safe_child(directory, lane["path"]), plan_hash=lane["plan_hash"], hooks=hooks, bundle=bundle,
-                    inputs=inputs, evaluate=evaluator(plan["phase"]),
-                    binary_check=binary_check(lane["model"], lane["reasoning_effort"]))
-            except Exception as error:
-                policy.hold(f"lane_error:{lane['lane_id']}:{type(error).__name__}:{str(error)[:500]}")
-                return {"lane_id": lane["lane_id"], "error": f"{type(error).__name__}: {str(error)[:500]}"}
-            except BaseException as error:
-                # Hold before any waiting lane can take the released slot.
-                policy.hold(f"lane_interrupted:{lane['lane_id']}:{type(error).__name__}")
-                raise
-            policy.accept_lane_report(lane["lane_id"], report)
-            return report
+                      hold=policy.hold, external_stop=external_stop, on_archived=on_archived,
+                      authorization_hash=authorization_hash)
+        specs = [LaneSpec(lane["lane_id"], safe_child(directory, lane["path"]), lane["plan_hash"],
+                          binary_check(lane["model"], lane["reasoning_effort"])) for lane in plan["lanes"]]
 
         async def monitor() -> None:
             while not external_stop.is_set():
@@ -799,28 +1135,32 @@ async def run_live_phase(
                 await sleep(poll_seconds)
 
         watcher = asyncio.create_task(monitor())
-        tasks = [asyncio.create_task(lane_task(lane)) for lane in plan["lanes"]]
         backstop = max(0.0, approval["forced_stop_deadline"] - wall_clock()) + max(
             lane_caps(plan["caps"], plan["phase"], 1)["drain_grace_seconds"], 1) + 120
+        outcome: dict = {"lanes": {}, "realized_order": []}
+        error_text = None
         try:
-            results = await asyncio.wait_for(asyncio.gather(*tasks), backstop)
+            outcome = await asyncio.wait_for(run_lanes(specs, hooks=hooks, bundle=bundle, slots=slots, inputs=inputs,
+                                                       evaluate=evaluator(plan["phase"])), backstop)
         except asyncio.TimeoutError:
+            error_text = "cancelled at the forced-stop backstop"
             policy.hold("forced_stop_backstop_cancelled_lanes")
-            results = [{"lane_id": lane["lane_id"], "error": "cancelled at the forced-stop backstop"}
-                       for lane in plan["lanes"]]
+        except Exception as error:
+            error_text = f"{type(error).__name__}: {str(error)[:500]}"
+            policy.hold(f"coordinator_error:{type(error).__name__}:{str(error)[:500]}")
         finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
+        for lane, report in outcome["lanes"].items():
+            policy.accept_lane_report(lane, report)
         final = verify_live_root(directory, bundle=bundle)
         status.update(
             status="held" if policy.holds else "complete",
-            lanes={lane["lane_id"]: {"halted": result.get("halted"), "error": result.get("error"),
-                                     "live_model_call_starts": result.get("live_model_call_starts")}
-                   for lane, result in zip(plan["lanes"], results)},
+            lanes={lane["lane_id"]: {key: (outcome["lanes"].get(lane["lane_id"]) or {}).get(key)
+                                     for key in ("halted", "live_model_call_starts")}
+                   | {"error": (outcome["lanes"].get(lane["lane_id"]) or {}).get("error") or error_text}
+                   for lane in plan["lanes"]},
+            realized_order=outcome["realized_order"],
             live_model_call_starts=final["live_model_call_starts"], maximum_live_calls=plan["maximum_live_calls"],
             status_counts=final["status_counts"], qualified_lanes=final["qualified_lanes"],
             semantic_outcomes="pending_scoring_and_review" if plan["behavioral_observation"] else None)

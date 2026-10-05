@@ -4,6 +4,10 @@ Offline commands (validate, build, verify, replay, export-review) never start a
 model session. Live commands (compatibility, calibration, smoke, collection)
 refuse to run without frozen caps equal to the sealed plan's caps and a sealed
 user execution authorization that names the exact plan.
+
+A behavioral root built from a study that already has roots of the same phase
+names each of them with ``--prior-root``. ``build`` excludes their consumed
+assignments; ``verify``, ``export-review``, and the live commands recheck them.
 """
 
 from __future__ import annotations
@@ -28,6 +32,11 @@ def _scorer(enabled: bool):
     return score_trial, summarize
 
 
+def _prior_roots(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--prior-root", dest="prior_roots", type=Path, action="append", default=[],
+                         help="every earlier root of the same study and phase (repeat for each)")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m swarm_auth_bench.peer_reporting_v11", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -43,8 +52,10 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--study", type=Path, help="sealed v1.1 study directory (calibration, smoke, collection)")
     build.add_argument("--compatibility", type=Path, action="append", default=[])
     build.add_argument("--smoke", type=Path)
+    _prior_roots(build)
     verify = commands.add_parser("verify", help="verify a sealed live root and its retained lane evidence")
     verify.add_argument("root", type=Path)
+    _prior_roots(verify)
     for name in ("build-study", "verify-study"):
         study = commands.add_parser(name, help="build or verify the sealed study offline; no model call")
         study.add_argument("directory", type=Path)
@@ -63,6 +74,7 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("root", type=Path)
     export.add_argument("--output", type=Path, required=True)
     export.add_argument("--no-score", action="store_true")
+    _prior_roots(export)
     for name in LIVE_COMMANDS:
         command = commands.add_parser(name, help=f"run the sealed {name} phase after explicit authorization")
         command.add_argument("root", type=Path, help="sealed live root built for this phase")
@@ -71,7 +83,8 @@ def _parser() -> argparse.ArgumentParser:
                              help="sealed user execution authorization naming this plan")
         command.add_argument("--compatibility", type=Path, action="append", default=[])
         command.add_argument("--smoke", type=Path)
-        command.add_argument("--stop-file", type=Path)
+        command.add_argument("--stop-file", type=Path, help="an extra stop file; root/STOP is always watched")
+        _prior_roots(command)
     return parser
 
 
@@ -105,14 +118,16 @@ def _run(args: argparse.Namespace) -> dict:
     if args.command == "build":
         from .live import build_phase_plan, prepare_live_root
 
+        bundle = load_bundle()
         plan = build_phase_plan(args.phase, read_json(args.caps), revision=args.revision, study_directory=args.study,
                                 compatibility_directories=args.compatibility, smoke_directory=args.smoke,
-                                bundle=load_bundle())
-        return prepare_live_root(args.root, plan)
+                                prior_roots=args.prior_roots, bundle=bundle)
+        study = args.study if args.phase != "compatibility" else None
+        return prepare_live_root(args.root, plan, study_directory=study, prior_roots=args.prior_roots, bundle=bundle)
     if args.command == "verify":
         from .live import verify_live_root
 
-        report = verify_live_root(args.root, bundle=load_bundle())
+        report = verify_live_root(args.root, bundle=load_bundle(), prior_roots=args.prior_roots)
         return {key: value for key, value in report.items() if key != "lanes"} | {
             "lanes": {lane: {key: value for key, value in item.items() if key != "entries"}
                       for lane, item in report["lanes"].items()}}
@@ -129,7 +144,8 @@ def _run(args: argparse.Namespace) -> dict:
         from .live_review import export_live_review
 
         scorer, summarize = _scorer(not args.no_score)
-        return export_live_review(args.root, args.output, bundle=load_bundle(), scorer=scorer, summarize=summarize)
+        return export_live_review(args.root, args.output, prior_roots=args.prior_roots, bundle=load_bundle(),
+                                  scorer=scorer, summarize=summarize)
     from .live import read_live_plan, reviewed_runtime_factory, run_live_phase
 
     plan = read_live_plan(args.root)
@@ -138,7 +154,7 @@ def _run(args: argparse.Namespace) -> dict:
     return asyncio.run(run_live_phase(
         args.root, caps_record=read_json(args.caps), authorization=read_json(args.authorization),
         runtime_factory=reviewed_runtime_factory, compatibility_directories=args.compatibility,
-        smoke_directory=args.smoke, stop_file=args.stop_file, bundle=load_bundle()))
+        smoke_directory=args.smoke, stop_file=args.stop_file, prior_roots=args.prior_roots, bundle=load_bundle()))
 
 
 def main(argv: list[str] | None = None) -> int:

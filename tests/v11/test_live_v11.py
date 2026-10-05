@@ -15,6 +15,7 @@ from swarm_auth_bench.peer_reporting_v11.lanes import lane_id
 from .live_fakes import (
     Harness,
     authorization,
+    build_plan,
     caps_record,
     compat_fixture,
     compat_root,
@@ -122,12 +123,38 @@ async def test_global_concurrency_limit_bounds_active_attempts(tmp_path):
     assert tracker.peak == 2 and status["peak_active_attempts"] == 2
 
 
-async def test_unknown_final_usage_holds_all_new_admission_and_every_later_run(tmp_path):
+async def test_unknown_final_usage_after_a_clean_close_settles_at_the_reservation_and_holds_nothing(tmp_path):
     root, plan = compat_root(tmp_path / "compat", caps=caps_record(global_max_concurrency=1))
     sample = compat_fixture(root, plan)
 
     def script(model, effort):
         return qualifier_steps(sample, usage=None if (model, effort) == ("gpt-6-luna", "xhigh") else 4321)
+
+    harness = Harness(tmp_path / "homes", script)
+    status = await run(root, plan, harness)
+    assert len(harness.created) == 6 and status["status"] == "complete" and status["holds"] == []
+    assert "gpt-6-luna-xhigh" not in status["qualified_lanes"] and len(status["qualified_lanes"]) == 5
+    lane_dir = root / "lanes" / "gpt-6-luna-xhigh"
+    payload = read_sealed(next((lane_dir / "attempts").iterdir()) / "attempt.json")
+    assert payload["orchestrator"]["usage_settlement"] == {
+        "status": "bounded_by_reservation", "actual_tokens": 75000, "observed_tokens": 0, "reservation_tokens": 75000}
+    assert payload["check"]["classification"] == "usage_unavailable" and payload["check"]["failure_reasons"] == [
+        "usage_known"]
+    (settled,) = [record["data"] for record in journal(lane_dir) if record["kind"] == "usage_settled"]
+    assert settled["status"] == "settled" and settled["usage_settlement"] == "bounded_by_reservation"
+    again = Harness(tmp_path / "homes-2", script)
+    status = await run(root, plan, again)
+    assert again.created == [] and status["status"] == "complete" and status["holds"] == []
+
+
+async def test_unknown_final_usage_after_an_unclean_close_holds_all_new_admission_and_every_later_run(tmp_path):
+    root, plan = compat_root(tmp_path / "compat", caps=caps_record(global_max_concurrency=1))
+    sample = compat_fixture(root, plan)
+    native = ("raw", "item/started", {"item": {"id": "native-1", "type": "commandExecution"}})
+
+    def script(model, effort):
+        return [native, *qualifier_steps(sample)] if (model, effort) == ("gpt-6-luna", "xhigh") \
+            else qualifier_steps(sample)
 
     harness = Harness(tmp_path / "homes", script)
     status = await run(root, plan, harness)
@@ -274,11 +301,8 @@ def test_behavioral_phase_requires_compatibility_evidence_for_every_lane(qualifi
     rows, fixtures = study_rows("smoke")
     study = write_study(tmp_path / "study", rows, fixtures)
     with pytest.raises(v11_live.GateError, match="compatibility"):
-        v11_live.build_phase_plan("smoke", caps_record(), revision="smoke-v1", study_directory=study,
-                                  bundle=fake_bundle())
-    plan, lane_plans, _ = v11_live.build_phase_plan("smoke", caps_record(), revision="smoke-v1",
-                                                    study_directory=study, compatibility_directories=[qualified[0]],
-                                                    bundle=fake_bundle())
+        build_plan("smoke", study)
+    plan, lane_plans, _ = build_plan("smoke", study, compatibility_directories=[qualified[0]])
     assert sorted(plan["calls_by_lane"].items()) == sorted(
         [(f"{model}-xhigh", 3) for model in ("gpt-6-luna", "gpt-6-sol", "gpt-6-astra")]
         + [(f"{model}-low", 1) for model in ("gpt-6-luna", "gpt-6-sol", "gpt-6-astra")])
@@ -332,23 +356,20 @@ def test_smoke_runs_each_assignment_with_its_effort_world_mode_and_prompt(smoked
 
 async def test_collection_gate_requires_valid_smoke_evidence_from_the_same_study(qualified, smoked, tmp_path):
     with pytest.raises(v11_live.GateError, match="smoke"):
-        v11_live.build_phase_plan("collection", caps_record(), revision="collection-v1",
-                                  study_directory=smoked["study"], compatibility_directories=[qualified[0]],
-                                  bundle=fake_bundle())
-    built = v11_live.build_phase_plan("collection", caps_record(), revision="collection-v1",
-                                      study_directory=smoked["study"], compatibility_directories=[qualified[0]],
-                                      smoke_directory=smoked["root"], bundle=fake_bundle())
+        build_plan("collection", smoked["study"], compatibility_directories=[qualified[0]])
+    built = build_plan("collection", smoked["study"], compatibility_directories=[qualified[0]],
+                       smoke_directory=smoked["root"])
     plan = built[0]
     assert plan["gate_evidence"]["smoke"]["smoke_plan_hash"] == smoked["plan"]["seal_hash"]
     assert len(plan["gate_evidence"]["smoke"]["attempt_hashes"]) == 12 and plan["count_in_collection_denominator"]
+    assert plan["smoke_assignment_ids"] == sorted(row["entry_id"] for lane in v11_live.verify_live_root(
+        smoked["root"], bundle=fake_bundle())["lanes"].values() for row in lane["entries"])
     other_rows, other_fixtures = study_rows("collection", template_id="release-request", seed=1101)
     other = write_study(tmp_path / "other-study", other_rows, other_fixtures)
     with pytest.raises(v11_live.GateError, match="another phase or study"):
-        v11_live.build_phase_plan("collection", caps_record(), revision="collection-v1", study_directory=other,
-                                  compatibility_directories=[qualified[0]], smoke_directory=smoked["root"],
-                                  bundle=fake_bundle())
+        build_plan("collection", other, compatibility_directories=[qualified[0]], smoke_directory=smoked["root"])
     root = tmp_path / "collection"
-    v11_live.prepare_live_root(root, built)
+    v11_live.prepare_live_root(root, built, study_directory=smoked["study"])
     sealed = v11_live.read_live_plan(root)
     harness = Harness(tmp_path / "homes", lambda model, effort: [])
     with pytest.raises(v11_live.GateError, match="smoke"):
