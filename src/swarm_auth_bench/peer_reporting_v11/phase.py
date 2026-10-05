@@ -35,7 +35,10 @@ Differences from P1:
   journaled (``provider_pause_started``, ``provider_pause_ended``), so a resumed or
   restarted run respects an active pause and the 60-minute window count, and the
   third in that window holds all new admission. An entry refused during a pause
-  stays unstarted and is dispatched again after it.
+  stays unstarted and is dispatched again after it. A root of a study also
+  records each pause at study level before sealing its attempt, and restores the
+  study's pauses before any dispatch and again before each admission
+  (``ProviderPause.load`` and ``persist``), so every root of the study respects them.
 
 A lane seals its plan before any model call, reserves budget before the start,
 writes ``attempt_started`` before the authenticated session, consumes each
@@ -750,8 +753,10 @@ class _PhaseRun:
                 self.journal.append("admission_held", entry_id=entry["entry_id"], after_preflight=True, **hold)
                 self._save()
                 return hold
-            # Spec 10 (revision 3): a pause that began during this preflight refuses the start; the entry
-            # stays unstarted, nothing is consumed, and the dispatcher offers it again after the pause.
+            # Spec 10 (revision 3): a pause that began during this preflight, in this root or another root of
+            # the study, refuses the start; the entry stays unstarted, nothing is consumed, and the dispatcher
+            # offers it again after the pause.
+            self.pauses.refresh()
             pause = self.pauses.active()
             if pause is not None:
                 self.journal.append("admission_paused", entry_id=entry["entry_id"], after_preflight=True, **pause)
@@ -1194,10 +1199,15 @@ def _requeue(pending: list[tuple[int, str, dict]], item: tuple[int, str, dict], 
 
 
 def _provider_pause(runs: dict[str, _PhaseRun], pauses: ProviderPause) -> dict | None:
-    """Journal the end of every pause whose time is over, in its attempt's lane; return the pause in force."""
+    """Journal the end of every pause whose time is over, in the lane that journaled it; return the pause in force.
+
+    A pause of another root of the study, or one recorded at study level whose attempt was never archived here,
+    ends without a journal record in this root."""
+    pauses.refresh()
     for event in pauses.expired_unended():
         run = runs.get(event["lane_id"])
-        if run is not None:
+        if run is not None and any(record["attempt_id"] == event["attempt_id"]
+                                   for record in run.state.provider_pauses()[0]):
             run.journal.append("provider_pause_ended", attempt_id=event["attempt_id"], resume_at=event["resume_at"],
                                ended_at=pauses.wall_clock(), window_count=event["window_count"])
         pauses.ended.add(event["attempt_id"])
@@ -1329,11 +1339,13 @@ async def run_lanes(lanes: list[LaneSpec], *, hooks: Hooks, bundle: ProtocolBund
             run.reconcile()
             state.verify_attempts()
             runs[spec.lane_id] = run
-        # Spec 10 (revision 3): restore every journaled pause, so a resumed or restarted run respects an active
-        # pause and the window count; a window that still holds the limit holds from the start.
+        # Spec 10 (revision 3): restore every journaled pause, and every pause recorded at study level by any
+        # root of the study, so a resumed, restarted, or new root respects an active pause and the window count;
+        # a window that still holds the limit holds from the start.
         for run in runs.values():
             records, ended = run.state.provider_pauses()
             pauses.restore(records, ended)
+        pauses.refresh()
         limit = pauses.limit_reached()
         if limit is not None:
             hooks.hold(f"retained_provider_unavailable_limit:{limit['attempt_id']}")

@@ -18,8 +18,13 @@ phase plans, so the P1 module is not edited. The differences are:
 - a turn that ends with an explicit provider capacity error (``serverOverloaded``)
   after packet delivery, before any tool request and with no observer output, and
   that otherwise closes cleanly, terminates as ``provider_unavailable`` instead of
-  an invalid turn result (spec 10, revision 3). Any other error, or an overload
-  after a tool request or output, is an execution failure as before.
+  an invalid turn result (spec 10, revision 3). Eligibility is decided after
+  shutdown and the last event drain, from every reconciled event: an error with
+  another code, or an announced retry, anywhere in the turn removes it. Any other
+  error, or an overload after a tool request or output, is an execution failure;
+- outside that exception, a non-retryable ``error`` notification is an execution
+  failure whatever the final turn status, including an interrupted turn after a
+  stop and a completed one (spec 10, revision 3).
 
 The exact receipt matching, queue, drain, and usage handling are otherwise
 unchanged. No function in this module runs inference on import or during offline
@@ -56,6 +61,7 @@ PREFLIGHT_KIND = "peer_v11_runtime_preflight"
 # Spec 10 (revision 3): the provider's explicit capacity error, as the app-server's ``error`` notification names it.
 PROVIDER_OVERLOAD_CODE = "serverOverloaded"
 INVALID_TURN_RESULT = "turn result identity, status, or error invalid"
+PROVIDER_ERROR_FAILURE = "non-retryable provider error notification"
 
 
 def provider_error_code(error: Any) -> str | None:
@@ -597,10 +603,12 @@ class _Controller:
 
         The attributed turn ended by itself (``failed``) after the exact packet
         was delivered, every scoped ``error`` notification carries the
-        ``serverOverloaded`` code and the last one does not announce a retry, a
-        turn error, if any, carries the same code, no tool request arrived, no
-        assistant output appeared, no usage notification lacked a total, and no
-        failure was recorded. Anything else is an invalid turn result.
+        ``serverOverloaded`` code and none announces a retry, a turn error, if
+        any, carries the same code, no tool request arrived, no assistant output
+        appeared, no usage notification lacked a total, and no failure was
+        recorded. Anything else is an invalid turn result. The adapter decides
+        with this check again after shutdown and the last drain, so the evidence
+        it records lists every reconciled error notification.
         """
         session, errors = self.session, self.provider_errors
         if (result is None or session is None or result.model != requested_model or result.turn_id is None
@@ -612,7 +620,7 @@ class _Controller:
                 or self.hard_stop.is_set() or (self.boundary or {}).get("reason") != "turn_completed"):
             return None
         if (not errors or any(error["code"] != PROVIDER_OVERLOAD_CODE for error in errors)
-                or errors[-1]["will_retry"] is True
+                or any(error["will_retry"] is True for error in errors)
                 or (result.error is not None and provider_error_code(result.error) != PROVIDER_OVERLOAD_CODE)):
             return None
         return {"code": PROVIDER_OVERLOAD_CODE, "turn_status": result.status, "turn_error": deepcopy(result.error),
@@ -748,7 +756,8 @@ async def run_live_observer(
     except (Exception, asyncio.CancelledError) as error:
         await controller.fail(f"bounded drain incomplete: {type(error).__name__}: {error}")
     # Spec 10 (revision 3): a capacity refusal before any tool request is classified, not failed, if the
-    # rest of the close stays clean; it is rechecked below after cleanup, receipts, and the world audit.
+    # rest of the close stays clean; it is decided again below, after shutdown, the last drain, receipts, and
+    # the world audit.
     overload = controller.provider_overload(result, requested_model)
     if overload is not None:
         controller.emit("provider_overload_observed", **overload)
@@ -836,12 +845,25 @@ async def run_live_observer(
     acknowledged_replies = sorted({message["event_id"] for receipt in controller.receipts
                                    if receipt["tool"] == "read_channel" and receipt["result"].get("status") == "ok"
                                    for message in receipt["result"]["messages"] if message["event_id"] in reply_ids})
-    if overload is not None and (controller.failures or not controller.queue_reconciled or not runtime_closed
-                                 or checkpoint is None or outputs or controller.requests):
-        # The overload did not end an otherwise clean attempt, so the failed turn is an execution failure again.
-        controller.failures.append(INVALID_TURN_RESULT)
-        controller.emit("infrastructure_failed", reason=INVALID_TURN_RESULT, provider_overload=overload)
-        overload = None
+    if overload is not None:
+        # Spec 10 (revision 3): eligibility is decided from every reconciled event, after shutdown and the last
+        # drain, and the recorded evidence is recomputed from them. A late error with another code, a late retry
+        # announcement, or anything else that contradicts a clean refusal makes the failed turn an execution
+        # failure again.
+        final = controller.provider_overload(result, requested_model)
+        if (final is None or not controller.queue_reconciled or not runtime_closed or checkpoint is None or outputs
+                or controller.requests):
+            controller.failures.append(INVALID_TURN_RESULT)
+            controller.emit("infrastructure_failed", reason=INVALID_TURN_RESULT, provider_overload=overload,
+                            error_notifications=controller.provider_errors)
+            final = None
+        overload = final
+    terminal_errors = [error for error in controller.provider_errors if error["will_retry"] is not True]
+    if overload is None and terminal_errors:
+        # Spec 10 (revision 3): outside the overload exception, a non-retryable error notification is an execution
+        # failure whatever the final turn status, so neither a stop nor a completion can mask it.
+        controller.failures.append(PROVIDER_ERROR_FAILURE)
+        controller.emit("infrastructure_failed", reason=PROVIDER_ERROR_FAILURE, error_notifications=terminal_errors)
     boundary = controller.boundary or {"termination_kind": "infrastructure_incomplete", "reason": "no_boundary"}
     termination = "infrastructure_incomplete" if controller.failures or not controller.queue_reconciled \
         else PROVIDER_UNAVAILABLE if overload is not None else boundary["termination_kind"]

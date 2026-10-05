@@ -18,7 +18,10 @@ Each archived primary attempt becomes one attempt in the shape produced by P1's
   amendment accepted, and for a ``provider_unavailable`` attempt (a capacity
   refusal before any tool request, spec 10, revision 3); such an attempt is also
   not ``eligible``. It is consumed and exported, not quarantined, and its index
-  row names the ``exclusion_reason``.
+  row names the ``exclusion_reason``. Its score stays on its row, but the
+  export's summary leaves it out of every count and cell (spec 12); the index
+  lists the excluded rows in ``analysis_exclusions`` and counts them in
+  ``analysis_exclusion_count``.
 
 No model, repair, resume, or admission operation is performed. The export needs
 the study directory in which the root is registered and the root at its
@@ -402,8 +405,10 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
             atomic_json(safe_child(output, relative), seal(row["attempt"]))
             visible.update(attempt_path=relative, attempt_hash=content_hash(row["attempt"]))
         index.append(visible)
-    scored = [row["score"] for row in data["rows"] if row["score"] is not None]
+    # Spec 12: rows excluded from analysis keep their scores but stay out of the summary's counts and cells.
+    scored = [row["score"] for row in data["rows"] if row["score"] is not None and not row["excluded_from_analysis"]]
     summary = summarize(scored) if summarize is not None else None
+    exclusions = sorted(row["assignment_id"] for row in data["rows"] if row["excluded_from_analysis"])
     atomic_json(output / "index.json", seal({
         "kind": EXPORT_KIND, "adapter_version": ADAPTER_VERSION, "phase": data["phase"],
         "source_plan_hash": data["plan_hash"], "planned_count": data["planned_count"], "rows": index,
@@ -416,7 +421,7 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
         "selected_arms": selected_arms,
         # Review packets recompute the frozen plan against the sealed manifest this root was built from.
         "study_manifest": read_study_manifest(study_directory),
-        "analysis_exclusions": sorted(row["assignment_id"] for row in data["rows"] if row["excluded_from_analysis"]),
+        "analysis_exclusions": exclusions, "analysis_exclusion_count": len(exclusions),
     }))
     return {"output": str(output), "phase": data["phase"], "assignments": len(index),
             "attempts": sum("attempt_path" in row for row in index), "status_counts": data["status_counts"],

@@ -23,7 +23,8 @@ plan unless an approved amendment accepts it.
 A provider capacity refusal before any tool request (``provider_unavailable``,
 spec 10, revision 3) is consumed and ineligible but is not an execution failure:
 it pauses all new admission for 10 minutes (``ProviderPause``), and a third such
-attempt within any 60 minutes holds all new admission.
+attempt within any 60 minutes holds all new admission. In a study, pauses and
+their counts are recorded at study level, so they bind every root of the study.
 
 This module performs no model call and imports no v1.1 content module.
 """
@@ -410,28 +411,47 @@ class ProviderPause:
     journaled in the attempt's lane, so a resumed or restarted run restores them
     (``restore``): it respects an active pause, keeps counting in the window, and
     holds at start while the window still holds the limit (``limit_reached``).
+
+    A root of a study passes ``load``, which returns every pause recorded at
+    study level, and ``persist``, which records a new pause there durably before
+    the run acts on it. ``refresh`` restores the study's pauses; ``record``
+    refreshes first, so the window counts the refusals of every root of the study.
     """
 
     def __init__(self, *, wall_clock: Callable[[], float] = time.time,
-                 on_change: Callable[[], None] | None = None) -> None:
+                 on_change: Callable[[], None] | None = None,
+                 load: Callable[[], Iterable[dict]] | None = None,
+                 persist: Callable[[dict], Any] | None = None) -> None:
         self.wall_clock, self.on_change = wall_clock, on_change
+        self.load, self.persist = load, persist
         self.events: list[dict] = []
         self.ended: set[str] = set()
 
     def restore(self, records: Iterable[dict], ended: Iterable[str] = ()) -> None:
-        known = {event["attempt_id"] for event in self.events}
+        """Add pause records not yet known; two records of one attempt's pause must agree."""
+        known = {event["attempt_id"]: event for event in self.events}
         for record in sorted(records, key=lambda item: (item["paused_at"], item["attempt_id"])):
             record = validate_pause_record(deepcopy(record))
-            if record["attempt_id"] not in known:
-                known.add(record["attempt_id"])
-                self.events.append({key: record[key] for key in PAUSE_RECORD_FIELDS})
+            event = {key: record[key] for key in PAUSE_RECORD_FIELDS}
+            if event["attempt_id"] in known:
+                if known[event["attempt_id"]] != event:
+                    raise ValueError(f"two records of the provider pause of {event['attempt_id']} differ")
+                continue
+            known[event["attempt_id"]] = event
+            self.events.append(event)
         self.ended |= set(ended)
+
+    def refresh(self) -> None:
+        """Restore every pause recorded at study level, when this root belongs to a study."""
+        if self.load is not None:
+            self.restore(self.load())
 
     def window_count(self, at: float) -> int:
         return sum(at - PROVIDER_WINDOW_SECONDS < event["paused_at"] <= at for event in self.events)
 
     def record(self, attempt_id: str, lane_id: str) -> dict:
-        """Pause admission for a provider_unavailable attempt; return its journal record."""
+        """Pause admission for a provider_unavailable attempt; persist it, then return its journal record."""
+        self.refresh()
         if any(event["attempt_id"] == attempt_id for event in self.events):
             raise ValueError(f"{attempt_id} already paused admission; an attempt is consumed once")
         now = float(self.wall_clock())
@@ -442,6 +462,8 @@ class ProviderPause:
             "resume_at_utc": _utc(now + PROVIDER_PAUSE_SECONDS), "pause_seconds": PROVIDER_PAUSE_SECONDS,
             "window_seconds": PROVIDER_WINDOW_SECONDS, "window_count": count, "limit": PROVIDER_UNAVAILABLE_LIMIT,
             "holds_admission": count >= PROVIDER_UNAVAILABLE_LIMIT})
+        if self.persist is not None:
+            self.persist(deepcopy(record))
         self.events.append(record)
         if self.on_change is not None:
             self.on_change()
