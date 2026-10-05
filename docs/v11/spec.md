@@ -497,8 +497,9 @@ group by a seeded hash. Give the block at position k of this list the offset pai
 (1,2), (2,0), (0,2), (1,0), (2,1). In L, every aligned run of three pairs uses each model
 offset once and each prompt offset once. For an arm with three prompts, round r (0 to 8)
 runs the cell with model index (r + a_b) mod 3 and prompt index (floor(r / 3) + c_b) mod 3.
-For an arm with two prompts, round r (0 to 5) runs model index (r + a_b) mod 3 and prompt
-index (floor(r / 3) + c_b) mod 2.
+For an arm with two prompts, block k instead gets (a_b, c_b) = M[k mod 6], with M = (0,0),
+(1,1), (2,0), (0,1), (1,0), (2,1), and round r (0 to 5) runs model index (r + a_b) mod 3 and
+prompt index (floor(r / 3) + c_b) mod 2. Taking L modulo 2 would skew the prompts.
 For an arm with one prompt, the block runs in rounds 0, 3 and 6, with model index
 (r / 3 + a_b) mod 3. Model and prompt indices follow the protocol lists. Smoke cells are
 listed explicitly in the protocol; in smoke round r (0 to 2), cell i runs with model index
