@@ -45,6 +45,10 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--smoke", type=Path)
     verify = commands.add_parser("verify", help="verify a sealed live root and its retained lane evidence")
     verify.add_argument("root", type=Path)
+    for name in ("build-study", "verify-study"):
+        study = commands.add_parser(name, help="build or verify the sealed study offline; no model call")
+        study.add_argument("directory", type=Path)
+        study.add_argument("--caps", type=Path, required=True, help="frozen v1.1 caps record")
     replay = commands.add_parser("replay", help="authored offline replay through the v1.1 world; no model call")
     source = replay.add_mutually_exclusive_group(required=True)
     source.add_argument("--root", type=Path, help="replay sealed live-plan entries")
@@ -74,6 +78,14 @@ def _parser() -> argparse.ArgumentParser:
 def _run(args: argparse.Namespace) -> dict:
     from .bundle import load_bundle
 
+    if args.command in ("build-study", "verify-study"):
+        from .collection import build_study, verify_study
+        from .config import load_protocol
+        from .incidents import load_all_templates
+
+        action = build_study if args.command == "build-study" else verify_study
+        return action(args.directory, protocol=load_protocol(), templates=load_all_templates(),
+                      caps_record=read_json(args.caps))
     if args.command == "validate":
         from .lanes import validate_authorization, validate_caps_record
         from .live import read_live_plan
@@ -142,4 +154,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in LIVE_COMMANDS:
         return 0 if result.get("status") == "complete" and result.get("status_counts", {}).get(
             "archived") == result.get("maximum_live_calls") else 2
+    if args.command == "verify-study":
+        return 0 if result["valid"] else 2
     return 0
