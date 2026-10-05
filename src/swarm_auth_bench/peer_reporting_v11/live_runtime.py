@@ -73,7 +73,10 @@ PROVIDER_ERROR_FAILURE = "non-retryable provider error notification"
 # Spec 10 (revision 4): app-server notifications that are not model events. A silent stall may show only these, the
 # delivered packet's own user-message item, the turn's interrupted completion, and a disconnect while the runtime
 # closes; any other runtime event is model activity, or at least not silence.
-STALL_LIFECYCLE_METHODS = frozenset({"thread/started", "turn/started", "thread/status/changed"})
+# ``thread/settings/updated`` carries the thread configuration (model, effort, approvals), not model output; the
+# observed guest stall sent it at session setup.
+STALL_LIFECYCLE_METHODS = frozenset({"thread/started", "thread/settings/updated", "turn/started",
+                                     "thread/status/changed"})
 STALL_THREAD_STATUSES = frozenset({"active", "idle"})  # a ``systemError`` status is error evidence, not silence
 
 

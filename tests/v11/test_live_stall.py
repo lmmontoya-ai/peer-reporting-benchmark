@@ -97,11 +97,13 @@ class TrialClock:
 
 
 def stall_steps(trial_clock, model="gpt-6-luna", effort="low"):
-    """The observed silent stall: after packet delivery, only the thread's active status and the turn start, then
+    """The observed silent stall (guest, luna low): the thread settings, the active status and the turn start, then
     silence until the trial wall."""
     turn = {"id": f"turn-{model}-{effort}", "status": "inProgress"}
-    return [("thread_status", {"type": "active", "activeFlags": []}), ("raw", "turn/started", {"turn": turn}),
-            ("stall", trial_clock.silence)]
+    settings = {"threadSettings": {"approvalPolicy": "never", "collaborationMode": {"mode": "default", "settings": {
+        "developer_instructions": None, "model": model, "reasoning_effort": effort}}}}
+    return [("raw", "thread/settings/updated", settings), ("thread_status", {"type": "active", "activeFlags": []}),
+            ("raw", "turn/started", {"turn": turn}), ("stall", trial_clock.silence)]
 
 
 async def run_stalled(root, plan, harness, clock, trial_clock, compat, study, **kwargs):
@@ -138,8 +140,8 @@ async def test_the_observed_silent_stall_is_provider_stalled_and_pauses_admissio
     stall = result["provider_stall"]
     assert stall["boundary_reason"] == "trial_wall_limit" and stall["turn_status"] == "interrupted"
     assert stall["silent_seconds"] >= plan["caps"]["trial"]["max_trial_wall_seconds"]
-    assert stall["runtime_event_methods"] == ["item/started", "item/completed", "thread/status/changed",
-                                              "turn/started", "turn/completed"]
+    assert stall["runtime_event_methods"] == ["item/started", "item/completed", "thread/settings/updated",
+                                              "thread/status/changed", "turn/started", "turn/completed"]
     assert (stall["tool_requests"], stall["observer_outputs"], stall["usage_notifications"],
             stall["error_notifications"]) == (0, 0, 0, 0)
     assert [event for event in result["events"] if event["kind"] == "provider_stall_observed"]
