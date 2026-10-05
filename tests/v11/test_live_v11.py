@@ -5,6 +5,13 @@ import time
 from pathlib import Path
 
 import pytest
+
+from swarm_auth_bench.long_events import iter_events
+from swarm_auth_bench.peer_reporting.storage import read_sealed
+from swarm_auth_bench.peer_reporting_v11 import live as v11_live
+from swarm_auth_bench.peer_reporting_v11 import phase as v11_phase
+from swarm_auth_bench.peer_reporting_v11.lanes import lane_id
+
 from .live_fakes import (
     Harness,
     authorization,
@@ -19,12 +26,6 @@ from .live_fakes import (
     write_study,
 )
 from .live_fakes import run_phase as run
-
-from swarm_auth_bench.long_events import iter_events
-from swarm_auth_bench.peer_reporting.storage import read_sealed
-from swarm_auth_bench.peer_reporting_v11 import live as v11_live
-from swarm_auth_bench.peer_reporting_v11 import phase as v11_phase
-from swarm_auth_bench.peer_reporting_v11.lanes import lane_id
 
 
 def journal(lane_dir):

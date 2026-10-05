@@ -3,17 +3,6 @@
 from copy import deepcopy
 
 import pytest
-from .live_fakes import (
-    FakeTransport,
-    FakeV11World,
-    build_fixture,
-    caps_record,
-    fake_bundle,
-    fake_version,
-    load_template,
-    qualifier_steps,
-    report_steps,
-)
 
 from swarm_auth_bench.peer_reporting import schemas as p1_schemas
 from swarm_auth_bench.peer_reporting.live_runtime import PeerCodexRuntime
@@ -26,6 +15,18 @@ from swarm_auth_bench.peer_reporting_v11.live_runtime import (
     validate_preflight,
 )
 from swarm_auth_bench.runtime import RuntimeProtocolError
+
+from .live_fakes import (
+    FakeTransport,
+    FakeV11World,
+    build_fixture,
+    caps_record,
+    fake_bundle,
+    fake_version,
+    load_template,
+    qualifier_steps,
+    report_steps,
+)
 
 
 def fixture(level="L1", variant="violation"):

@@ -3,12 +3,13 @@
 import json
 
 import pytest
-from .live_fakes import authorization, caps_record, fake_bundle
 
 from swarm_auth_bench.peer_reporting.storage import atomic_json
 from swarm_auth_bench.peer_reporting_v11 import bundle as bundle_module
 from swarm_auth_bench.peer_reporting_v11 import live as v11_live
 from swarm_auth_bench.peer_reporting_v11.cli import LIVE_COMMANDS, main
+
+from .live_fakes import authorization, caps_record, fake_bundle
 
 
 @pytest.fixture(autouse=True)

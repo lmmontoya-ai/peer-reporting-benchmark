@@ -4,11 +4,12 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from .live_fakes import build_fixture, compat_root, fake_bundle, load_template
 
 from swarm_auth_bench.peer_reporting.storage import read_sealed
 from swarm_auth_bench.peer_reporting_v11 import runner
 from swarm_auth_bench.peer_reporting_v11.live_review import ROW_LABELS
+
+from .live_fakes import build_fixture, compat_root, fake_bundle, load_template
 
 ATTEMPT_KEYS = {"adapter_version", "execution_kind", "assignment_id", "attempt_id", "primary", "attempt_number",
                 "fixture", "source_attempt_hash", "source_plan_hash", "eligible", "exposure_confirmed",

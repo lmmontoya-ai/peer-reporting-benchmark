@@ -5,10 +5,11 @@ import shutil
 from pathlib import Path
 
 import pytest
-from .live_fakes import fake_bundle, qualified_root, smoke_root
 
 from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, seal
 from swarm_auth_bench.peer_reporting_v11.live_review import export_live_review, inspect_live_root
+
+from .live_fakes import fake_bundle, qualified_root, smoke_root
 
 P1_ATTEMPT_KEYS = {"adapter_version", "execution_kind", "assignment_id", "attempt_id", "primary", "attempt_number",
                    "fixture", "source_attempt_hash", "source_plan_hash", "eligible", "exposure_confirmed",
