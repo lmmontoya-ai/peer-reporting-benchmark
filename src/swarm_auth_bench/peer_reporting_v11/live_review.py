@@ -57,6 +57,7 @@ from .live import (
     lane_journals,
     read_live_plan,
     read_root_fixture,
+    read_study_manifest,
     root_registration,
     start_authorization_error,
     study_amendments,
@@ -395,6 +396,8 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
         "semantic_review": "pending_human_review_of_free_text", "study_registration": registration,
         "study_registry": study_registry_listing(study_directory), "start_claims": start_claims,
         "authorization_evidence": authorizations, "review_plan_hash": review_plan_hash,
+        # Review packets recompute the frozen plan against the sealed manifest this root was built from.
+        "study_manifest": read_study_manifest(study_directory),
         "analysis_exclusions": sorted(row["assignment_id"] for row in data["rows"] if row["excluded_from_analysis"]),
     }))
     return {"output": str(output), "phase": data["phase"], "assignments": len(index),
