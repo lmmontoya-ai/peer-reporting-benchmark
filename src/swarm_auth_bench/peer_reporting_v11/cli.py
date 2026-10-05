@@ -1,7 +1,8 @@
 """v1.1 offline tools and explicitly authorized, capped live phases.
 
-Offline commands (validate, build, verify, replay, export-review) never start a
-model session. Live commands (compatibility, calibration, smoke, collection)
+Offline commands (validate, build, verify, replay, export-review, propose-caps,
+freeze-caps) never start a model session. Live commands (compatibility,
+calibration, smoke, collection)
 refuse to run without frozen caps equal to the sealed plan's caps and a sealed
 user execution authorization that names the exact plan.
 
@@ -22,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from contextlib import ExitStack
 from pathlib import Path
 
 from ..peer_reporting.config import read_json
@@ -53,6 +55,26 @@ def _amendments(command: argparse.ArgumentParser) -> None:
                          help="sealed, user-approved amendment to record in the study first (repeatable)")
 
 
+def _write_new_json_files(records: dict[Path, dict]) -> None:
+    """Exclusively create outputs; a conflict leaves every existing file intact."""
+    encoded = {path: json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+               for path, value in records.items()}
+    created = []
+    try:
+        with ExitStack() as stack:
+            streams = {}
+            for path in records:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                streams[path] = stack.enter_context(path.open("x", encoding="utf-8", newline="\n"))
+                created.append(path)
+            for path, stream in streams.items():
+                stream.write(encoded[path])
+    except BaseException:
+        for path in created:
+            path.unlink()
+        raise
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m swarm_auth_bench.peer_reporting_v11", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -60,6 +82,18 @@ def _parser() -> argparse.ArgumentParser:
     validate.add_argument("--caps", type=Path)
     validate.add_argument("--authorization", type=Path)
     validate.add_argument("--root", type=Path, help="sealed live root that the authorization must name")
+    propose = commands.add_parser("propose-caps", help="propose resource caps from verified archives; no model call")
+    propose.add_argument("--study", type=Path, required=True, help="sealed study whose planned rows size the lanes")
+    propose.add_argument("--phase", choices=("calibration", "smoke", "collection"), required=True,
+                         help="smoke or collection sizes both phases from calibration evidence")
+    propose.add_argument("--root", type=Path, action="append", nargs="+", required=True,
+                         help="verified input roots, including every sealed prior root (repeatable)")
+    propose.add_argument("--output", type=Path, required=True, help="new proposal JSON file; never overwritten")
+    freeze = commands.add_parser("freeze-caps", help="freeze a proposal with recorded user approval; no model call")
+    freeze.add_argument("--proposal", type=Path, required=True)
+    freeze.add_argument("--approval-text", required=True)
+    freeze.add_argument("--output", type=Path, required=True,
+                        help="new raw caps JSON; approval is retained in <output-stem>-approval.json")
     build = commands.add_parser("build", help="seal a live phase plan offline; no model call")
     build.add_argument("root", type=Path, help="fresh output directory")
     build.add_argument("--phase", choices=PHASES, required=True)
@@ -122,6 +156,23 @@ def _parser() -> argparse.ArgumentParser:
 def _run(args: argparse.Namespace) -> dict:
     from .bundle import load_bundle
 
+    if args.command == "propose-caps":
+        from .config import load_protocol
+        from .resources import propose_caps
+
+        proposal = propose_caps([root for group in args.root for root in group], study_directory=args.study,
+                                phase=args.phase, protocol=load_protocol())
+        _write_new_json_files({args.output: proposal})
+        return {"output": str(args.output), "caps": proposal["caps"], "status": proposal["status"],
+                "proposal_hash": proposal["seal_hash"], "live_model_calls": 0}
+    if args.command == "freeze-caps":
+        from .resources import freeze_caps
+
+        frozen = freeze_caps(read_json(args.proposal), args.approval_text)
+        approval_path = args.output.with_name(f"{args.output.stem}-approval.json")
+        _write_new_json_files({args.output: frozen["caps"], approval_path: frozen})
+        return {"output": str(args.output), "approval_record": str(approval_path), "caps": frozen["caps"],
+                "status": frozen["status"], "live_model_calls": 0}
     if args.command in ("build-study", "verify-study"):
         from .collection import build_study, verify_study
         from .config import load_protocol

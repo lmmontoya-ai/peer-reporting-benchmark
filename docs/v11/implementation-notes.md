@@ -510,3 +510,27 @@ their resumes, a resume after a ten-hour pause, the copied-study and rebuilt-stu
 scenarios, the amendment path, a crash between registration and plan write,
 abandonment, the round barrier in the reviewer's speed simulation and in a live
 fake run, bounded-settlement labels, lane token headroom, and the new CLI flags.
+
+## WP10: resource proposals and caps approval
+
+`resources.propose_caps` verifies every input root through the live archive
+verifier, including registration and sealed prior-root ledgers for calibration.
+Only archived, settled attempts with integer totals and finite elapsed times
+enter the peaks. The sealed proposal retains root plan hashes, used and ignored
+attempt IDs with reasons, code-change reports, formulas, and lane sizing.
+Compatibility evidence sizes calibration; calibration evidence sizes smoke and
+collection together. Counts come from the sealed study manifest. Every active
+lane gets the busiest lane's wall, with 15 seconds of allowance per row and 120
+seconds per phase, rounded up to 30 seconds. A dispatch-wave factor accounts for
+global concurrency below the active lane count. Token targets are exactly the
+planned reservations plus one reservation. Other phase walls retain prior caps.
+
+Proposals contain `caps_status: "proposed"`. Since the unchanged lane schema
+accepts only `candidate` and `frozen`, validation uses a temporary frozen copy.
+`freeze_caps` seals a separate copy with the explicit approval text and original
+proposal hash. `propose-caps --study STUDY --phase PHASE --root ROOT [ROOT ...]
+--output proposal.json` writes the proposal. `freeze-caps --proposal proposal.json
+--approval-text TEXT --output caps.json` writes raw schema-valid caps and the
+sealed approved copy in `caps-approval.json`. Both commands refuse to overwrite
+any output. Caps approval does not authorize execution. Existing study and plan
+caps bindings still require a fresh study when the caps change.
