@@ -22,6 +22,7 @@ from .live_fakes import (
     fake_bundle,
     qualified_root,
     qualifier_steps,
+    review_plan_for,
     smoke_root,
     study_rows,
     write_study,
@@ -197,7 +198,7 @@ async def test_failed_execution_check_holds_admission_without_retry(tmp_path):
 async def test_admission_cutoff_and_parent_stop_file_admit_nothing(tmp_path):
     root, plan = compat_root(tmp_path / "compat")
     harness = Harness(tmp_path / "homes", lambda model, effort: [])
-    status = await run(root, plan, harness, auth=authorization(plan, cutoff=-60, deadline=3600))
+    status = await run(root, plan, harness, auth=authorization(plan, root=root, cutoff=-60, deadline=3600))
     assert harness.created == [] and status["status"] == "held" and status["holds"] == ["admission_cutoff"]
     other, other_plan = compat_root(tmp_path / "compat-2")
     (other / "STOP").touch()
@@ -239,8 +240,8 @@ async def test_refusals_before_any_runtime_is_created(tmp_path):
     cases = [
         (dict(caps=caps_record(caps_status="candidate")), "frozen"),
         (dict(caps=caps_record(revision="other-caps")), "differ from the sealed"),
-        (dict(auth=authorization(other_plan)), "another phase, plan"),
-        (dict(auth=authorization(plan, authorization={"status": "proposed", "text": "x"})), "approved"),
+        (dict(auth=authorization(other_plan, root=root)), "another phase, plan"),
+        (dict(auth=authorization(plan, root=root, authorization={"status": "proposed", "text": "x"})), "approved"),
         (dict(bundle=fake_bundle(tool_descriptors=[{**descriptor, "description": "Changed."}
                                                    for descriptor in fake_bundle().tool_descriptors])), "changed"),
     ]
@@ -248,7 +249,7 @@ async def test_refusals_before_any_runtime_is_created(tmp_path):
         with pytest.raises(ValueError, match=message):
             await run(root, plan, harness, **kwargs)
     with pytest.raises(ValueError, match="explicit runtime factory"):
-        await v11_live.run_live_phase(root, caps_record=plan["caps"], authorization=authorization(plan),
+        await v11_live.run_live_phase(root, caps_record=plan["caps"], authorization=authorization(plan, root=root),
                                       runtime_factory=None, bundle=fake_bundle())
     assert harness.created == []
     assert all("run_opened" not in kinds(root / lane["path"]) for lane in plan["lanes"])
@@ -361,10 +362,11 @@ def test_smoke_runs_each_assignment_with_its_effort_world_mode_and_prompt(smoked
 
 
 async def test_collection_gate_requires_valid_smoke_evidence_from_the_same_study(qualified, smoked, tmp_path):
+    review = review_plan_for(smoked["study"])
     with pytest.raises(v11_live.GateError, match="smoke"):
-        build_plan("collection", smoked["study"], compatibility_directories=[qualified[0]])
+        build_plan("collection", smoked["study"], compatibility_directories=[qualified[0]], review_plan=review)
     built = build_plan("collection", smoked["study"], compatibility_directories=[qualified[0]],
-                       smoke_directory=smoked["root"])
+                       smoke_directory=smoked["root"], review_plan=review)
     plan = built[0]
     assert plan["gate_evidence"]["smoke"]["smoke_plan_hash"] == smoked["plan"]["seal_hash"]
     assert len(plan["gate_evidence"]["smoke"]["attempt_hashes"]) == 12 and plan["count_in_collection_denominator"]
@@ -374,9 +376,10 @@ async def test_collection_gate_requires_valid_smoke_evidence_from_the_same_study
     other_rows, other_fixtures = study_rows("collection", template_id="release-request", seed=1101)
     other = write_study(tmp_path / "other-study", other_rows, other_fixtures)
     with pytest.raises(v11_live.GateError, match="another phase or study"):
-        build_plan("collection", other, compatibility_directories=[qualified[0]], smoke_directory=smoked["root"])
-    root = tmp_path / "collection"
-    v11_live.prepare_live_root(root, built, study_directory=smoked["study"])
+        build_plan("collection", other, compatibility_directories=[qualified[0]], smoke_directory=smoked["root"],
+                   review_plan=review_plan_for(other))
+    root = smoked["study"] / "roots" / "collection"
+    v11_live.prepare_live_root(root, built, study_directory=smoked["study"], review_plan=review)
     sealed = v11_live.read_live_plan(root)
     harness = Harness(tmp_path / "homes", lambda model, effort: [])
     with pytest.raises(v11_live.GateError, match="smoke"):

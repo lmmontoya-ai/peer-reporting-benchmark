@@ -23,7 +23,12 @@ Differences from P1:
   approved amendment can accept failed attempts (``accepted_attempts``), whose
   unresolved reservations then stay charged without holding the lane;
 - a lane's wall clock (its budget ledger clock) advances only while a run of
-  that lane is open, summed across runs (``LaneClock``).
+  that lane is open, summed across runs (``LaneClock``);
+- right after ``attempt_started`` and before any session, the coordinator can
+  claim the start in a study-level start ledger (``claim_start``). A refused
+  claim consumes the attempt without a session and holds admission;
+- a sealed cleanup reconciliation, journaled as ``cleanup_reconciled``, clears
+  the cleanup debt of an attempt whose cleanup was never confirmed.
 
 A lane seals its plan before any model call, reserves budget before the start,
 writes ``attempt_started`` before the authenticated session, consumes each
@@ -120,12 +125,16 @@ class Hooks:
     on_archived: Callable[[dict], None] = field(default=lambda payload: None)
     authorization_hash: str | None = None
     accepted_attempts: frozenset = frozenset()  # failed attempts accepted by an approved amendment
+    # Spec 10: claim(lane_id, lane_plan_hash, entry, attempt_started record) before any session; raises to refuse.
+    claim_start: Callable[[str, str, dict, dict], Any] | None = None
 
     def __post_init__(self) -> None:
         for name in ("runtime_factory", "preflight", "environment_check", "observer", "admission_check", "hold",
                      "on_archived"):
             if not callable(getattr(self, name)):
                 raise ValueError(f"hook {name} must be callable; live use requires an explicit runtime factory")
+        if self.claim_start is not None and not callable(self.claim_start):
+            raise ValueError("hook claim_start must be callable")
         poll = self.poll_seconds
         if isinstance(poll, bool) or not isinstance(poll, (int, float)) or not 0 < poll <= 60:
             raise ValueError("poll_seconds must be in (0, 60]")
@@ -258,9 +267,11 @@ class _PhaseState:
         return unreconciled
 
     def cleanup_debt(self) -> list[str]:
-        """Every start needs a verified archived cleanup result before another start."""
+        """Every start needs a verified archived cleanup result, or a sealed cleanup reconciliation, before another
+        start. An amendment never clears cleanup debt (spec 10)."""
         confirmed = {record["data"]["attempt_id"] for record in self.journal.of_kind("attempt_archived")
                      if record["data"]["summary"].get("cleanup_confirmed") is True}
+        confirmed |= {record["data"]["attempt_id"] for record in self.journal.of_kind("cleanup_reconciled")}
         return [record["data"]["attempt_id"] for record in self.journal.of_kind("attempt_started")
                 if record["data"]["attempt_id"] not in confirmed]
 
@@ -397,6 +408,72 @@ def usage_unobserved(result: Any, notices: dict) -> str | None:
     return None
 
 
+def started_record(start: dict) -> dict:
+    data = start["data"]
+    return {"attempt_id": data["attempt_id"], "reservation_id": data["reservation_id"],
+            "path": f"attempts/{data['attempt_id']}", "started_journal_seq": start["sequence"],
+            "status": "started"}
+
+
+def reconcile_lane(state: _PhaseState) -> None:
+    """Make a lane's index agree with its journal after a crash; never reopen a started attempt.
+
+    The caller holds the lane lock. A started attempt without an archive becomes
+    ``incomplete_interrupted`` and its active reservation unresolved; an admitted
+    reservation without a start record is released, since no session start was possible.
+    """
+    journal, plan, index, ledger = state.journal, state.plan, state.index, state.ledger
+    state.verify_budget_history()
+    state.verify_nonarchived_attempts()
+    if state.ledger_recovered:
+        journal.append("ledger_created", recovered=True, ledger_id=state.ledger_state()["ledger_id"])
+    starts = {record["data"]["attempt_id"]: record for record in journal.of_kind("attempt_started")}
+    archived = {record["data"]["attempt_id"]: record for record in journal.of_kind("attempt_archived")}
+    changed = False
+    for entry in plan["planned_order"]:
+        current = index["entries"][entry["entry_id"]]
+        attempt_id = entry["attempt_id"]
+        start = starts.get(attempt_id)
+        if start is None:
+            if current["status"] not in UNSTARTED:
+                raise EvidenceError(f"{attempt_id}: index records an attempt without a journaled start")
+            continue
+        if attempt_id in archived and current["status"] != "archived":
+            summary = archived[attempt_id]["data"]["summary"]
+            current["status"] = "archived"
+            current["attempt"] = {**started_record(start), **summary, "status": "archived"}
+            changed = True
+        elif current["status"] in UNSTARTED or current["status"] == "started":
+            current["status"] = "incomplete_interrupted"
+            current["attempt"] = {**(current["attempt"] or started_record(start)), "status": "incomplete_interrupted"}
+            reservation = start["data"]["reservation_id"]
+            ledger_status = None
+            if ledger is not None:
+                attempt = state.ledger_state()["attempts"].get(reservation)
+                if attempt is not None and attempt["status"] == "active":
+                    ledger.settle(reservation, None)
+                ledger_status = (state.ledger_state()["attempts"].get(reservation) or {}).get("status")
+            journal.append("attempt_interrupted_reconciled", entry_id=entry["entry_id"], attempt_id=attempt_id,
+                           reservation_id=reservation, ledger_status=ledger_status,
+                           note="started attempt without an archive; consumed, never rerun")
+            changed = True
+    if ledger is not None:
+        admitted = {record["data"]["reservation_id"] for record in journal.of_kind("reservation_admitted")}
+        started = {record["data"]["reservation_id"] for record in starts.values()}
+        planned = {entry["attempt_id"] for entry in plan["planned_order"]}
+        for reservation, attempt in state.ledger_state()["attempts"].items():
+            if reservation.split("~r", 1)[0] not in planned:
+                raise EvidenceError(f"budget reservation {reservation!r} does not belong to this lane")
+            if reservation not in started and attempt["status"] == "active":
+                # Admitted, but the start record was never written: no session start was possible.
+                ledger.settle(reservation, 0)
+                journal.append("orphan_reservation_released", reservation_id=reservation,
+                               journaled_admission=reservation in admitted)
+                changed = True
+    if changed or state.ledger_recovered:
+        state.save_index()
+
+
 class LaneClock:
     """Spec 10: a lane's wall clock advances only while a run of that lane is open, summed across runs.
 
@@ -443,63 +520,11 @@ class _PhaseRun:
 
     def reconcile(self) -> None:
         """Make the index agree with the journal after a crash; never reopen a started attempt."""
-        self.state.verify_budget_history()
-        self.state.verify_nonarchived_attempts()
-        if self.state.ledger_recovered:
-            self.journal.append("ledger_created", recovered=True, ledger_id=self.state.ledger_state()["ledger_id"])
-        starts = {record["data"]["attempt_id"]: record for record in self.journal.of_kind("attempt_started")}
-        archived = {record["data"]["attempt_id"]: record for record in self.journal.of_kind("attempt_archived")}
-        changed = False
-        for entry in self.plan["planned_order"]:
-            state = self.index["entries"][entry["entry_id"]]
-            attempt_id = entry["attempt_id"]
-            start = starts.get(attempt_id)
-            if start is None:
-                if state["status"] not in UNSTARTED:
-                    raise EvidenceError(f"{attempt_id}: index records an attempt without a journaled start")
-                continue
-            if attempt_id in archived and state["status"] != "archived":
-                summary = archived[attempt_id]["data"]["summary"]
-                state["status"] = "archived"
-                state["attempt"] = {**self._started_record(start), **summary, "status": "archived"}
-                changed = True
-            elif state["status"] in UNSTARTED or state["status"] == "started":
-                state["status"] = "incomplete_interrupted"
-                state["attempt"] = {**(state["attempt"] or self._started_record(start)),
-                                    "status": "incomplete_interrupted"}
-                reservation = start["data"]["reservation_id"]
-                ledger_status = None
-                if self.ledger is not None:
-                    current = self.state.ledger_state()["attempts"].get(reservation)
-                    if current is not None and current["status"] == "active":
-                        self.ledger.settle(reservation, None)
-                    ledger_status = (self.state.ledger_state()["attempts"].get(reservation) or {}).get("status")
-                self.journal.append("attempt_interrupted_reconciled", entry_id=entry["entry_id"],
-                                    attempt_id=attempt_id, reservation_id=reservation, ledger_status=ledger_status,
-                                    note="started attempt without an archive; consumed, never rerun")
-                changed = True
-        if self.ledger is not None:
-            admitted = {record["data"]["reservation_id"] for record in self.journal.of_kind("reservation_admitted")}
-            started = {record["data"]["reservation_id"] for record in starts.values()}
-            planned = {entry["attempt_id"] for entry in self.plan["planned_order"]}
-            for reservation, current in self.state.ledger_state()["attempts"].items():
-                if reservation.split("~r", 1)[0] not in planned:
-                    raise EvidenceError(f"budget reservation {reservation!r} does not belong to this lane")
-                if reservation not in started and current["status"] == "active":
-                    # Admitted, but the start record was never written: no session start was possible.
-                    self.ledger.settle(reservation, 0)
-                    self.journal.append("orphan_reservation_released", reservation_id=reservation,
-                                        journaled_admission=reservation in admitted)
-                    changed = True
-        if changed or self.state.ledger_recovered:
-            self._save()
+        reconcile_lane(self.state)
 
     @staticmethod
     def _started_record(start: dict) -> dict:
-        data = start["data"]
-        return {"attempt_id": data["attempt_id"], "reservation_id": data["reservation_id"],
-                "path": f"attempts/{data['attempt_id']}", "started_journal_seq": start["sequence"],
-                "status": "started"}
+        return started_record(start)
 
     def _ensure_ledger(self) -> BudgetLedger:
         if self.ledger is None:
@@ -663,6 +688,11 @@ class _PhaseRun:
             state["status"] = "started"
             state["attempt"] = self._started_record(started)
             self._save()
+            if self.hooks.claim_start is not None:
+                try:
+                    self.hooks.claim_start(self.lane_id, self.state.plan_hash, entry, started)
+                except Exception as error:
+                    return self._refuse_start(entry, state, reservation, error)
             attempt_dir.mkdir(parents=True, exist_ok=False)
             handed_off = True
             await self._execute(entry, state, runtime, preflight, fixture, instructions, reservation, attempt_dir)
@@ -672,6 +702,21 @@ class _PhaseRun:
         if state["attempt"].get("cleanup_confirmed") is not True:
             return self._ledger_hold(refresh=False) or {"reason": "cleanup_unreconciled", "attempt_id": attempt_id}
         return None
+
+    def _refuse_start(self, entry: dict, state: dict, reservation: str, error: Exception) -> dict:
+        """The study start ledger refused the claim: the attempt is consumed, no session started, admission holds."""
+        attempt_id = entry["attempt_id"]
+        self.ledger.settle(reservation, 0)  # the claim precedes the session, so nothing was spent
+        ledger_status = (self.state.ledger_state()["attempts"].get(reservation) or {}).get("status")
+        self.journal.append("start_claim_refused", entry_id=entry["entry_id"], attempt_id=attempt_id,
+                            reservation_id=reservation, reason=f"{type(error).__name__}: {error}"[:2000])
+        self.journal.append("attempt_interrupted_reconciled", entry_id=entry["entry_id"], attempt_id=attempt_id,
+                            reservation_id=reservation, ledger_status=ledger_status,
+                            note="the study start ledger refused the start before any session; consumed, never run")
+        state["status"] = "incomplete_interrupted"
+        state["attempt"] = {**state["attempt"], "status": "incomplete_interrupted"}
+        self._save()
+        return {"reason": "start_claim_refused", "attempt_id": attempt_id}
 
     async def _execute(self, entry: dict, state: dict, runtime: Any, preflight: dict, fixture: dict,
                        instructions: str, reservation: str, attempt_dir: Path) -> None:
@@ -1138,6 +1183,7 @@ def verify_lane_phase(directory: Path, *, bundle: ProtocolBundle) -> dict:
     try:
         unreconciled = state.verify_attempts()
         report = lane_report(state)
+        report["cleanup_debt"] = state.cleanup_debt()
     finally:
         state.journal.close()
     report["unreconciled_starts"] = unreconciled

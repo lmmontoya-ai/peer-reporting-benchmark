@@ -424,6 +424,129 @@ Amending all failures of a lane leaves that lane unproven. `test_live_r3.py`
 covers these scenarios through the offline transport, including late failures
 after both stop types and refusal of contradictory abandonment evidence.
 
+### Astra review, live layer (spec sections 10 and 11)
+
+`test_live_astra.py` keeps each reproduction from
+[review-astra.md](review-astra.md) as a regression test. Before these changes,
+every one of them failed in the way the review describes.
+
+Root identity (B1). A behavioral root now lives in its study directory at
+`roots/<name>` (`<name>` is a bounded identifier). `prepare_live_root` refuses
+any other directory. The registration records the relative path, so moving the
+study directory keeps its roots valid. `root_registration` takes the supplied
+directory and refuses it unless it resolves to the registered path. Run,
+verify, export, the smoke gate (through verify), and prior-root ingestion all
+apply that check: `prior_root_ledger`, `prepare_live_root` (before taking the
+prior root's locks), and `verify_consumed_ledger`. Abandonment uses the same
+relative path. The CLI `build` keeps its positional root argument; for a
+behavioral phase it must be `STUDY/roots/<name>`.
+
+Study start ledger (B1). Right after a lane journals `attempt_started`, and
+before any session, the coordinator claims the start in
+`STUDY/live-starts/<attempt_id>.json` through the new `Hooks.claim_start`. The
+claim is a sealed record that binds the plan hash, lane, lane plan, entry,
+reservation, authorization, and the exact start record hash. It is written once:
+a synced temporary file is hard-linked into place, and `os.link` fails if the
+claim already exists. An existing claim refuses the start. The lane settles the
+reservation at zero, journals `start_claim_refused` and
+`attempt_interrupted_reconciled`, and halts, which holds all admission. The
+attempt is consumed without a session. `check_start_claims` runs in verify,
+export, prior-root ingestion, and `prepare_live_root`, and through verify in run
+and the gates. It refuses a root when the ledger holds a start of its plan that
+the root does not hold (a stale copy moved to the registered path), when a
+planned attempt was claimed by another plan that did not supersede it, or when a
+claim names a different start record. A superseding root legitimately claims
+the unstarted assignments of the roots it replaced. A start without a claim never reached a session, because the claim
+precedes the session. If such a start is archived, it is an evidence error;
+otherwise it is reported as unclaimed. A run recovers the missing claim
+(`recovered: true`), and the attempt stays incomplete and holds like any
+interrupted start. `prior_root_ledger` also refuses claims of the phase that no
+prior root holds. Claim-then-start was the alternative order. It was rejected
+because a crash between the two records would leave a claim that no journal
+explains, and that could not be told apart from another copy's claim.
+
+Compatibility roots have no study, so a compatibility authorization now carries
+`root_path`, the root's resolved absolute path (`COMPATIBILITY_AUTHORIZATION_FIELDS`).
+`validate_authorization(record, plan, root=...)` refuses it for a root at any
+other path. Behavioral authorizations are unchanged, and `AUTHORIZATION_VERSION`
+stays `v1`. Residual risk: if a pristine copy replaces a completed compatibility
+root at the same path, it can run again under the same authorization. No
+study-level ledger exists to detect that. The spec accepts this for the six
+engineering calls.
+
+Transport contradictions (M1, M2). `_Controller.request` now checks
+attribution, the declared tool, and conflicting reuse of a known call ID before
+it checks admission. A late request needs matching thread and turn IDs but no
+active turn, because the turn may already have completed. Valid late requests
+still receive `closed` and are recorded in `calls`, so a later conflicting reuse
+of their ID is caught. Conflicts and unattributable requests record an
+infrastructure failure after `agent_finish`, every per-trial cap, and a hard
+stop, so a stop truncation no longer masks them. At close, after the final
+drain, `reconcile_receipts` rechecks every pending receipt against the response
+prepared for its call. These are failures: a receipt whose content, success
+flag, tool, or status contradicts the response; a completed receipt for a call
+that never received a response; and a receipt for an unknown call. A receipt
+that matches a prepared response whose send never completed is recorded as
+unresolved. A sent response with no receipt at all is listed under `missing`
+and is not a failure. The result carries `tool_receipt_reconciliation`.
+Receipt-before-response ordering still matches when the response is marked
+sent.
+
+Export authorization (M4). `authorization_error` is the shared check. The
+retained record must exist, keep its seal, be stored under its own hash, name
+the plan, and pass `validate_authorization`. Verify raises on any failure, and
+also when a start journals no authorization. Export applies the check to every
+started row. An archived row that fails becomes `quarantined_authorization`: it
+is not scored and gets no attempt file, while other rows still export. Rows
+carry `authorization_hash` and `authorization_error`, and the index carries
+`authorization_evidence` for every journaled hash. Export also checks that the
+archived payload's authorization hash equals its start record's.
+
+Cleanup debt (m2). An amendment never clears cleanup debt. `reconcile_cleanup`
+(CLI `reconcile-cleanup ROOT --attempt ID --reason TEXT [--study S]`) runs under
+the root's coordinator lock and the affected lane locks. It verifies the root
+and reconciles any unreconciled start as a run would. It requires each named
+attempt to be in cleanup debt, and it runs the live environment check, the
+`environment_check` hook path (`verify_live_environment` by default). The check
+must return `verified: true`. The function then seals
+`cleanup-reconciliations/<attempt_id>.json`, which records the environment
+evidence, `runtime_remaining: false`, and the basis: no run of this root holds
+the locks, so no runtime of the attempt remains. Each lane journals
+`cleanup_reconciled`, and `cleanup_debt()` honors it. Verify checks every
+journaled reconciliation against its sealed record. Verify reports
+`cleanup_debt` and `cleanup_reconciled`. `record_amendment` refuses an attempt
+that still has cleanup debt, and the smoke gate refuses a smoke root with any
+cleanup debt. The reviewer's archive failure, with three held resumes, then a
+reconciliation, an amendment, and a resume that completes, is a regression test.
+
+Review plan binding (M3, live half). Collection `build` requires
+`--review-plan`. Before building, the CLI calls `review_plan.verify_review_plan`
+lazily against the study manifest. No execution module imports review code; the
+guard test still passes. `build_phase_plan(..., review_plan=...)` performs only
+the data checks in `check_review_plan`: the seal recomputes, the kind and
+protocol match, `study_manifest_hash` equals the study seal, and the seed equals
+`protocol["review_seed"]`. It seals `review_plan_hash` into the collection top
+plan; other phases refuse a review plan. `prepare_live_root(...,
+review_plan=...)` retains the plan as `review-plan.json`. It must hash to the
+sealed value. Verify, and therefore run, rechecks the retained plan.
+`export_live_review` writes `review_plan_hash` into the index (null outside
+collection) and rechecks the plan for collection roots. The kind string is
+repeated in `live.py` so that the trial runtime need not import `review_plan`.
+
+New and changed CLI arguments: `build --review-plan PATH` (collection only, and
+required there); the new `reconcile-cleanup` command; `validate --authorization
+--root` now checks a compatibility authorization's `root_path`. `build ROOT`
+must be `STUDY/roots/<name>` for a behavioral phase.
+
+Bindings. Tool schemas, descriptions, wire specs, catalogs, the client,
+`LIVE_VERSION`, and `ADAPTER_VERSION` are unchanged, so compatibility evidence
+binds the same identifiers. `live_runtime.py`, `phase.py`, `live.py`, and
+`lanes.py` changed, so every sealed root's implementation hashes change and
+roots must be rebuilt. Plans also carry the new execution policy keys. A
+compatibility root that ran under an authorization without `root_path` would no
+longer verify. No compatibility, calibration, smoke, or collection call has been
+made, so no retained evidence is affected.
+
 ### Compatibility probe
 
 The probe makes one tool-exercise call per lane: six calls. It uses an L1

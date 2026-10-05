@@ -277,15 +277,26 @@ def utc(offset_seconds: float) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)).isoformat()
 
 
-def authorization(plan: dict, *, cutoff: float = 3600, deadline: float = 7200, **changes) -> dict:
+def authorization(plan: dict, *, root: Path | None = None, cutoff: float = 3600, deadline: float = 7200,
+                  **changes) -> dict:
+    """A test-only sealed authorization. A compatibility authorization names the root's resolved path."""
     record = {"kind": AUTHORIZATION_KIND, "schema_version": AUTHORIZATION_VERSION, "protocol_id": PROTOCOL_ID,
               "phase": plan["phase"], "live_plan_hash": plan["seal_hash"], "caps_hash": plan["caps_hash"],
               "maximum_live_calls": plan["maximum_live_calls"], "admission_cutoff_utc": utc(cutoff),
               "forced_stop_deadline_utc": utc(deadline),
               "authorization": {"status": "approved", "text": "Test-only explicit approval."},
               "recorded_utc": utc(0)}
+    if root is not None:
+        record["root_path"] = str(Path(root).resolve())
     record.update(changes)
     return seal(record)
+
+
+def review_plan_for(study: Path, *, seed: int = 20261005) -> dict:
+    """A sealed stand-in for the frozen review plan of a fake study: the fields the live layer checks."""
+    manifest = read_sealed(Path(study) / v11_live.STUDY_MANIFEST)
+    return seal({"kind": "peer_reporting_v11_review_plan", "protocol_id": PROTOCOL_ID,
+                 "study_manifest_hash": manifest["seal_hash"], "seed": seed, "rows": [], "counts": {}})
 
 
 SMOKE_CELLS = (("L1", "violation", "guided", "xhigh", "normal"), ("L3", "violation", "neutral", "xhigh", "normal"),
@@ -349,9 +360,12 @@ fake_study_verifier.calls = []
 
 
 def build_plan(phase: str, study: Path, **kwargs) -> tuple[dict, dict, dict]:
-    """``build_phase_plan`` over a fake study with the test caps and bundle."""
+    """``build_phase_plan`` over a fake study with the test caps and bundle; collection gets the study's stand-in
+    review plan unless ``review_plan`` is passed (``None`` passes none)."""
     values = {"revision": f"{phase}-v1", "study_directory": study, "bundle": fake_bundle(),
               "study_verifier": fake_study_verifier, **kwargs}
+    if phase == "collection" and "review_plan" not in kwargs:
+        values["review_plan"] = review_plan_for(study)
     return v11_live.build_phase_plan(phase, values.pop("caps", None) or caps_record(), **values)
 
 
@@ -560,8 +574,10 @@ def compat_fixture(root: Path, plan: dict) -> dict:
 
 async def run_phase(root: Path, plan: dict, harness: Harness, *, caps: dict | None = None, auth: dict | None = None,
                     bundle: ProtocolBundle | None = None, **kwargs) -> dict:
+    if auth is None:
+        auth = authorization(plan, root=root if plan["phase"] == "compatibility" else None)
     return await v11_live.run_live_phase(root, caps_record=caps or plan["caps"],
-                                         authorization=auth or authorization(plan), bundle=bundle or fake_bundle(),
+                                         authorization=auth, bundle=bundle or fake_bundle(),
                                          **harness.kwargs(**kwargs))
 
 
@@ -587,7 +603,7 @@ def smoke_root(base: Path, compatibility: Path) -> dict:
     collection_rows, collection_fixtures = study_rows("collection", template_id="release-request", seed=1101)
     study = write_study(base / "study", rows + collection_rows, {**fixtures, **collection_fixtures})
     built = build_plan("smoke", study, compatibility_directories=[compatibility])
-    root = base / "smoke"
+    root = study / "roots" / "smoke"
     v11_live.prepare_live_root(root, built, study_directory=study)
     plan = v11_live.read_live_plan(root)
     FakeV11World.created.clear()

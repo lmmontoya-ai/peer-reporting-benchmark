@@ -1,7 +1,7 @@
 """v1.1 offline tools and explicitly authorized, capped live phases.
 
 Offline commands (validate, build, verify, replay, export-review, propose-caps,
-freeze-caps) never start a model session. Live commands (compatibility,
+freeze-caps, abandon-root, reconcile-cleanup) never start a model session. Live commands (compatibility,
 calibration, smoke, collection)
 refuse to run without frozen caps equal to the sealed plan's caps and a sealed
 user execution authorization that names the exact plan.
@@ -11,8 +11,13 @@ names each of them with ``--prior-root``. ``build`` excludes their consumed
 assignments; ``verify``, ``export-review``, and the live commands recheck them.
 Behavioral roots are registered in their study directory, the consumed-attempt
 ledger of record: ``build``, ``verify``, ``export-review``, and the live commands
-take ``--study`` and refuse a root that is not registered there. ``abandon-root``
-seals the abandonment of a root that never started an attempt. ``--amendment``
+take ``--study`` and refuse a root that is not registered there or not at its
+registered path. ``build`` creates a behavioral root inside the study, at
+``STUDY/roots/<name>``. A collection ``build`` needs the frozen review plan
+(``--review-plan``), which is verified against the study before the plan is
+built. ``abandon-root`` seals the abandonment of a root that never started an
+attempt. ``reconcile-cleanup`` runs the live environment check and seals a
+cleanup reconciliation, the only way to clear cleanup debt. ``--amendment``
 records a sealed, user-approved amendment in the study before the command runs.
 ``root/STOP`` and ``--stop-file`` are soft stops; ``root/HARD_STOP`` and
 ``--hard-stop-file`` truncate active attempts.
@@ -135,13 +140,15 @@ def _parser() -> argparse.ArgumentParser:
     freeze.add_argument("--output", type=Path, required=True,
                         help="new raw caps JSON; approval is retained in <output-stem>-approval.json")
     build = commands.add_parser("build", help="seal a live phase plan offline; no model call")
-    build.add_argument("root", type=Path, help="fresh output directory")
+    build.add_argument("root", type=Path, help="fresh output directory; a behavioral root must be STUDY/roots/<name>")
     build.add_argument("--phase", choices=PHASES, required=True)
     build.add_argument("--caps", type=Path, required=True)
     build.add_argument("--revision", required=True)
     _study(build, "sealed v1.1 study directory (calibration, smoke, collection); the root is registered there")
     build.add_argument("--compatibility", type=Path, action="append", default=[])
     build.add_argument("--smoke", type=Path)
+    build.add_argument("--review-plan", type=Path,
+                       help="the frozen review plan (collection only); verified against the study, then retained")
     _prior_roots(build)
     _amendments(build)
     verify = commands.add_parser("verify", help="verify a sealed live root and its retained lane evidence")
@@ -154,6 +161,14 @@ def _parser() -> argparse.ArgumentParser:
     abandon.add_argument("--plan-hash", required=True, help="the registered root's plan hash")
     abandon.add_argument("--root", type=Path, help="the exact registered root directory; required for a finalized root")
     abandon.add_argument("--reason", required=True)
+    cleanup = commands.add_parser("reconcile-cleanup", help="seal a cleanup reconciliation after the live environment "
+                                                            "check shows that no runtime of the attempt remains; no "
+                                                            "model call")
+    cleanup.add_argument("root", type=Path, help="the live root at its registered path")
+    cleanup.add_argument("--attempt", dest="attempts", action="append", required=True,
+                         help="attempt ID with cleanup debt (repeatable)")
+    cleanup.add_argument("--reason", required=True)
+    _study(cleanup, "study directory in which a behavioral root is registered")
     for name in ("build-study", "verify-study"):
         study = commands.add_parser(name, help="build or verify the sealed study offline; no model call")
         study.add_argument("directory", type=Path)
@@ -237,7 +252,8 @@ def _run(args: argparse.Namespace) -> dict:
         if args.authorization:
             if not args.root:
                 raise ValueError("--authorization requires --root")
-            approval = validate_authorization(read_json(args.authorization), read_live_plan(args.root))
+            approval = validate_authorization(read_json(args.authorization), read_live_plan(args.root),
+                                              root=args.root)
             result.update(authorization_phase=approval["phase"], authorization_hash=approval["seal_hash"])
         return result
     if getattr(args, "amendments", None):
@@ -253,15 +269,34 @@ def _run(args: argparse.Namespace) -> dict:
         from .live import abandon_root
 
         return abandon_root(args.study, args.plan_hash, reason=args.reason, root=args.root, bundle=load_bundle())
+    if args.command == "reconcile-cleanup":
+        from .live import reconcile_cleanup
+
+        return asyncio.run(reconcile_cleanup(args.root, sorted(set(args.attempts)), reason=args.reason,
+                                             study_directory=args.study, bundle=load_bundle()))
     if args.command == "build":
-        from .live import build_phase_plan, prepare_live_root
+        from .live import STUDY_MANIFEST, build_phase_plan, prepare_live_root
 
         bundle = load_bundle()
+        review = None
+        if args.phase == "collection":
+            if args.review_plan is None or args.study is None:
+                raise ValueError("collection build requires --study and the frozen review plan (--review-plan)")
+            from ..peer_reporting.storage import read_sealed
+            from .review_plan import verify_review_plan
+
+            review = read_json(args.review_plan)
+            errors = verify_review_plan(review, read_sealed(args.study / STUDY_MANIFEST))
+            if errors:
+                raise ValueError(f"the review plan failed verification against the study: {errors[:5]}")
+        elif args.review_plan is not None:
+            raise ValueError("--review-plan applies only to a collection build")
         plan = build_phase_plan(args.phase, read_json(args.caps), revision=args.revision, study_directory=args.study,
                                 compatibility_directories=args.compatibility, smoke_directory=args.smoke,
-                                prior_roots=args.prior_roots, bundle=bundle)
+                                prior_roots=args.prior_roots, bundle=bundle, review_plan=review)
         study = args.study if args.phase != "compatibility" else None
-        return prepare_live_root(args.root, plan, study_directory=study, prior_roots=args.prior_roots, bundle=bundle)
+        return prepare_live_root(args.root, plan, study_directory=study, prior_roots=args.prior_roots, bundle=bundle,
+                                 review_plan=review)
     if args.command == "verify":
         from .live import verify_live_root
 

@@ -28,6 +28,7 @@ from .live_fakes import (
     qualified_root,
     qualifier_steps,
     report_steps,
+    review_plan_for,
     study_rows,
     write_study,
 )
@@ -88,7 +89,7 @@ def compat(tmp_path_factory):
 
 async def test_a_new_root_never_reruns_a_consumed_assignment(compat, tmp_path):
     study, rows, fixtures = smoke_study(tmp_path / "study", caps=SERIAL)
-    v1 = tmp_path / "smoke-v1"
+    v1 = study / "roots" / "smoke-v1"
     plan_v1 = prepare(v1, build_plan("smoke", study, caps=SERIAL, compatibility_directories=[compat]), study)
     failing = scripted(fixtures, {("gpt-6-astra", "xhigh", "L1", "violation"): lambda f: [NATIVE, *report_steps(f)]})
     status = await run(v1, plan_v1, Harness(tmp_path / "h1", failing), compatibility_directories=[compat],
@@ -109,7 +110,7 @@ async def test_a_new_root_never_reruns_a_consumed_assignment(compat, tmp_path):
                                       "consumed_attempt_ids": consumed}]
     assert ledger["excluded_assignment_ids"] == sorted(attempt[:-len("-live-1")] for attempt in consumed)
     assert built[0]["maximum_live_calls"] == 9
-    v2 = tmp_path / "smoke-v2"
+    v2 = study / "roots" / "smoke-v2"
     plan_v2 = prepare(v2, built, study, prior_roots=[v1])
     assert v11_live.superseded_by(v1, plan_v1) == [plan_v2["seal_hash"]]
 
@@ -151,20 +152,20 @@ async def test_a_new_root_never_reruns_a_consumed_assignment(compat, tmp_path):
 
 async def test_prepare_rechecks_prior_roots_under_their_locks(compat, tmp_path):
     study, _, fixtures = smoke_study(tmp_path / "study")
-    v1 = tmp_path / "smoke-v1"
+    v1 = study / "roots" / "smoke-v1"
     plan_v1 = prepare(v1, build_plan("smoke", study, compatibility_directories=[compat]), study)
     built = build_plan("smoke", study, revision="smoke-v2", compatibility_directories=[compat], prior_roots=[v1])
     assert built[0]["consumed_attempts"]["consumed_attempt_ids"] == [] and built[0]["maximum_live_calls"] == 12
     with _exclusive(v1 / v11_live.COORDINATOR_LOCK):  # the prior root is running
         with pytest.raises(v11_live.LivePhaseError, match="another process"):
-            v11_live.prepare_live_root(tmp_path / "smoke-v2", built, study_directory=study, prior_roots=[v1])
+            v11_live.prepare_live_root(study / "roots" / "smoke-v2", built, study_directory=study, prior_roots=[v1])
     with pytest.raises(ValueError, match="registered in its study"):
-        v11_live.prepare_live_root(tmp_path / "smoke-v2", built, prior_roots=[v1])
+        v11_live.prepare_live_root(study / "roots" / "smoke-v2", built, prior_roots=[v1])
     await run(v1, plan_v1, Harness(tmp_path / "h1", scripted(fixtures)), compatibility_directories=[compat],
               study_directory=study)
     with pytest.raises(v11_live.EvidenceError, match="started attempts after this plan was built"):
-        v11_live.prepare_live_root(tmp_path / "smoke-v2", built, study_directory=study, prior_roots=[v1])
-    assert not (tmp_path / "smoke-v2").exists() and v11_live.superseded_by(v1, plan_v1) == []
+        v11_live.prepare_live_root(study / "roots" / "smoke-v2", built, study_directory=study, prior_roots=[v1])
+    assert not (study / "roots" / "smoke-v2").exists() and v11_live.superseded_by(v1, plan_v1) == []
     with pytest.raises(ValueError, match="already consumed"):
         build_plan("smoke", study, revision="smoke-v2", compatibility_directories=[compat], prior_roots=[v1])
 
@@ -174,7 +175,7 @@ async def test_prepare_rechecks_prior_roots_under_their_locks(compat, tmp_path):
 
 async def test_limit_hits_settle_at_the_reservation_bound_and_pass_the_smoke_gate(compat, tmp_path):
     study, _, fixtures = smoke_study(tmp_path / "study", caps=SERIAL)
-    root = tmp_path / "smoke"
+    root = study / "roots" / "smoke"
     plan = prepare(root, build_plan("smoke", study, caps=SERIAL, compatibility_directories=[compat]), study)
     now = [0.0]
 
@@ -302,7 +303,7 @@ def test_next_dispatch_takes_the_lowest_planned_order_whose_lane_is_idle():
 
 async def test_realized_start_order_follows_planned_order_across_lanes(compat, tmp_path):
     study, _, fixtures = smoke_study(tmp_path / "study", caps=SERIAL)
-    root = tmp_path / "smoke"
+    root = study / "roots" / "smoke"
     plan = prepare(root, build_plan("smoke", study, caps=SERIAL, compatibility_directories=[compat]), study)
     status = await run(root, plan, Harness(tmp_path / "homes", scripted(fixtures)),
                        compatibility_directories=[compat], study_directory=study)
@@ -314,7 +315,7 @@ async def test_realized_start_order_follows_planned_order_across_lanes(compat, t
 
 async def test_parallel_dispatch_starts_the_lowest_order_of_each_idle_lane(compat, tmp_path):
     study, _, fixtures = smoke_study(tmp_path / "study")
-    root = tmp_path / "smoke"
+    root = study / "roots" / "smoke"
     plan = prepare(root, build_plan("smoke", study, compatibility_directories=[compat]), study)
     slow = {("gpt-6-luna", "xhigh", level, variant): (lambda f: [("sleep", 0.05), *report_steps(f)])
             for level, variant in (("L1", "violation"), ("L3", "violation"), ("L4", "twin"))}
@@ -393,10 +394,11 @@ async def test_the_collection_gate_refuses_a_partial_smoke_root(compat, tmp_path
     partial = v11_live.build_assignment_plan("smoke", smoke_rows[:1], smoke_fixtures, caps_record(),
                                              revision="smoke-partial", source=source, gate_evidence={
                                                  "qualification": {}}, bundle=fake_bundle())
-    root = tmp_path / "smoke"
+    root = study / "roots" / "smoke"
     assert prepare(root, partial, study)["maximum_live_calls"] == 1
     with pytest.raises(v11_live.GateError, match="differ from the study's smoke rows"):
-        build_plan("collection", study, compatibility_directories=[compat], smoke_directory=root)
+        build_plan("collection", study, compatibility_directories=[compat], smoke_directory=root,
+                   review_plan=review_plan_for(study))
 
 
 # m2: settlement conflicts
@@ -429,7 +431,7 @@ async def test_a_settlement_conflict_is_a_failure_and_holds(tmp_path):
 
 async def test_a_retained_ledger_stop_holds_before_any_start(compat, tmp_path):
     study, _, fixtures = smoke_study(tmp_path / "study", caps=SERIAL)
-    root = tmp_path / "smoke"
+    root = study / "roots" / "smoke"
     plan = prepare(root, build_plan("smoke", study, caps=SERIAL, compatibility_directories=[compat]), study)
     now = [1000.0]
 
@@ -455,7 +457,7 @@ async def test_a_retained_ledger_stop_holds_before_any_start(compat, tmp_path):
 
 async def test_a_changed_sealed_file_refuses_the_run_and_is_reported(compat, tmp_path, monkeypatch):
     study, _, fixtures = smoke_study(tmp_path / "study")
-    root = tmp_path / "smoke"
+    root = study / "roots" / "smoke"
     plan = prepare(root, build_plan("smoke", study, compatibility_directories=[compat]), study)
     original = v11_phase.implementation_hashes
     monkeypatch.setattr(v11_phase, "implementation_hashes",
@@ -489,7 +491,7 @@ def test_no_execution_module_imports_a_post_hoc_module():
 
 async def test_a_changed_scorer_is_reported_but_does_not_gate_the_run(compat, tmp_path, monkeypatch):
     study, _, fixtures = smoke_study(tmp_path / "study")
-    root = tmp_path / "smoke"
+    root = study / "roots" / "smoke"
     plan = prepare(root, build_plan("smoke", study, compatibility_directories=[compat]), study)
     original = v11_phase.implementation_hashes
     monkeypatch.setattr(v11_phase, "implementation_hashes",
@@ -506,7 +508,7 @@ async def test_a_changed_scorer_is_reported_but_does_not_gate_the_run(compat, tm
 
 def test_world_mode_bound_reads_the_durable_world_state(compat, tmp_path):
     study, _, fixtures = smoke_study(tmp_path / "study")
-    root = tmp_path / "smoke"
+    root = study / "roots" / "smoke"
     plan = prepare(root, build_plan("smoke", study, compatibility_directories=[compat]), study)
     asyncio.run(run(root, plan, Harness(tmp_path / "homes", scripted(fixtures)), compatibility_directories=[compat],
                     study_directory=study))
@@ -532,7 +534,7 @@ def test_world_mode_bound_reads_the_durable_world_state(compat, tmp_path):
 
 async def test_runs_and_starts_journal_the_authorization_hash(compat, tmp_path):
     study, _, fixtures = smoke_study(tmp_path / "study")
-    root = tmp_path / "smoke"
+    root = study / "roots" / "smoke"
     plan = prepare(root, build_plan("smoke", study, compatibility_directories=[compat]), study)
     status = await run(root, plan, Harness(tmp_path / "homes", scripted(fixtures)),
                        compatibility_directories=[compat], study_directory=study)

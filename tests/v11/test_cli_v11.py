@@ -56,8 +56,8 @@ def test_live_commands_require_caps_and_authorization_files(command, tmp_path, c
 def test_live_command_refuses_unapproved_or_mismatched_inputs_without_a_runtime(tmp_path, capsys, fakes):
     root, caps_path, plan = built(tmp_path, capsys)
     unapproved = write(tmp_path / "unapproved.json",
-                       authorization(plan, authorization={"status": "proposed", "text": "Not yet."}))
-    approved = write(tmp_path / "approved.json", authorization(plan))
+                       authorization(plan, root=root, authorization={"status": "proposed", "text": "Not yet."}))
+    approved = write(tmp_path / "approved.json", authorization(plan, root=root))
     candidate = write(tmp_path / "candidate.json", caps_record(caps_status="candidate"))
     cases = [
         (["compatibility", str(root), "--caps", str(caps_path), "--authorization", str(unapproved)], "approved"),
@@ -77,7 +77,7 @@ def test_offline_validate_build_verify_and_replay(tmp_path, capsys):
     root, caps_path, plan = built(tmp_path, capsys)
     assert main(["validate", "--caps", str(caps_path)]) == 0
     assert output(capsys)["caps_status"] == "frozen"
-    approval = write(tmp_path / "approved.json", authorization(plan))
+    approval = write(tmp_path / "approved.json", authorization(plan, root=root))
     assert main(["validate", "--authorization", str(approval), "--root", str(root)]) == 0
     assert output(capsys)["authorization_phase"] == "compatibility"
     assert main(["verify", str(root)]) == 0
@@ -101,7 +101,7 @@ def test_prior_roots_are_accepted_and_rechecked(tmp_path, capsys, fakes):
     assert main(["build", str(tmp_path / "again"), "--phase", "compatibility", "--caps", str(caps_path),
                  "--revision", "compat-v2", "--prior-root", str(root)]) == 2
     assert "no consumed-attempt ledger or prior roots" in output(capsys)["error"]
-    approved = write(tmp_path / "approved.json", authorization(plan))
+    approved = write(tmp_path / "approved.json", authorization(plan, root=root))
     assert main(["compatibility", str(root), "--caps", str(caps_path), "--authorization", str(approved),
                  "--prior-root", str(root)]) == 2
     assert "prior roots" in output(capsys)["error"] and fakes == []

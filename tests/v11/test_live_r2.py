@@ -75,7 +75,8 @@ def smoke_study(directory, caps=SERIAL, instance_nonce="0" * 32):
 
 
 def smoke_root(base, compat, study, *, revision="smoke-v1", prior_roots=()):
-    root = Path(base) / revision
+    """A sealed smoke root at its place in the study, ``STUDY/roots/<revision>``; ``base`` is unused."""
+    root = Path(study) / "roots" / revision
     built = build_plan("smoke", study, caps=SERIAL, revision=revision, compatibility_directories=[compat],
                        prior_roots=list(prior_roots))
     v11_live.prepare_live_root(root, built, study_directory=study, prior_roots=prior_roots)
@@ -245,7 +246,12 @@ async def test_a_copied_study_cannot_lend_its_smoke_root_to_the_original(compat,
     status = await run(v1, plan_v1, Harness(tmp_path / "h1", failing), compatibility_directories=[compat],
                        study_directory=study)
     assert status["status"] == "held" and status["live_model_call_starts"] == 3
-    copy = Path(shutil.copytree(study, tmp_path / "study-copy", ignore=shutil.ignore_patterns("live-roots")))
+    # A copy that keeps the study's start ledger shows the starts that no registered root explains.
+    partial = Path(shutil.copytree(study, tmp_path / "study-partial", ignore=shutil.ignore_patterns("live-roots")))
+    with pytest.raises(v11_live.EvidenceError, match="start ledger"):
+        build_plan("smoke", partial, caps=SERIAL, compatibility_directories=[compat])
+    copy = Path(shutil.copytree(study, tmp_path / "study-copy",
+                                ignore=shutil.ignore_patterns("live-roots", "live-starts", "roots")))
     # A deliberate copy keeps the instance seal and starts an empty ledger (spec 10: move, never copy) ...
     copied, plan_copy = smoke_root(tmp_path / "copy", compat, copy)
     assert plan_copy["maximum_live_calls"] == 12 and plan_copy["source"] == plan_v1["source"]
@@ -348,7 +354,7 @@ async def test_an_amendment_accepts_a_failed_smoke_attempt_which_stays_consumed_
 async def test_a_crash_between_registration_and_plan_write_is_abandoned_not_wedged(compat, tmp_path, monkeypatch):
     study, _, fixtures = smoke_study(tmp_path / "study")
     built = build_plan("smoke", study, caps=SERIAL, compatibility_directories=[compat])
-    crashed = tmp_path / "smoke-v1"
+    crashed = study / "roots" / "smoke-v1"
 
     def crash(*args, **kwargs):
         raise OSError("simulated crash while writing the lanes")
@@ -362,7 +368,7 @@ async def test_a_crash_between_registration_and_plan_write_is_abandoned_not_wedg
     with pytest.raises(ValueError, match="abandon a pending one"):
         build_plan("smoke", study, caps=SERIAL, revision="smoke-v2", compatibility_directories=[compat])
     with pytest.raises(v11_live.LivePhaseError, match="registered"):
-        v11_live.prepare_live_root(tmp_path / "smoke-v1b", built, study_directory=study)
+        v11_live.prepare_live_root(study / "roots" / "smoke-v1b", built, study_directory=study)
     abandoned = v11_live.abandon_root(study, pending["plan_hash"], reason="Crashed while writing the plan.",
                                       root=crashed)
     assert abandoned["prior_state"] == "pending" and abandoned["root_journals_checked"] is True
@@ -484,7 +490,7 @@ async def test_fast_lanes_wait_at_the_round_barrier_in_a_live_run(compat, tmp_pa
     rows, fixtures = study_rows("smoke", cells=tuple((*cell, "xhigh", "normal") for cell in cells))
     study = write_study(tmp_path / "study", rows, fixtures)
     built = build_plan("smoke", study, compatibility_directories=[compat])
-    root = tmp_path / "smoke"
+    root = study / "roots" / "smoke"
     v11_live.prepare_live_root(root, built, study_directory=study)
     plan = v11_live.read_live_plan(root)
     delays = {"gpt-6-luna": 0.0, "gpt-6-sol": 0.02, "gpt-6-astra": 0.08}

@@ -8,9 +8,15 @@ phase plans, so the P1 module is not edited. The differences are:
   preflight, on the turn-start request, and in the result;
 - the tools, input validation, world class, and world audit come from a
   ``ProtocolBundle`` (the v1.1 modules, or test fakes);
-- the world is created with the attempt's ``world_mode``, and the result records it.
+- the world is created with the attempt's ``world_mode``, and the result records it;
+- a request that cannot be attributed to the turn, names an undeclared tool, or
+  reuses a known call ID with other content is an execution failure even after
+  admission closed; valid late work still receives ``closed`` (spec 10);
+- at close, every pending tool receipt is reconciled with the response prepared
+  for its call; a contradiction is an execution failure, and a missing receipt
+  is recorded in ``tool_receipt_reconciliation`` (spec 10).
 
-The receipt matching, admission boundary, queue, drain, and usage handling are
+The exact receipt matching, queue, drain, and usage handling are otherwise
 unchanged. No function in this module runs inference on import or during offline
 preflight.
 """
@@ -273,18 +279,16 @@ class _Controller:
                       "result": None, "response_sent": False}
             self.requests.append(record)
             self.emit("tool_requested", request=record)
-            if not record["admitted"]:
-                result = {"status": "error", "error": "closed"}
-                record["result"] = result
-                if sequence >= self.caps["max_tool_requests_per_trial"]:
-                    self._boundary("per_trial_limit", "tool_request_limit", stop_generation=True)
-                return record, result, True
+            # Spec 10: validity is checked before permission to dispatch, so contradictory protocol evidence is
+            # an execution failure even after admission closed; valid late work still receives ``closed``. A
+            # late request needs no active turn, because the turn may already have completed.
             call_id = record["call_id"]
             session = self.session
-            scoped = (session is not None and session.active and session.turn_id is not None
-                      and raw.get("threadId") == session.thread_id and raw.get("turnId") == session.turn_id
-                      and type(call_id) is str and bool(call_id) and type(name) is str and name in self.tool_names)
-            if not scoped:
+            attributable = (session is not None and session.turn_id is not None
+                            and raw.get("threadId") == session.thread_id and raw.get("turnId") == session.turn_id
+                            and type(call_id) is str and bool(call_id) and type(name) is str
+                            and name in self.tool_names)
+            if not attributable or (record["admitted"] and not session.active):
                 record["protocol_rejected"] = True
                 result = {"status": "error", "error": "schema_error"}
                 record["result"] = result
@@ -300,6 +304,15 @@ class _Controller:
                     result = {"status": "error", "error": "idempotency_conflict"}
                     record["result"] = result
                     return record, result, False
+            if not record["admitted"]:
+                if previous is None:
+                    self.calls[call_id] = record  # a later reuse of this call ID is checked against it
+                result = {"status": "error", "error": "closed"}
+                record["result"] = result
+                if sequence >= self.caps["max_tool_requests_per_trial"]:
+                    self._boundary("per_trial_limit", "tool_request_limit", stop_generation=True)
+                return record, result, True
+            if previous is not None:
                 future = self.futures[previous["arrival_seq"]]
             else:
                 self.calls[call_id] = record
@@ -337,6 +350,13 @@ class _Controller:
         return bool(session and session.turn_id and params.get("threadId") == session.thread_id
                     and turn == session.turn_id)
 
+    @staticmethod
+    def _receipt_matches(item: dict, request: dict) -> bool:
+        """The completed item repeats exactly the response prepared for its call: tool, status, success, content."""
+        return ("wire_text" in request and item.get("namespace") is None and item.get("tool") == request["tool"]
+                and item.get("status") == "completed" and item.get("success") is request["response_success"]
+                and item.get("contentItems") == [{"type": "inputText", "text": request["wire_text"]}])
+
     def _tool_receipt(self, raw: dict) -> bool:
         params = raw.get("params") or {}
         item = params.get("item") or {}
@@ -344,12 +364,7 @@ class _Controller:
             return False
         call_id = item.get("callId") or item.get("id")
         request = self.calls.get(call_id) if type(call_id) is str else None
-        if request is None or not request["response_sent"]:
-            return False
-        content = item.get("contentItems")
-        if (item.get("namespace") is not None or item.get("tool") != request["tool"]
-                or item.get("status") != "completed" or item.get("success") is not request["response_success"]
-                or content != [{"type": "inputText", "text": request["wire_text"]}]):
+        if request is None or not request["response_sent"] or not self._receipt_matches(item, request):
             return False
         identity = content_hash([self.attempt_id, params["threadId"], params["turnId"], call_id])
         if identity in self.receipt_ids:
@@ -365,6 +380,54 @@ class _Controller:
             self.emit("report_receipt_delivery_confirmed", report_id=request["result"]["report_id"],
                       call_id=call_id, arrival_seq=request["arrival_seq"])
         return True
+
+    def reconcile_receipts(self) -> dict:
+        """Spec 10: at close, reconcile every pending tool receipt with the response sent for its call.
+
+        A receipt may arrive before its response is marked sent; it is matched
+        then. A receipt still pending at close is an execution failure when it
+        contradicts the response prepared for its call (content, success flag,
+        tool, or status), claims a completed result for a call that never
+        received a response, or names no known call. A sent response without
+        any receipt is recorded as missing; that alone is not a failure.
+        """
+        contradicted, unresolved, received = [], [], set()
+        for raw in list(self.pending_receipts):
+            if self._tool_receipt(raw):
+                self.pending_receipts.remove(raw)
+                continue
+            item = (raw.get("params") or {}).get("item") or {}
+            call_id = item.get("callId") or item.get("id")
+            request = self.calls.get(call_id) if type(call_id) is str else None
+            entry = {"call_id": call_id, "tool": item.get("tool"), "status": item.get("status"),
+                     "success": item.get("success"),
+                     "arrival_seq": request["arrival_seq"] if request is not None else None}
+            received.add(call_id)
+            if request is None:
+                contradicted.append({**entry, "reason": "receipt_for_unknown_call"})
+            elif "wire_text" in request:
+                if self._receipt_matches(item, request):  # its response send never completed
+                    unresolved.append({**entry, "reason": "receipt_matches_a_response_whose_send_did_not_complete"})
+                else:
+                    contradicted.append({**entry, "reason": "receipt_contradicts_the_response"})
+            elif item.get("status") == "completed" or item.get("contentItems") is not None:
+                contradicted.append({**entry, "reason": "completed_receipt_without_a_response"})
+            else:
+                unresolved.append({**entry, "reason": "incomplete_receipt_without_a_response"})
+        received |= {receipt["call_id"] for receipt in self.receipts}
+        missing: dict[str, dict] = {}
+        for request in self.requests:
+            if request.get("response_sent") and request["call_id"] not in received:
+                missing.setdefault(request["call_id"], {"call_id": request["call_id"], "tool": request["tool"],
+                                                        "arrival_seq": request["arrival_seq"]})
+        if contradicted:
+            reason = "contradictory tool delivery receipt"
+            self.failures.append(reason)
+            self.emit("infrastructure_failed", reason=reason, receipts=contradicted)
+        summary = {"confirmed": len(self.receipts), "missing": list(missing.values()), "contradicted": contradicted,
+                   "unresolved": unresolved}
+        self.emit("tool_receipts_reconciled", **summary)
+        return summary
 
     async def _usage(self, raw: dict) -> None:
         params, method = raw["params"], raw["method"]
@@ -665,6 +728,7 @@ async def run_live_observer(
         await controller.drain_runtime_events()
     except (Exception, asyncio.CancelledError) as error:
         await controller.fail(f"runtime cleanup incomplete: {type(error).__name__}: {error}")
+    receipt_reconciliation = controller.reconcile_receipts()
     if (controller.exposure_receipt is None and (controller.boundary is None
             or controller.boundary["termination_kind"] not in {"per_trial_limit", "collection_forced_truncation"})):
         controller.failures.append("initial exposure unverified")
@@ -746,6 +810,7 @@ async def run_live_observer(
         "drain_elapsed_seconds": clock() - drain_started, "usage": usage,
         "world_state": state, "world_checkpoint": checkpoint,
         "tool_requests": deepcopy(controller.requests), "tool_receipts": deepcopy(controller.receipts),
+        "tool_receipt_reconciliation": receipt_reconciliation,
         "peer_reply_evidence": {"reservations": state["reply_reservations"],
                                 "acknowledged_reply_event_ids": acknowledged_replies,
                                 "requested_at_arrival_sequences": [
