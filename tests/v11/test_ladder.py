@@ -11,7 +11,7 @@ import pytest
 
 from swarm_auth_bench.events import canonical_json, content_hash
 from swarm_auth_bench.peer_reporting.fixtures import OPERATION_COLUMNS, field_differences
-from swarm_auth_bench.peer_reporting_v11 import FIXTURE_VERSION
+from swarm_auth_bench.peer_reporting_v11 import FIXTURE_VERSION, config, ladder
 from swarm_auth_bench.peer_reporting_v11.ladder import (
     FIXED_REPLY,
     LEVELS,
@@ -593,3 +593,113 @@ def test_l3_packet_records_are_only_inventory_and_index(template):
     for value in fixture["fetchable_records"].values():
         assert canonical_json(value) not in fixture["packet"]
     assert len(fixture["fetchable_records"]) == len(record(fixture, "index")["records"]) == 5
+
+
+@pytest.mark.parametrize("field,value", [
+    ("distractor_grants", 6), ("companion_slot_offset", 4), ("companion_slot_offset", -1),
+    ("pressure_slot_offsets", [2, 6]), ("pressure_slot_offsets", [-1, 2]),
+])
+def test_protocol_generator_fields_change_fixtures_and_verify(template, protocol, field, value):
+    templates = synthetic_templates(template, protocol["templates"]["smoke"])
+    baseline = build_split_fixtures(protocol, templates, "smoke")
+    changed = deepcopy(protocol)
+    changed["generator_parameters"][field] = value
+    assert config.validate_protocol(changed)["valid"]
+    fixtures = build_split_fixtures(changed, templates, "smoke")
+    for original, fixture in zip(baseline, fixtures):
+        assert fixture["parameters"][field] == value
+        assert fixture["fixture_id"] != original["fixture_id"]
+        assert fixture["complete_world_hash"] != original["complete_world_hash"]
+        assert verify(fixture, templates[fixture["parameters"]["template_id"]]) == []
+        slot = templates[fixture["parameters"]["template_id"]]["focal_slot"]
+        master = fixture["audit"]["master_roster"]
+        companion = slot + changed["generator_parameters"]["companion_slot_offset"]
+        pressure = [slot + offset for offset in changed["generator_parameters"]["pressure_slot_offsets"]]
+        assert fixture["audit"]["pinned_slots"] == {
+            str(slot): master[0], str(companion): master[1], str(pressure[0]): master[0], str(pressure[1]): master[2]}
+        assert "-02." in fixture["public"]["messages"][companion - 1]["text"]
+        if fixture["parameters"]["level"] == "L4":
+            for position, name in zip(pressure, ("cleared", "do_not_escalate")):
+                assert fixture["public"]["messages"][position - 1]["text"] == template["pressure_posts"][name]
+    if field == "distractor_grants":
+        assert len(record(fixtures[0], "registry")["grants"]) == value + 1
+
+
+@pytest.mark.parametrize("count", [1, 2, 3, 5])
+def test_assignment_and_calibration_use_only_protocol_near_miss_types(template, protocol, count):
+    protocol["near_miss_types"] = protocol["near_miss_types"][:count]
+    if count < 3:
+        calibration = protocol["arms"]["calibration"]
+        calibration["fixtures_per_template"] = 8 + 2 * count
+        calibration["trials"] = 6 * calibration["fixtures_per_template"]
+        protocol["total_trials"] = 1140 + calibration["trials"]
+    assert config.validate_protocol(protocol)["valid"]
+    allowed = set(protocol["near_miss_types"])
+    for split in ("collection", "calibration", "smoke"):
+        ids, seed = protocol["templates"][split], protocol["seeds"][split]
+        assignments = near_miss_assignment(ids, seed, protocol=protocol)
+        calibration = calibration_near_miss_types(ids, seed, protocol=protocol)
+        assert set(assignments.values()) <= allowed
+        assert set(sum(calibration.values(), [])) <= allowed
+        assert all(len(types) == len(set(types)) == min(3, count) for types in calibration.values())
+        templates = synthetic_templates(template, ids)
+        fixtures = build_split_fixtures(protocol, templates, split)
+        assert len({fixture["fixture_id"] for fixture in fixtures}) == len(fixtures)
+        for fixture in fixtures:
+            assert fixture["parameters"]["near_miss_types"] == protocol["near_miss_types"]
+            near = fixture["parameters"]["near_miss_type"]
+            assert near is None or near in allowed
+            assert verify(fixture, templates[fixture["parameters"]["template_id"]]) == []
+
+
+def test_build_rejects_near_miss_outside_configured_subset(template):
+    with pytest.raises(ValueError, match="configured near_miss_type"):
+        build(template, "L2", near="wrong_actor", parameters={"near_miss_types": ["wrong_digest"]})
+
+
+def test_ladder_loads_packaged_protocol_without_checkout_docs(template, tmp_path, monkeypatch):
+    calls = []
+    original = config.load_protocol
+
+    def load():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(config, "load_protocol", load)
+    monkeypatch.setattr(ladder, "__file__", str(tmp_path / "site-packages/swarm_auth_bench/peer_reporting_v11/ladder.py"))
+    ladder._protocol.cache_clear()
+    try:
+        fixture = build(template)
+        assert calls == [True]
+        assert fixture["parameters"]["distractor_grants"] == original()["generator_parameters"]["distractor_grants"]
+        assert verify(fixture, template) == []
+    finally:
+        ladder._protocol.cache_clear()
+
+
+@pytest.mark.parametrize("variant", ["violation", "twin"])
+def test_l0_verdict_scope_resolves_both_operations_and_request(template, variant):
+    fixture = build(template, "L0", variant)
+    assert record(fixture, "verdict")["scope"] == {
+        "operation_ids": [operation["operation_id"] for operation in fixture["truth"]["operations"]],
+        "request_record_id": record(fixture, "request")["record_id"]}
+    assert verify(fixture, template) == []
+
+
+@pytest.mark.parametrize("tampering", ["missing", "unknown_operation", "unknown_request", "wrong_request"])
+def test_l0_verdict_scope_tampering_is_rejected(template, tampering):
+    fixture = build(template, "L0")
+    verdict = record(fixture, "verdict")
+    if tampering == "missing":
+        del verdict["scope"]
+    elif tampering == "unknown_operation":
+        verdict["scope"]["operation_ids"][0] = "op-missing"
+    elif tampering == "unknown_request":
+        verdict["scope"]["request_record_id"] = "r-missing"
+    else:
+        verdict["scope"]["request_record_id"] = record(fixture, "inventory")["record_id"]
+    reseal(fixture)
+    errors = verify(fixture, template)
+    assert "public differs from the specified fixture" in errors
+    if tampering.startswith("unknown"):
+        assert any("unresolved ID" in error and "/scope/" in error for error in errors)

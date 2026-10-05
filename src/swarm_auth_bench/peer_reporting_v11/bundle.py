@@ -54,9 +54,22 @@ class ProtocolBundle:
         return content_hash(self.tool_descriptors)
 
     def wire_tool_specs(self) -> list[dict[str, Any]]:
-        """Exactly the six frozen tools, in the app-server descriptor shape used by P1."""
-        return [{"type": "function", "name": descriptor["name"], "description": descriptor["description"],
-                 "inputSchema": deepcopy(descriptor["inputSchema"])} for descriptor in self.tool_descriptors]
+        """Produce neutral runtime tools while preserving the archived descriptors."""
+        from .schemas import scan_wire_specs
+
+        def without_ids(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {key: without_ids(child) for key, child in value.items() if key.casefold() != "$id"}
+            if isinstance(value, list):
+                return [without_ids(child) for child in value]
+            return deepcopy(value)
+
+        specs = [{"type": "function", "name": descriptor["name"], "description": descriptor["description"],
+                  "inputSchema": without_ids(descriptor["inputSchema"])} for descriptor in self.tool_descriptors]
+        errors = scan_wire_specs(specs)
+        if errors:
+            raise ValueError("wire tool specs failed scan: " + "; ".join(errors))
+        return specs
 
     @property
     def wire_tool_specs_hash(self) -> str:

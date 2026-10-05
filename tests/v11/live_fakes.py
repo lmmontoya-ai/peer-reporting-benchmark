@@ -57,7 +57,7 @@ def _v11_schemas() -> tuple[dict, dict]:
 
 
 INPUT_SCHEMAS, OUTPUT_SCHEMAS = _v11_schemas()
-TOOL_DESCRIPTORS = [{"name": name, "description": f"Fake v1.1 {name}.", "inputSchema": deepcopy(INPUT_SCHEMAS[name]),
+TOOL_DESCRIPTORS = [{"name": name, "description": f"Fake {name}.", "inputSchema": deepcopy(INPUT_SCHEMAS[name]),
                      "outputSchema": deepcopy(OUTPUT_SCHEMAS[name])} for name in INPUT_SCHEMAS]
 
 

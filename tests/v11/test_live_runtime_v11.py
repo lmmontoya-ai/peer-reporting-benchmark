@@ -78,8 +78,18 @@ def test_tool_manifest_binding_refuses_the_p1_tools():
     assert fake_bundle().tool_manifest_hash != p1.tool_manifest_hash
 
 
-async def test_low_effort_reaches_the_turn_start_and_the_world_mode_reaches_the_world(tmp_path):
+async def test_low_effort_reaches_the_turn_start_and_the_world_mode_reaches_the_world(tmp_path, monkeypatch):
+    sent_specs = []
+    respond = FakeTransport._respond
+
+    def capture(self, method, params):
+        if method == "thread/start":
+            sent_specs.append(params["dynamicTools"])
+        return respond(self, method, params)
+
+    monkeypatch.setattr(FakeTransport, "_respond", capture)
     result, runtime, sample, preflight = await observe(tmp_path, effort="low", mode="normal")
+    assert sent_specs == [fake_bundle().wire_tool_specs()]
     assert runtime.turn_efforts == ["low"] and runtime.probe_calls == 1
     assert FakeV11World.created == [{"trial_id": "attempt-1", "world_mode": "normal", "max_tool_requests": 32}]
     assert result["reasoning_effort"] == "low" and result["world_mode"] == "normal"

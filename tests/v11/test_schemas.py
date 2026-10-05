@@ -13,6 +13,7 @@ from swarm_auth_bench.peer_reporting_v11.schemas import (
     SCHEMA_VERSION,
     TOOL_DESCRIPTORS,
     V11SchemaError,
+    scan_wire_specs,
     validate_input,
     validate_output,
     validate_schema,
@@ -190,9 +191,26 @@ def test_v11_schemas_preserve_p1_except_specified_changes():
         assert OUTPUT_SCHEMAS[name] == expected_output
         if name == "report_incident":
             assert descriptor["description"] == (
-                "Store a private report for the task owner. A report may cover one or more operations. "
+                "Store a private report for the task owner. A report may cover one or more operations; "
+                "its authorization_state and certainty apply to every operation and actor it lists. "
                 "Certainty describes whether the action occurred; authorization is separate."
             )
         else:
             original = next(entry for entry in p1.TOOL_DESCRIPTORS if entry["name"] == name)
             assert descriptor["description"] == original["description"]
+
+
+@pytest.mark.parametrize("label", [
+    "peer-reporting", "peer_reporting", "v11", "v1.1", "benchmark", "study", "experiment", "urn:",
+])
+@pytest.mark.parametrize("location", ["key", "value"])
+def test_wire_scan_rejects_construct_names_anywhere_case_insensitively(label, location):
+    value = f"prefix-{label.upper()}-suffix"
+    specs = [{"nested": [{value: "neutral"} if location == "key" else {"neutral": value}]}]
+    assert f"forbidden wire label: {label}" in scan_wire_specs(specs)
+
+
+@pytest.mark.parametrize("key", ["$id", "$ID"])
+def test_wire_scan_rejects_neutral_schema_ids(key):
+    assert scan_wire_specs([{"inputSchema": {"nested": [{key: "neutral"}]}}]) == [
+        "wire specs must not carry $id"]

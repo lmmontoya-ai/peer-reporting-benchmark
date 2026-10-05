@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from importlib import resources
 
 from ..peer_reporting.config import MODELS
 from . import FIXTURE_VERSION, PROTOCOL_ID, SPECIFICATION_REVISION, TOOL_SCHEMA_VERSION
+from .incidents import load_template
 from .lanes import EFFORTS, PROMPT_CONDITIONS, WORLD_MODES
 
 SPLITS = ("collection", "calibration", "smoke")
+NEAR_MISS_TYPES = (
+    "wrong_digest", "wrong_version", "expired_window", "wrong_operation", "wrong_actor",
+    "non_authoritative_registry",
+)
 ARM_DEFINITIONS = {
     "collection": "L0-L4 x {violation, twin} + benign + ambiguity + accusation",
     "channel_failure": "L1 violation",
@@ -32,7 +38,8 @@ def arm_fixture_cells(protocol: dict, arm: str) -> list[tuple[str, str]]:
         return [(level, variant) for level in ("L1", "L2") for variant in protocol["ladder_variants"]] + [
             (protocol["control_variants"]["ambiguity"], "ambiguity")]
     return [(level, variant) for level in protocol["levels"]
-            for _ in range(3 if level == "L2" else 1) for variant in protocol["ladder_variants"]]
+            for _ in range(min(3, len(protocol["near_miss_types"])) if level == "L2" else 1)
+            for variant in protocol["ladder_variants"]]
 
 
 def _unique_strings(value: object, name: str) -> list[str]:
@@ -40,6 +47,31 @@ def _unique_strings(value: object, name: str) -> list[str]:
             or len(set(value)) != len(value)):
         raise ValueError(f"{name} must be a nonempty list of unique strings")
     return value
+
+
+def validate_near_miss_types(value: object) -> list[str]:
+    """Require a nonempty subset of the implemented grant mutations."""
+    types = _unique_strings(value, "near_miss_types")
+    if any(near not in NEAR_MISS_TYPES for near in types):
+        raise ValueError("near_miss_types contains an unknown type")
+    return types
+
+
+def validate_generator_parameters(parameters: dict, focal_slots: Iterable[int]) -> None:
+    """Check distractor counts and all four pinned slots for every template."""
+    count = parameters["distractor_grants"]
+    if type(count) is not int or not 1 <= count <= 6:
+        raise ValueError("distractor_grants must be an integer from 1 to 6")
+    companion, pressure = parameters["companion_slot_offset"], parameters["pressure_slot_offsets"]
+    if (type(companion) is not int or type(pressure) is not list or len(pressure) != 2
+            or any(type(offset) is not int for offset in pressure)):
+        raise ValueError("slot offsets require one companion integer and two pressure integers")
+    offsets = [0, companion, *pressure]
+    if len(set(offsets)) != len(offsets):
+        raise ValueError("slot offsets collide with each other or the focal slot")
+    for focal in focal_slots:
+        if type(focal) is not int or any(not 1 <= focal + offset <= 32 for offset in offsets):
+            raise ValueError(f"slot offsets put a pinned slot outside 1..32 for focal_slot {focal}")
 
 
 def validate_protocol(protocol: dict) -> dict:
@@ -71,6 +103,11 @@ def validate_protocol(protocol: dict) -> dict:
                 raise ValueError(f"seeds.{split} must be an integer")
         if len(set(ids)) != len(ids) or "release-request" not in protocol["templates"]["collection"]:
             raise ValueError("template splits must be disjoint and include the collection anchor")
+        validate_near_miss_types(protocol["near_miss_types"])
+        generator = protocol["generator_parameters"]
+        if generator["distractor_grants_allowed_range"] != [1, 6]:
+            raise ValueError("distractor_grants_allowed_range must be [1, 6]")
+        validate_generator_parameters(generator, (load_template(template_id)["focal_slot"] for template_id in ids))
         if set(protocol["arms"]) != {*ARM_DEFINITIONS, "smoke"}:
             raise ValueError("protocol must define exactly the five study arms")
         counts = {}
