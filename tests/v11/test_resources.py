@@ -167,7 +167,7 @@ def calibration(tmp_path_factory, floor_root):
                                        and row["level"] == "L4")]
     study = write_study(base / "study", rows, fixtures)
     built = build_plan("calibration", study, compatibility_directories=[floor_root])
-    root = base / "calibration"
+    root = study / "roots" / "calibration"
     live.prepare_live_root(root, built, study_directory=study)
     plan = live.read_live_plan(root)
 
@@ -263,7 +263,7 @@ def test_calibration_prior_roots_must_be_inputs_and_are_verified(floor_root, tmp
         fixtures.update(built_fixtures)
     caps = caps_record(global_max_concurrency=1)
     study = write_study(tmp_path / "study", rows, fixtures, caps=caps)
-    earlier = tmp_path / "earlier"
+    earlier = study / "roots" / "earlier"
     built = build_plan("calibration", study, caps=caps, compatibility_directories=[floor_root])
     live.prepare_live_root(earlier, built, study_directory=study)
     plan = live.read_live_plan(earlier)
@@ -279,7 +279,7 @@ def test_calibration_prior_roots_must_be_inputs_and_are_verified(floor_root, tmp
     assert status["live_model_call_starts"] == 1
     built = build_plan("calibration", study, caps=caps, revision="calibration-v2",
                        compatibility_directories=[floor_root], prior_roots=[earlier])
-    later = tmp_path / "later"
+    later = study / "roots" / "later"
     live.prepare_live_root(later, built, study_directory=study, prior_roots=[earlier], bundle=fake_bundle())
     with pytest.raises(ValueError, match="supply every sealed prior root"):
         proposal(later, study, phase="collection")

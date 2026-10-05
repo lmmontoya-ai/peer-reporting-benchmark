@@ -115,7 +115,7 @@ def test_abandonment_records_registered_path_and_checked_journal_hashes(compat, 
     study, _, _ = smoke_study(tmp_path / "study")
     root, plan = smoke_root(tmp_path, compat, study)
     (registered,) = v11_live.registered_roots(study)
-    assert registered["root_path"] == str(root.resolve())
+    assert registered["root_path"] == "roots/smoke-v1"
     hashes = {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
               for path in root.glob("lanes/*/journal.jsonl")}
     assert len(hashes) == 6
@@ -132,7 +132,7 @@ def test_abandonment_records_registered_path_and_checked_journal_hashes(compat, 
 def test_pending_root_can_be_abandoned_without_a_matching_plan(compat, tmp_path, monkeypatch, plan_state):
     study, _, _ = smoke_study(tmp_path / "study")
     built = build_plan("smoke", study, caps=SERIAL, compatibility_directories=[compat])
-    root = tmp_path / "pending"
+    root = study / "roots" / "pending"
 
     def crash(*args, **kwargs):
         raise OSError("simulated crash before the plan write")
@@ -148,7 +148,7 @@ def test_pending_root_can_be_abandoned_without_a_matching_plan(compat, tmp_path,
     elif plan_state == "another_plan":
         atomic_json(path, v11_live.read_live_plan(compat))
     result = v11_live.abandon_root(study, pending["plan_hash"], reason="Incomplete registration.", bundle=fake_bundle())
-    assert result["prior_state"] == "pending" and result["root_path"] == str(root.resolve())
+    assert result["prior_state"] == "pending" and result["root_path"] == "roots/pending"
     assert result["root_journals_checked"] is True and result["lane_journal_hashes"] == {}
 
 
@@ -181,7 +181,7 @@ async def test_identical_compatibility_roots_need_distinct_authorizations(tmp_pa
     assert plan_a["root_instance_nonce"] != plan_b["root_instance_nonce"]
     assert {key: value for key, value in plan_a.items() if key not in {"seal_hash", "root_instance_nonce"}} == {
         key: value for key, value in plan_b.items() if key not in {"seal_hash", "root_instance_nonce"}}
-    approval = authorization(plan_a)
+    approval = authorization(plan_a, root=a)
     sample = compat_fixture(a, plan_a)
     first = Harness(tmp_path / "ha", lambda model, effort: qualifier_steps(sample))
     assert (await run(a, plan_a, first, auth=approval))["status"] == "complete"

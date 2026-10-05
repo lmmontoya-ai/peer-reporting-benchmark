@@ -18,11 +18,16 @@ Each archived primary attempt becomes one attempt in the shape produced by P1's
   amendment accepted (spec 10); such an attempt is also not ``eligible``.
 
 No model, repair, resume, or admission operation is performed. The export needs
-the study directory in which the root is registered, rechecks the root's
+the study directory in which the root is registered and the root at its
+registered path; it rechecks the root against the study's start ledger and its
 consumed-attempt ledger against its prior roots, and records the study's registry
-listing and amendments. Compatibility roots are engineering checks and are not
-exported. Every planned row is kept; unrun, incomplete, and quarantined rows have
-no attempt and never become negatives.
+listing and amendments. It applies verify's authorization-evidence check to every
+started row: a row whose retained authorization record is missing, corrupt, or
+mismatched is ``quarantined_authorization`` and is not scored, while other valid
+rows still export. The index carries ``review_plan_hash`` (null outside
+collection). Compatibility roots are engineering checks and are not exported.
+Every planned row is kept; unrun, incomplete, and quarantined rows have no
+attempt and never become negatives.
 """
 
 from __future__ import annotations
@@ -43,11 +48,17 @@ from .bundle import ProtocolBundle, load_bundle
 from .live import (
     CONFIGURATION_CHECKS,
     _row_valid,
+    authorization_error,
     check_abandoned_root,
+    check_retained_review_plan,
+    check_start_claims,
     evaluate_transport,
+    journaled_authorizations,
+    lane_journals,
     read_live_plan,
     read_root_fixture,
     root_registration,
+    start_authorization_error,
     study_amendments,
     study_registry_listing,
     verify_consumed_ledger,
@@ -219,6 +230,7 @@ def _read_attempt(state: _PhaseState, entry: dict, fixture: dict, *, phase: str,
              and payload["started_journal_seq"] == starts[0]["sequence"]
              and archives[0]["data"]["entry_id"] == entry["entry_id"]
              and payload["instructions_hash"] == content_hash(entry["instructions"])
+             and payload["authorization_hash"] == starts[0]["data"].get("authorization_hash")
              and payload["fixture_hash"] == content_hash(fixture), "attempt differs from the sealed primary assignment")
     verify_archived_index(payload, indexed["attempt"], starts[0], archives[0], state.journal.records)
     sink = payload["orchestrator"]["sink_checkpoint"]
@@ -247,8 +259,10 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
                       scorer: Callable[[dict], dict] | None = None, amendments: list[dict] | tuple = ()) -> dict:
     """Return every planned row; verified archived rows carry their attempt and optional score.
 
-    Failed attempts that one of ``amendments`` accepts are marked
-    ``excluded_from_analysis`` before scoring.
+    Every started row carries its journaled ``authorization_hash`` and the shared
+    authorization check's ``authorization_error``; an archived row with an error
+    is ``quarantined_authorization`` and is never scored. Failed attempts that
+    one of ``amendments`` accepts are marked ``excluded_from_analysis`` before scoring.
     """
     bundle = bundle or load_bundle()
     accepted: dict[str, list[str]] = {}
@@ -262,6 +276,7 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
              "compatibility attempts are engineering checks, not behavioral observations")
     rows: list[dict] = []
     lane_errors: dict[str, str] = {}
+    authorizations: dict[str, str | None] = {}
     for lane in plan["lanes"]:
         try:
             state = _PhaseState(safe_child(directory, lane["path"]), bundle=bundle)
@@ -282,19 +297,30 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
                 rows.append({"assignment_id": entry["entry_id"], **_labels(entry, plan["phase"], lane["lane_id"]),
                              "status": "quarantined_lane", "attempt": None, "score": None,
                              "evidence_error": lane_errors[lane["lane_id"]], "score_error": None,
-                             "excluded_from_analysis": False})
+                             "excluded_from_analysis": False, "authorization_hash": None,
+                             "authorization_error": None})
             continue
         try:
             for entry in state.plan["planned_order"]:
                 row = {"assignment_id": entry["entry_id"], **_labels(entry, plan["phase"], lane["lane_id"]),
                        "status": "unrun", "attempt": None, "score": None, "evidence_error": None,
-                       "score_error": None, "excluded_from_analysis": False}
+                       "score_error": None, "excluded_from_analysis": False, "authorization_hash": None,
+                       "authorization_error": None}
+                starts = [record for record in state.journal.of_kind("attempt_started")
+                          if record["data"]["attempt_id"] == entry["attempt_id"]]
+                if starts:  # spec 10: the same authorization-evidence check as verify
+                    row["authorization_hash"] = starts[0]["data"].get("authorization_hash")
+                    row["authorization_error"] = start_authorization_error(directory, plan, starts[0],
+                                                                           authorizations)
                 try:
                     fixture = read_root_fixture(directory, plan, entry["fixture_id"])
                     row["status"], row["attempt"] = _read_attempt(state, entry, fixture, phase=plan["phase"],
                                                                   bundle=bundle)
                 except _ERRORS as error:
                     row.update(status="quarantined_attempt", attempt=None, evidence_error=str(error))
+                if row["attempt"] is not None and row["authorization_error"] is not None:
+                    row.update(status="quarantined_authorization", attempt=None,
+                               evidence_error=row["authorization_error"])
                 if entry["attempt_id"] in accepted:
                     _exclude(row, entry, state, sorted(accepted[entry["attempt_id"]]), amendment_errors)
                 if row["attempt"] is not None and scorer is not None:
@@ -308,6 +334,7 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
     rows.sort(key=lambda row: row["planned_order"])
     return {"adapter_version": ADAPTER_VERSION, "phase": plan["phase"], "plan_hash": plan["seal_hash"],
             "rows": rows, "lane_errors": lane_errors, "amendment_errors": amendment_errors,
+            "authorization_evidence": dict(sorted(authorizations.items())),
             "status_counts": dict(Counter(row["status"] for row in rows)),
             "verified_model_observations": sum(bool(row["attempt"] and row["attempt"]["model_execution_confirmed"])
                                                for row in rows),
@@ -320,10 +347,12 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
                        summarize: Callable[[list[dict]], dict] | None = None) -> dict:
     """Write a fresh researcher export: one sealed attempt per archived row and a sealed index.
 
-    ``study_directory`` is the study directory in which the root is registered.
-    ``prior_roots`` must be exactly the prior roots sealed in the plan's
-    consumed-attempt ledger; the export refuses if an assignment ran in two
-    roots. The index carries the study's registry listing and amendments.
+    ``study_directory`` is the study directory in which the root is registered,
+    and the root must sit at its registered path and agree with the study's
+    start ledger. ``prior_roots`` must be exactly the prior roots sealed in the
+    plan's consumed-attempt ledger; the export refuses if an assignment ran in
+    two roots. The index carries the study's registry listing and amendments,
+    every journaled authorization with its evidence check, and ``review_plan_hash``.
     """
     directory, output = Path(directory), Path(output)
     _require(not output.resolve().is_relative_to(directory.resolve())
@@ -333,12 +362,18 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     plan = read_live_plan(directory)
     _require(plan["phase"] != "compatibility",
              "compatibility attempts are engineering checks, not behavioral observations")
-    registration = root_registration(study_directory, plan, require_finalized=False)
+    registration = root_registration(study_directory, plan, directory=directory, require_finalized=False)
     check_abandoned_root(directory, registration)
-    ledger = verify_consumed_ledger(directory, plan, prior_roots, bundle=bundle)
+    journals = lane_journals(directory, plan)
+    start_claims = check_start_claims(study_directory, plan, directory, journals)
+    ledger = verify_consumed_ledger(directory, plan, prior_roots, bundle=bundle, study_directory=study_directory)
+    review_plan_hash = check_retained_review_plan(directory, plan) if plan["phase"] == "collection" else None
     amendments = study_amendments(study_directory) if plan["phase"] == "smoke" else []
     data = inspect_live_root(directory, bundle=bundle, scorer=scorer, amendments=amendments)
     _require(not data["amendment_errors"], "; ".join(data["amendment_errors"]))
+    evidence = data["authorization_evidence"]
+    authorizations = {value: evidence[value] if value in evidence else authorization_error(directory, plan, value)
+                      for value in journaled_authorizations(journals)}
     output.mkdir(parents=True, exist_ok=False)
     (output / "attempts").mkdir()
     index = []
@@ -358,7 +393,8 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
         "verified_model_observations": data["verified_model_observations"],
         "consumed_attempt_ledger": ledger, "scored": scorer is not None, "summary": summary,
         "semantic_review": "pending_human_review_of_free_text", "study_registration": registration,
-        "study_registry": study_registry_listing(study_directory),
+        "study_registry": study_registry_listing(study_directory), "start_claims": start_claims,
+        "authorization_evidence": authorizations, "review_plan_hash": review_plan_hash,
         "analysis_exclusions": sorted(row["assignment_id"] for row in data["rows"] if row["excluded_from_analysis"]),
     }))
     return {"output": str(output), "phase": data["phase"], "assignments": len(index),

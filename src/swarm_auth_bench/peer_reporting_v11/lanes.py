@@ -56,6 +56,8 @@ AUTHORIZATION_FIELDS = frozenset({
     "kind", "schema_version", "protocol_id", "phase", "live_plan_hash", "caps_hash", "maximum_live_calls",
     "admission_cutoff_utc", "forced_stop_deadline_utc", "authorization", "recorded_utc", "seal_hash",
 })
+# Spec 10: a compatibility root has no study registry, so its authorization names the root's resolved path.
+COMPATIBILITY_AUTHORIZATION_FIELDS = AUTHORIZATION_FIELDS | {"root_path"}
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 BOUNDED_USAGE = "bounded_by_reservation"
 SETTLED_USAGE = ("settled", BOUNDED_USAGE)
@@ -193,15 +195,20 @@ def parse_utc(value: Any, description: str) -> float:
     return parsed.timestamp()
 
 
-def validate_authorization(record: Any, plan: dict) -> dict:
+def validate_authorization(record: Any, plan: dict, *, root: Path | None = None) -> dict:
     """Require an explicit, sealed user authorization of exactly this sealed live plan.
 
-    Returns the record with parsed ``admission_cutoff`` and ``forced_stop_deadline``
-    timestamps. Any mismatch refuses the phase before a runtime is created.
+    A compatibility authorization also names the root's resolved path
+    (``root_path``); with ``root``, that path must be the root's, so a copied or
+    moved compatibility root needs its own authorization. Returns the record
+    with parsed ``admission_cutoff`` and ``forced_stop_deadline`` timestamps.
+    Any mismatch refuses the phase before a runtime is created.
     """
     check_seal(record)
-    if set(record) != AUTHORIZATION_FIELDS:
-        raise ValueError(f"authorization must contain exactly {sorted(AUTHORIZATION_FIELDS)}")
+    compatibility = plan.get("phase") == "compatibility"
+    fields = COMPATIBILITY_AUTHORIZATION_FIELDS if compatibility else AUTHORIZATION_FIELDS
+    if set(record) != fields:
+        raise ValueError(f"authorization must contain exactly {sorted(fields)}")
     if (record["kind"] != AUTHORIZATION_KIND or record["schema_version"] != AUTHORIZATION_VERSION
             or record["protocol_id"] != PROTOCOL_ID):
         raise ValueError("not a v1.1 execution authorization")
@@ -209,6 +216,12 @@ def validate_authorization(record: Any, plan: dict) -> dict:
             or record["caps_hash"] != plan.get("caps_hash")
             or record["maximum_live_calls"] != plan.get("maximum_live_calls")):
         raise ValueError("authorization names another phase, plan, caps record, or call count")
+    if compatibility:
+        if type(record["root_path"]) is not str or not Path(record["root_path"]).is_absolute():
+            raise ValueError("a compatibility authorization names the root's resolved absolute path")
+        if root is not None and record["root_path"] != str(Path(root).resolve()):
+            raise ValueError("the authorization names another root path; a copied or moved compatibility root "
+                             "needs its own authorization")
     approval = record["authorization"]
     if (type(approval) is not dict or set(approval) != {"status", "text"} or approval["status"] != "approved"
             or type(approval["text"]) is not str or not approval["text"].strip() or len(approval["text"]) > 20000):
