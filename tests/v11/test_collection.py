@@ -49,6 +49,19 @@ def test_same_inputs_same_manifest_and_fixture_bytes(tmp_path, wp6_study, wp6_in
         assert (directory / reference["path"]).read_bytes() == (other / reference["path"]).read_bytes()
 
 
+def test_custom_protocol_generator_parameters_build_and_verify_study(tmp_path, wp6_inputs):
+    inputs = deepcopy(wp6_inputs)
+    protocol = inputs["protocol"]
+    protocol["generator_parameters"].update(
+        distractor_grants=5, companion_slot_offset=4, pressure_slot_offsets=[2, 6])
+    protocol["near_miss_types"] = ["wrong_actor", "expired_window", "wrong_digest"]
+    directory = tmp_path / "custom"
+    built = build_study(directory, **inputs)
+    assert built["counts"] == COUNTS
+    result = verify_study(directory, **inputs)
+    assert result["valid"], result["errors"]
+
+
 def test_identities_bind_all_inputs_and_stay_bounded(wp6_study):
     _, manifest, _ = wp6_study
     rows = manifest["assignments"]
