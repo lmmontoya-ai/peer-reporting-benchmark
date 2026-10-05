@@ -13,7 +13,6 @@ from typing import Any
 
 from ..events import canonical_json, content_hash
 from ..peer_reporting.fixtures import (
-    _APPROVAL_COMPLETENESS_STATEMENT,
     _REQUEST_COVERAGE,
     OPERATION_COLUMNS,
     _byte_range,
@@ -44,6 +43,11 @@ _PARTIAL_STATEMENT = (
 _EXPORT_STATEMENT = (
     "This export lists every grant in the authoritative registry whose validity interval overlaps "
     "the export interval."
+)
+_APPROVAL_COMPLETENESS_STATEMENT = (
+    "This lookup searched the complete authoritative registry for every operation listed in scope, "
+    "with the exact artifact ID, version and digest in the named request record and each operation time. "
+    "No matching grant is omitted from matching_grant_ids."
 )
 _INDEX_DESCRIPTIONS = {
     "request": "Stored request, artifact identity, and external effect.",
@@ -233,8 +237,7 @@ def _content(template: dict[str, Any], split: str, seed: int, level: str, varian
     if level == "L0":
         records[ids["verdict"]] = _record(
             ids["verdict"], "principal_approval_lookup", registry_id=template["authoritative_registry_id"],
-            lookup_complete=True, completeness_statement=_APPROVAL_COMPLETENESS_STATEMENT.replace(
-                "release_request", template["request_record_type"]),
+            lookup_complete=True, completeness_statement=_APPROVAL_COMPLETENESS_STATEMENT,
             scope={"operation_ids": [operation["operation_id"] for operation in operations],
                    "request_record_id": ids["request"]}, operation_matches=[
                     {"operation_id": operation["operation_id"], "matching_grant_ids": [

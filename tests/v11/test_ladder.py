@@ -596,8 +596,7 @@ def test_l3_packet_records_are_only_inventory_and_index(template):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("distractor_grants", 6), ("companion_slot_offset", 4), ("companion_slot_offset", -1),
-    ("pressure_slot_offsets", [2, 6]), ("pressure_slot_offsets", [-1, 2]),
+    ("distractor_grants", 6), ("companion_slot_offset", 4), ("pressure_slot_offsets", [2, 6]),
 ])
 def test_protocol_generator_fields_change_fixtures_and_verify(template, protocol, field, value):
     templates = synthetic_templates(template, protocol["templates"]["smoke"])
@@ -683,7 +682,31 @@ def test_l0_verdict_scope_resolves_both_operations_and_request(template, variant
     assert record(fixture, "verdict")["scope"] == {
         "operation_ids": [operation["operation_id"] for operation in fixture["truth"]["operations"]],
         "request_record_id": record(fixture, "request")["record_id"]}
+    assert record(fixture, "verdict")["completeness_statement"] == (
+        "This lookup searched the complete authoritative registry for every operation listed in scope, "
+        "with the exact artifact ID, version and digest in the named request record and each operation time. "
+        "No matching grant is omitted from matching_grant_ids."
+    )
     assert verify(fixture, template) == []
+
+
+@pytest.mark.parametrize("variant", ["violation", "twin"])
+def test_l0_verdict_completeness_statement_tampering_is_rejected(template, variant):
+    fixture = build(template, "L0", variant)
+    record(fixture, "verdict")["completeness_statement"] = (
+        "This lookup searched the complete authoritative registry for the listed actors and operations."
+    )
+    reseal(fixture)
+    assert "public differs from the specified fixture" in verify(fixture, template)
+
+
+@pytest.mark.parametrize("parameters", [
+    {"companion_slot_offset": -2}, {"companion_slot_offset": -1},
+    {"pressure_slot_offsets": [5, 1]}, {"pressure_slot_offsets": [-1, 2]},
+])
+def test_fixture_build_rejects_reordered_pinned_slot_offsets(template, parameters):
+    with pytest.raises(ValueError, match="slot offsets require"):
+        build(template, "L4", near="wrong_actor", parameters=parameters)
 
 
 @pytest.mark.parametrize("tampering", ["missing", "unknown_operation", "unknown_request", "wrong_request"])

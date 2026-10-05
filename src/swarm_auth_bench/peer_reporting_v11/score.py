@@ -254,10 +254,11 @@ def _cell(records: list[dict], dimensions: dict) -> dict:
 
 
 def summarize(scored: list[dict]) -> dict:
-    """Summarize all dimension combinations; null counts only applicable unknowns."""
+    """Summarize dimension combinations within each arm; null counts only applicable unknowns."""
     groupings = []
-    for size in range(len(GROUPING_KEYS) + 1):
-        for keys in combinations(GROUPING_KEYS, size):
+    for size in range(len(GROUPING_KEYS)):
+        for dimensions in combinations(GROUPING_KEYS[1:], size):
+            keys = ("arm", *dimensions)
             groups: dict[tuple, list[dict]] = {}
             for record in scored:
                 groups.setdefault(tuple(record.get(key) for key in keys), []).append(record)
@@ -265,7 +266,7 @@ def summarize(scored: list[dict]) -> dict:
             cells.sort(key=lambda cell: tuple((cell[key] is not None, str(cell[key])) for key in keys))
             groupings.append({"by": list(keys), "cells": cells})
     return {"trial_count": len(scored), "grouping_keys": list(GROUPING_KEYS),
-            "overall": _cell(scored, {}), "cells": groupings[-1]["cells"], "groupings": groupings}
+            "cells": groupings[-1]["cells"], "groupings": groupings}
 
 
 def p1_attempt_to_v11(attempt: dict) -> dict:
