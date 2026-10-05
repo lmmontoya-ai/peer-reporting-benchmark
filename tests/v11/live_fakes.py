@@ -437,6 +437,7 @@ class FakeTransport(V11PeerRuntime):
         self.interrupt = None
         self.model_task = None
         self.disconnect_on_close = False
+        self.notifications_on_close = []
 
     async def _probe_manifest(self, specs):
         self.probe_calls += 1
@@ -482,13 +483,18 @@ class FakeTransport(V11PeerRuntime):
             await asyncio.sleep(0)
         scope = {"threadId": self.thread_id, "turnId": self.turn_id}
         script = self.script(packet) if callable(self.script) else self.script
-        if script and script[0] == ("no_packet_delivery",):  # the packet's user item never appears
-            script = script[1:]
-        else:
+
+        async def deliver_packet():
             user = {"id": "user-item-1", "type": "userMessage", "content": [{"type": "text", "text": packet}]}
             await self._push("item/started", {**scope, "item": user})
             await self._push("item/completed", {**scope, "item": {**user, "status": "completed"}})
+
+        if script and script[0] == ("no_packet_delivery",):  # the packet's user item never appears
+            script = script[1:]
+        elif ("packet_delivery",) not in script:
+            await deliver_packet()
         end = None
+        interrupted_turn, interrupted_status = {}, None
         for number, step in enumerate(script, 1):
             if self.interrupt.is_set():
                 break
@@ -520,8 +526,16 @@ class FakeTransport(V11PeerRuntime):
                     "id": "agent-item-1", "type": "agentMessage", "text": step[1]}})
             elif step[0] == "raw":  # an arbitrary scoped notification, e.g. a native tool item
                 await self._push(step[1], {**scope, **step[2]})
+            elif step[0] == "raw_thread":  # lifecycle notifications without a top-level turn ID
+                await self._push(step[1], {"threadId": self.thread_id, **step[2]})
             elif step[0] == "thread_status":  # a thread-scoped status notification (no turn ID)
                 await self._push("thread/status/changed", {"threadId": self.thread_id, "status": step[1]})
+            elif step[0] == "packet_delivery":  # replay lifecycle notifications before the delivered user item
+                await deliver_packet()
+            elif step[0] == "interrupted_end":  # lifecycle payloads when the controller interrupts the turn
+                interrupted_turn, interrupted_status = step[1:]
+            elif step[0] == "raw_on_close":  # retained by the final drain, after the settled turn result
+                self.notifications_on_close.append({"method": step[1], "params": {**scope, **step[2]}})
             elif step[0] == "disconnect_on_close":  # the app-server disconnects while the runtime closes
                 self.disconnect_on_close = True
             elif step[0] == "end":  # the turn ends by itself with this status and optional turn error
@@ -543,6 +557,10 @@ class FakeTransport(V11PeerRuntime):
                 if self.interrupt.is_set():
                     break
         turn = {"id": self.turn_id, "status": "interrupted" if self.interrupt.is_set() else "completed"}
+        if self.interrupt.is_set():
+            turn.update(interrupted_turn)
+            if interrupted_status is not None:
+                await self._push("thread/status/changed", {"threadId": self.thread_id, "status": interrupted_status})
         if end is not None and not self.interrupt.is_set():
             turn = {"id": self.turn_id, "status": end[1], **({"error": end[2]} if end[2] is not None else {})}
         await self._push("turn/completed", {"threadId": self.thread_id, "turn": turn})
@@ -552,6 +570,9 @@ class FakeTransport(V11PeerRuntime):
         if self.model_task is not None and not self.model_task.done():
             self.model_task.cancel()
             await asyncio.gather(self.model_task, return_exceptions=True)
+        if self.thread_id in self._sessions:
+            for notification in self.notifications_on_close:
+                await self._sessions[self.thread_id].queue.put(notification)
         if self.disconnect_on_close and self.thread_id in self._sessions:
             await self._sessions[self.thread_id].queue.put({"method": "runtime/disconnected", "params": {}})
         await super().close()

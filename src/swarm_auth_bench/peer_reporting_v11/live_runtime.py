@@ -614,6 +614,52 @@ class _Controller:
             await self.event({"kind": "codex_event", "agent_id": "observer",
                               "method": raw.get("method"), "raw": raw})
 
+    def reconcile_turn_notifications(self, result: TurnResult | None) -> None:
+        """Reconcile every terminal payload after the last drain, including duplicates (Astra R4 M3).
+
+        The legacy turn loop settles on the first completion and does not consume
+        embedded items. Retain those items in the raw trace and mark it incomplete,
+        rather than asserting a clean close with missing model evidence.
+        """
+        completed, contradicted, unresolved = 0, [], []
+        session = self.session
+        for index, event in enumerate(self.raw_events):
+            raw = event.get("raw") or {}
+            method = raw.get("method")
+            if event.get("kind") != "codex_event" or method not in {"turn/started", "turn/completed"}:
+                continue
+            params = raw.get("params") or {}
+            if type(params) is not dict:
+                if method == "turn/completed":
+                    completed += 1
+                    contradicted.append({"raw_event_index": index, "method": method, "params": deepcopy(params)})
+                continue
+            turn = params.get("turn")
+            entry = {"raw_event_index": index, "method": method, "params": deepcopy(params)}
+            if type(turn) is dict:
+                items = turn.get("items", [])
+                if type(items) is not list or items:
+                    unresolved.append(entry)
+            if method == "turn/completed":
+                completed += 1
+                if (result is None or session is None or type(turn) is not dict
+                        or event.get("agent_id") != "observer" or params.get("threadId") != session.thread_id
+                        or turn.get("id") != session.turn_id or turn.get("id") != result.turn_id
+                        or ("turnId" in params and params["turnId"] != result.turn_id)
+                        or turn.get("status") != result.status or turn.get("error") != result.error):
+                    contradicted.append(entry)
+        if contradicted:
+            reason = "terminal notification contradicts settled turn"
+            self.failures.append(reason)
+            self.emit("infrastructure_failed", reason=reason, notifications=contradicted)
+        if unresolved:
+            reason = "unreconciled items in turn lifecycle notification"
+            self.failures.append(reason)
+            self.queue_reconciled = False
+            self.emit("infrastructure_failed", reason=reason, notifications=unresolved)
+        self.emit("turn_notifications_reconciled", completed=completed, contradicted=contradicted,
+                  unresolved=unresolved)
+
     def provider_overload(self, result: TurnResult | None, requested_model: str, *,
                           awaiting_notification: bool = False) -> dict | None:
         """Spec 10 (revision 3): evidence that the provider refused the turn for capacity, or None.
@@ -648,7 +694,7 @@ class _Controller:
                 "error_notifications": deepcopy(errors), "tool_requests": 0, "observer_outputs": 0}
 
     def _non_model_event(self, event: dict) -> str | None:
-        """The method of a retained runtime event that is not a model event, or None for any other event."""
+        """A method whose retained payload proves silence, or None for any other event."""
         session, receipt = self.session, self.exposure_receipt
         raw = event.get("raw") or {}
         params, method = raw.get("params") or {}, raw.get("method")
@@ -658,15 +704,24 @@ class _Controller:
             return method
         if params.get("threadId") != session.thread_id:
             return None
-        if method in STALL_LIFECYCLE_METHODS:
-            status = params.get("status")
-            if method == "thread/status/changed" and (type(status) is not dict
-                                                      or status.get("type") not in STALL_THREAD_STATUSES):
+        if method in {"turn/started", "turn/completed"}:
+            turn = params.get("turn")
+            if (type(turn) is not dict or turn.get("id") != session.turn_id
+                    or ("turnId" in params and params["turnId"] != session.turn_id)
+                    or turn.get("status") != ("inProgress" if method == "turn/started" else "interrupted")
+                    or type(turn.get("items", [])) is not list or turn.get("items", [])
+                    or turn.get("error") is not None):
                 return None
             return method
-        if method == "turn/completed":
-            turn = params.get("turn") or {}
-            return method if turn.get("id") == session.turn_id and turn.get("status") == "interrupted" else None
+        if method in STALL_LIFECYCLE_METHODS:
+            status = params.get("status")
+            if method == "thread/status/changed":
+                if type(status) is not dict or status.get("type") not in STALL_THREAD_STATUSES:
+                    return None
+                flags = status.get("activeFlags", None if status["type"] == "active" else [])
+                if type(flags) is not list or flags:
+                    return None
+            return method
         item = params.get("item") or {}
         if (method in {"item/started", "item/completed"} and params.get("turnId") == session.turn_id
                 and item.get("type") == "userMessage" and item.get("id") == receipt["item_id"]
@@ -686,6 +741,8 @@ class _Controller:
         the turn's interrupted completion. Any model event at all, including
         reasoning or a usage notification, leaves the attempt to the usual
         rules; so does a stall closed by a stop or the forced-stop deadline.
+        Every lifecycle payload must also be silent: no embedded turn items or
+        errors, and an active thread status must have empty active flags.
         """
         session, receipt, boundary = self.session, self.exposure_receipt, self.boundary or {}
         if (result is None or session is None or receipt is None or result.model != requested_model
@@ -874,6 +931,7 @@ async def run_live_observer(
         await controller.drain_runtime_events()
     except (Exception, asyncio.CancelledError) as error:
         await controller.fail(f"runtime cleanup incomplete: {type(error).__name__}: {error}")
+    controller.reconcile_turn_notifications(result)
     receipt_reconciliation = controller.reconcile_receipts()
     if (controller.exposure_receipt is None and (controller.boundary is None
             or controller.boundary["termination_kind"] not in {"per_trial_limit", "collection_forced_truncation"})):
