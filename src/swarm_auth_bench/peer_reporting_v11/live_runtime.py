@@ -20,11 +20,19 @@ phase plans, so the P1 module is not edited. The differences are:
   that otherwise closes cleanly, terminates as ``provider_unavailable`` instead of
   an invalid turn result (spec 10, revision 3). Eligibility is decided after
   shutdown and the last event drain, from every reconciled event: an error with
-  another code, or an announced retry, anywhere in the turn removes it. Any other
-  error, or an overload after a tool request or output, is an execution failure;
+  another code, or an announced retry, anywhere in the turn removes it, and an
+  overload notification that first arrives at the last drain still counts. Any
+  other error, or an overload after a tool request or output, is an execution
+  failure;
 - outside that exception, a non-retryable ``error`` notification is an execution
   failure whatever the final turn status, including an interrupted turn after a
-  stop and a completed one (spec 10, revision 3).
+  stop and a completed one (spec 10, revision 3);
+- a turn whose packet delivery was confirmed and that then received no model
+  event of any kind (no item, delta, reasoning, tool request, output, usage or
+  error notification) until the trial wall closed it, and that otherwise closes
+  cleanly, terminates as ``provider_stalled`` (spec 10, revision 4). It is decided
+  after shutdown and the last event drain, from every retained runtime event. A
+  stall closed by a stop or the forced-stop deadline is not a silent stall.
 
 The exact receipt matching, queue, drain, and usage handling are otherwise
 unchanged. No function in this module runs inference on import or during offline
@@ -54,7 +62,7 @@ from ..runtime import (
     TurnResult,
 )
 from .bundle import ProtocolBundle
-from .lanes import PROVIDER_UNAVAILABLE, validate_effort, validate_world_mode
+from .lanes import PROVIDER_STALLED, PROVIDER_UNAVAILABLE, validate_effort, validate_world_mode
 
 ADAPTER_VERSION = "peer-reporting-v11-live-runtime-v1"
 PREFLIGHT_KIND = "peer_v11_runtime_preflight"
@@ -62,6 +70,11 @@ PREFLIGHT_KIND = "peer_v11_runtime_preflight"
 PROVIDER_OVERLOAD_CODE = "serverOverloaded"
 INVALID_TURN_RESULT = "turn result identity, status, or error invalid"
 PROVIDER_ERROR_FAILURE = "non-retryable provider error notification"
+# Spec 10 (revision 4): app-server notifications that are not model events. A silent stall may show only these, the
+# delivered packet's own user-message item, the turn's interrupted completion, and a disconnect while the runtime
+# closes; any other runtime event is model activity, or at least not silence.
+STALL_LIFECYCLE_METHODS = frozenset({"thread/started", "turn/started", "thread/status/changed"})
+STALL_THREAD_STATUSES = frozenset({"active", "idle"})  # a ``systemError`` status is error evidence, not silence
 
 
 def provider_error_code(error: Any) -> str | None:
@@ -598,7 +611,8 @@ class _Controller:
             await self.event({"kind": "codex_event", "agent_id": "observer",
                               "method": raw.get("method"), "raw": raw})
 
-    def provider_overload(self, result: TurnResult | None, requested_model: str) -> dict | None:
+    def provider_overload(self, result: TurnResult | None, requested_model: str, *,
+                          awaiting_notification: bool = False) -> dict | None:
         """Spec 10 (revision 3): evidence that the provider refused the turn for capacity, or None.
 
         The attributed turn ended by itself (``failed``) after the exact packet
@@ -608,7 +622,10 @@ class _Controller:
         appeared, no usage notification lacked a total, and no failure was
         recorded. Anything else is an invalid turn result. The adapter decides
         with this check again after shutdown and the last drain, so the evidence
-        it records lists every reconciled error notification.
+        it records lists every reconciled error notification. With
+        ``awaiting_notification``, a turn that meets every other condition but has
+        no error notification yet also qualifies, so its decision can wait for
+        the last drain (Astra R2).
         """
         session, errors = self.session, self.provider_errors
         if (result is None or session is None or result.model != requested_model or result.turn_id is None
@@ -619,12 +636,73 @@ class _Controller:
                 or self.assistant_deltas or result.text or self.exposure_receipt is None or self.usage_missing
                 or self.hard_stop.is_set() or (self.boundary or {}).get("reason") != "turn_completed"):
             return None
-        if (not errors or any(error["code"] != PROVIDER_OVERLOAD_CODE for error in errors)
+        if ((not errors and not awaiting_notification)
+                or any(error["code"] != PROVIDER_OVERLOAD_CODE for error in errors)
                 or any(error["will_retry"] is True for error in errors)
                 or (result.error is not None and provider_error_code(result.error) != PROVIDER_OVERLOAD_CODE)):
             return None
         return {"code": PROVIDER_OVERLOAD_CODE, "turn_status": result.status, "turn_error": deepcopy(result.error),
                 "error_notifications": deepcopy(errors), "tool_requests": 0, "observer_outputs": 0}
+
+    def _non_model_event(self, event: dict) -> str | None:
+        """The method of a retained runtime event that is not a model event, or None for any other event."""
+        session, receipt = self.session, self.exposure_receipt
+        raw = event.get("raw") or {}
+        params, method = raw.get("params") or {}, raw.get("method")
+        if event.get("kind") != "codex_event" or event.get("agent_id") != "observer" or type(method) is not str:
+            return None
+        if method == "runtime/disconnected":  # tolerated only while the runtime closes; otherwise a failure
+            return method
+        if params.get("threadId") != session.thread_id:
+            return None
+        if method in STALL_LIFECYCLE_METHODS:
+            status = params.get("status")
+            if method == "thread/status/changed" and (type(status) is not dict
+                                                      or status.get("type") not in STALL_THREAD_STATUSES):
+                return None
+            return method
+        if method == "turn/completed":
+            turn = params.get("turn") or {}
+            return method if turn.get("id") == session.turn_id and turn.get("status") == "interrupted" else None
+        item = params.get("item") or {}
+        if (method in {"item/started", "item/completed"} and params.get("turnId") == session.turn_id
+                and item.get("type") == "userMessage" and item.get("id") == receipt["item_id"]
+                and _text_item(item) == self.fixture["packet"]):
+            return method
+        return None
+
+    def provider_stall(self, result: TurnResult | None, requested_model: str) -> dict | None:
+        """Spec 10 (revision 4): evidence that the provider stayed silent after packet delivery, or None.
+
+        The exact packet was delivered, then the trial wall, and nothing else,
+        closed admission, and the controller's interrupt ended the attributed
+        turn. No tool request, receipt, assistant item, delta, turn text, usage
+        notification (with or without a total), or error notification arrived,
+        no failure was recorded, and every retained runtime event is a non-model
+        lifecycle notification, the delivered packet's own user-message item, or
+        the turn's interrupted completion. Any model event at all, including
+        reasoning or a usage notification, leaves the attempt to the usual
+        rules; so does a stall closed by a stop or the forced-stop deadline.
+        """
+        session, receipt, boundary = self.session, self.exposure_receipt, self.boundary or {}
+        if (result is None or session is None or receipt is None or result.model != requested_model
+                or result.turn_id is None or result.turn_id != session.turn_id or result.status != "interrupted"
+                or result.error is not None or result.termination_reason is not None or result.text):
+            return None
+        if (boundary.get("termination_kind") != "per_trial_limit" or boundary.get("reason") != "trial_wall_limit"
+                or self.failures or self.requests or self.receipts or self.pending_receipts or self.assistant_items
+                or self.assistant_deltas or self.usage_seen or self.usage_missing or self.observed_tokens is not None
+                or self.provider_errors):
+            return None
+        methods = [self._non_model_event(event) for event in self.raw_events]
+        if None in methods:
+            return None
+        return {"boundary_reason": boundary["reason"], "turn_status": result.status,
+                "delivery_confirmed_elapsed_seconds": receipt["elapsed_seconds"],
+                "closed_elapsed_seconds": boundary["elapsed_seconds"],
+                "silent_seconds": boundary["elapsed_seconds"] - receipt["elapsed_seconds"],
+                "runtime_event_methods": methods, "tool_requests": 0, "observer_outputs": 0,
+                "usage_notifications": 0, "error_notifications": 0}
 
 
 def _audited_world(controller: _Controller) -> tuple[dict, dict | None]:
@@ -759,11 +837,16 @@ async def run_live_observer(
     # rest of the close stays clean; it is decided again below, after shutdown, the last drain, receipts, and
     # the world audit.
     overload = controller.provider_overload(result, requested_model)
+    # Astra R2: a failed turn that meets every other condition of the exception, but whose overload notification has
+    # not arrived yet, is decided after the last drain instead of rejected now; if no qualifying notification
+    # arrives by then, it fails exactly as before.
+    deferred = overload is None and controller.provider_overload(result, requested_model,
+                                                                 awaiting_notification=True) is not None
     if overload is not None:
         controller.emit("provider_overload_observed", **overload)
     elif result is not None:
         if (result.model != requested_model or not controller.session or result.turn_id != controller.session.turn_id
-                or result.status not in {"completed", "interrupted"} or result.error):
+                or result.status not in {"completed", "interrupted"} or result.error) and not deferred:
             await controller.fail(INVALID_TURN_RESULT)
         if result.termination_reason in {"native_tool_attempt", "unknown_server_request", "protocol_violation",
                                         "undeclared_tool_attempt", "tool_handler_failure"}:
@@ -845,11 +928,11 @@ async def run_live_observer(
     acknowledged_replies = sorted({message["event_id"] for receipt in controller.receipts
                                    if receipt["tool"] == "read_channel" and receipt["result"].get("status") == "ok"
                                    for message in receipt["result"]["messages"] if message["event_id"] in reply_ids})
-    if overload is not None:
+    if overload is not None or deferred:
         # Spec 10 (revision 3): eligibility is decided from every reconciled event, after shutdown and the last
         # drain, and the recorded evidence is recomputed from them. A late error with another code, a late retry
         # announcement, or anything else that contradicts a clean refusal makes the failed turn an execution
-        # failure again.
+        # failure again. A deferred turn qualifies only now, if its first overload notification arrived late.
         final = controller.provider_overload(result, requested_model)
         if (final is None or not controller.queue_reconciled or not runtime_closed or checkpoint is None or outputs
                 or controller.requests):
@@ -857,6 +940,8 @@ async def run_live_observer(
             controller.emit("infrastructure_failed", reason=INVALID_TURN_RESULT, provider_overload=overload,
                             error_notifications=controller.provider_errors)
             final = None
+        elif deferred:
+            controller.emit("provider_overload_observed", **final)
         overload = final
     terminal_errors = [error for error in controller.provider_errors if error["will_retry"] is not True]
     if overload is None and terminal_errors:
@@ -864,9 +949,16 @@ async def run_live_observer(
         # failure whatever the final turn status, so neither a stop nor a completion can mask it.
         controller.failures.append(PROVIDER_ERROR_FAILURE)
         controller.emit("infrastructure_failed", reason=PROVIDER_ERROR_FAILURE, error_notifications=terminal_errors)
+    # Spec 10 (revision 4): a silent stall is decided last, from every reconciled event, and only after a clean close.
+    stall = (controller.provider_stall(result, requested_model)
+             if overload is None and controller.queue_reconciled and runtime_closed and checkpoint is not None
+             and not outputs and not controller.requests else None)
+    if stall is not None:
+        controller.emit("provider_stall_observed", **stall)
     boundary = controller.boundary or {"termination_kind": "infrastructure_incomplete", "reason": "no_boundary"}
     termination = "infrastructure_incomplete" if controller.failures or not controller.queue_reconciled \
-        else PROVIDER_UNAVAILABLE if overload is not None else boundary["termination_kind"]
+        else PROVIDER_UNAVAILABLE if overload is not None else PROVIDER_STALLED if stall is not None \
+        else boundary["termination_kind"]
     controller.emit("observer_attempt_reconciled", termination_kind=termination,
                     queue_reconciled=controller.queue_reconciled, failures=controller.failures, usage=usage)
     controller.log.close()
@@ -884,7 +976,7 @@ async def run_live_observer(
         "exposure_confirmed": controller.exposure_receipt is not None,
         "exposure_issue": None if controller.exposure_receipt is not None else "initial exposure unverified",
         "initial_receipt": controller.exposure_receipt, "termination_kind": termination, "boundary": boundary,
-        "provider_overload": overload,
+        "provider_overload": overload, "provider_stall": stall,
         "infrastructure_failures": controller.failures, "queue_reconciled": controller.queue_reconciled,
         "runtime_closed": runtime_closed, "elapsed_seconds": controller.elapsed(),
         "drain_elapsed_seconds": clock() - drain_started, "usage": usage,

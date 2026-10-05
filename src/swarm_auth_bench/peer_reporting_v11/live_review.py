@@ -15,9 +15,10 @@ Each archived primary attempt becomes one attempt in the shape produced by P1's
 - ``usage`` (settled and observed tokens, and the settlement label, such as
   ``bounded_by_reservation``) and ``elapsed_seconds``;
 - ``excluded_from_analysis``: true for a failed attempt that an approved
-  amendment accepted, and for a ``provider_unavailable`` attempt (a capacity
-  refusal before any tool request, spec 10, revision 3); such an attempt is also
-  not ``eligible``. It is consumed and exported, not quarantined, and its index
+  amendment accepted, for a ``provider_unavailable`` attempt (a capacity
+  refusal before any tool request, spec 10, revision 3), and for a
+  ``provider_stalled`` attempt (packet delivery confirmed, then no model event
+  until the trial wall, revision 4); such an attempt is also not ``eligible``. It is consumed and exported, not quarantined, and its index
   row names the ``exclusion_reason``. Its score stays on its row, but the
   export's summary leaves it out of every count and cell (spec 12); the index
   lists the excluded rows in ``analysis_exclusions`` and counts them in
@@ -53,7 +54,7 @@ from ..peer_reporting.live_archive import verify_archived_index
 from ..peer_reporting.live_runtime import _text_item
 from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
 from .bundle import ProtocolBundle, load_bundle
-from .lanes import PROVIDER_UNAVAILABLE
+from .lanes import PROVIDER_PAUSE_CLASSIFICATIONS
 from .live import (
     CONFIGURATION_CHECKS,
     _row_valid,
@@ -167,12 +168,13 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
                                observer_error=payload["observer_error"], usage_settlement=settlement["status"],
                                stop_reasons=payload["orchestrator"]["collection_stop_reasons"])
     _require(check == payload["check"], "archived transport classification differs from its evidence")
-    # Spec 10 (revision 3): a capacity refusal is consumed and exported, but it is no behavioral opportunity.
-    provider_unavailable = check.get("classification") == PROVIDER_UNAVAILABLE
-    _require(provider_unavailable == (payload["orchestrator"].get("provider_pause") is not None),
-             "a provider pause is sealed exactly for a provider_unavailable attempt")
+    # Spec 10 (revisions 3 and 4): a capacity refusal or a silent stall is consumed and exported, but it is no
+    # behavioral opportunity.
+    provider_pause = check.get("classification") in PROVIDER_PAUSE_CLASSIFICATIONS
+    _require(provider_pause == (payload["orchestrator"].get("provider_pause") is not None),
+             "a provider pause is sealed exactly for a provider_unavailable or provider_stalled attempt")
     eligible = (all(check["checks"][key] for key in CONFIGURATION_CHECKS if key != "tools_registered")
-                and not provider_unavailable)
+                and not provider_pause)
     # Later infrastructure failures close the opportunity incompletely; they do
     # not erase a known positive established before that failure.
     termination = result["termination_kind"]
@@ -217,7 +219,7 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
             "usage": {"total_tokens": settlement["actual_tokens"],
                       "observed_total_tokens": (result.get("usage") or {}).get("observed_total_tokens"),
                       "settlement": settlement["status"]},
-            "elapsed_seconds": result.get("elapsed_seconds"), "excluded_from_analysis": provider_unavailable}
+            "elapsed_seconds": result.get("elapsed_seconds"), "excluded_from_analysis": provider_pause}
 
 
 def _read_attempt(state: _PhaseState, entry: dict, fixture: dict, *, phase: str, bundle: ProtocolBundle
@@ -340,7 +342,8 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
                     row.update(status="quarantined_authorization", attempt=None,
                                evidence_error=row["authorization_error"])
                 if row["attempt"] is not None and row["attempt"]["excluded_from_analysis"]:
-                    row.update(excluded_from_analysis=True, exclusion_reason=PROVIDER_UNAVAILABLE)
+                    # A pause classification requires the same termination kind, so it names the reason.
+                    row.update(excluded_from_analysis=True, exclusion_reason=row["attempt"]["termination_kind"])
                 if entry["attempt_id"] in accepted:
                     _exclude(row, entry, state, sorted(accepted[entry["attempt_id"]]), amendment_errors)
                 if row["attempt"] is not None and scorer is not None:

@@ -758,6 +758,141 @@ reproduction is kept in `test_live_astra_r3.py`:
 Plans record the M1 to M3 rules in the `transport_contradictions` and
 `provider_overload_policy` execution-policy values.
 
+### Specification revision 4, live layer: silent provider stalls (spec section 10)
+
+In the revision 3 calibration extension, one gpt-6-luna low-effort trial had its
+packet delivery confirmed at 3.8 s. After that it received no model event at all
+until the 360 s trial wall closed it (`per_trial_limit`). Usage was never
+observed, so the attempt settled `unresolved` and held all admission. The earlier
+reasoning-effort study held the same way (luna medium, 180 s wall). Revision 4
+treats this case like a provider overload. `test_live_stall.py` replays it
+through the fake transport: the packet's user-message item, an `active` thread
+status, `turn/started`, then silence. A `TrialClock` jumps the adapter's
+monotonic clock past the wall only after the controller has confirmed delivery.
+
+Adapter (`live_runtime.py`). After the overload decision and the terminal-error
+rule, `provider_stall` returns evidence only when all of these hold:
+
+- the trial wall closed admission, and nothing else did first: the boundary is
+  `per_trial_limit` with reason `trial_wall_limit`;
+- the packet receipt was verified;
+- the controller's interrupt ended the attributed turn: status `interrupted`,
+  no turn error, no runtime termination reason, no turn text;
+- no tool request, receipt, assistant item, delta, usage notification (with
+  or without a total), or error notification of any kind arrived, and no
+  failure was recorded;
+- the close was clean: runtime closed, queue reconciled, world checkpoint,
+  no output;
+- every retained runtime event is one of: `thread/started`, `turn/started`,
+  `thread/status/changed` with status `active` or `idle`, the delivered
+  packet's own user-message item, the turn's interrupted `turn/completed`, or
+  `runtime/disconnected` while the runtime closes. Anything else counts as a
+  model event. That covers reasoning items and deltas, plan or diff updates,
+  token usage, `error`, a `systemError` status, and notifications I did not
+  anticipate.
+
+The termination kind is then `provider_stalled`. The result carries the new key
+`provider_stall`, null in every other case. It records the delivery and close
+times, the silent seconds, and the list of non-model methods. The adapter also
+emits `provider_stall_observed`. A stall that a hard stop or the forced-stop
+deadline closed is a `stop_truncation` as before, and its unknown usage still
+holds. The same applies to silence after any model event, and to a turn that
+completed or failed instead of being interrupted. Silence after a usage
+notification with a total is an ordinary bounded, eligible wall-limit trial.
+
+Orchestration. `evaluate_transport` and `evaluate_qualification` classify an
+attempt `provider_stalled` under the same required checks as
+`provider_unavailable` (`PROVIDER_UNAVAILABLE_REQUIRED`). The attempt must also
+show no observed usage and a reservation-bound settlement. `lanes.PROVIDER_PAUSE_CLASSIFICATIONS`
+names both kinds, and every consumer of the revision 3 exception now reads
+it. `phase.provider_pause_close` (formerly `provider_unavailable_close`) returns
+the kind. It requires no usage notification of any kind for a stall. `_settle` labels the
+settlement `settlement_reason: "provider_stalled"`. `attempt_hold_kinds` holds
+nothing for it. `_archive` records its pause, at study level first, and journals
+it. Verify requires a sealed pause exactly for each attempt of either kind.
+`reconcile_lane` recovers a stall's unjournaled pause from its sealed attempt.
+`check_study_pauses` requires a study record for it. Stalls and overloads share
+one window: the third pause of either kind within 60 minutes holds. The hold
+keeps its revision 3 name, `provider_unavailable_limit:<attempt>`, and the
+restart hold stays `retained_provider_unavailable_limit:<attempt>`. Lane reports
+add `provider_stalled` to `ledger.bounded_tokens_by_settlement_reason`.
+
+Export and other consumers. An exported stall has `eligible: false`,
+`excluded_from_analysis: true`, and `exclusion_reason: "provider_stalled"`. The
+export takes the reason from the attempt's termination kind, which equals the
+classification for both kinds. The scored summary leaves it out (spec 12), and
+review packets skip it. Resource proposals ignore it with the reason
+`classification:provider_stalled`. A stalled compatibility probe is
+unqualified and pauses the compatibility root's own lanes. Plans gain the
+execution-policy key `provider_stall_policy`.
+
+### Astra review of revision 3, round 2 (spec section 10)
+
+The review (`review-astra-r3-round2.md`) left one residual major finding and two
+minor ones. All three are fixed, and the reproductions are in
+`test_live_stall.py`.
+
+R1. Before the fix, a failed write of the study pause record lost the pause for
+every successor root. `_archive` journals `usage_settled`, with its
+`settlement_reason`, before it writes the study pause. A storage failure or a
+crash between the two left the classification durable in the lane journal and
+missing in the study. A successor root that selected another arm then started
+at once, and its own refusal counted 1 instead of 2. Now
+`reconcile_study_pauses` runs in `run_live_phase` for every behavioral root,
+under the coordinator lock, after the gates and before any admission. For each
+start in the study's start ledger that has no pause record, it reads the
+claiming lane's journal at the root's registered path. If that journal settled
+the unarchived attempt with a pause classification, it records the pause now,
+naming the claiming root's plan, path, phase, and lane. The pause begins at this
+reconciliation's wall-clock time, which is no earlier than the real one, and
+counts in the window ending then. A `recovery` field names the journaled
+settlement and the root that recorded it. The crashed root records the missing
+pause on its own resume, so whichever root runs first records it. The run's
+status lists these records in `recovered_study_pauses`. An archived pause-class
+attempt without a study record is refused, as verify refuses it. A claim that
+names no root registered at its path is skipped: no such root can have run, and
+the start ledger checks already report the claim. Every registered root that
+holds a claim without a pause record must be readable at its registered path
+when another root of the study runs, or the run refuses. Roots
+live in the study directory, so moving the study keeps this true. Plans gain the
+execution-policy key `provider_pause_recovery`. The tests cover a failure on
+each side of the pause write, with the successor run either before or after the
+crashed root's resume. In each case the successor waits out the pause and its
+own refusal counts 2. A journaled settlement without a pause classification
+records nothing.
+
+This closes the gap that the reviewer reproduced. It does not cover an attempt
+that never journaled its settlement, for example after a process crash during
+the session. Its outcome is unknown, its own root holds as before, and a
+successor root does not pause for it. Holding every successor until a human
+reconciles such starts, or presuming a pause for each, would change crash
+recovery, so I left that decision to the user.
+
+R2. Before the fix, a clean overload whose only notification arrived at the last
+drain still failed. The first pass rejected the failed turn before the
+notification arrived. Now the first pass defers that rejection when the turn
+meets every other condition of the exception (`provider_overload(...,
+awaiting_notification=True)`). The final check after shutdown then decides it.
+It qualifies only if a qualifying overload notification has arrived by then;
+otherwise the turn fails with the same `turn result identity, status, or error
+invalid` failure as before. This holds with and without a turn error. A late
+notification with another code adds the non-retryable provider error failure,
+as before.
+
+R3. Before the fix, the study pause verifier ignored the recorded root path.
+`check_study_pauses` now requires each record's `root_path` to equal its start
+claim's and the registered path of the record's plan. A re-sealed record naming
+another path is refused, and so is a record and claim pair that both name a path
+the registry does not.
+
+Bindings. Tool schemas, descriptions, wire specs, catalogs, the client,
+`LIVE_VERSION`, and `ADAPTER_VERSION` are unchanged. The adapter returns the new
+key `provider_stall` and the new termination kind `provider_stalled` without a
+version bump, as revision 3 did for `provider_overload`. `live_runtime.py`,
+`phase.py`, `live.py`, `lanes.py`, `live_review.py`, and `resources.py` changed,
+so implementation hashes change, and every live root must be built under this
+code.
+
 ### Compatibility probe
 
 The probe makes one tool-exercise call per lane: six calls. It uses an L1
@@ -872,6 +1007,13 @@ The M3 cases are three roots that select different arms and each wait out the
 previous root's pause until the third refusal within 60 minutes holds, a fourth
 root that holds at its start, and a crash just before or just after the study
 pause record. The m1 case is a scored export with one excluded refusal.
+`test_live_stall.py` covers revision 4 and the second Astra round. It replays the
+observed silent stall, which pauses admission, resumes, exports as excluded, and
+is ignored by resource proposals. Its negatives are one reasoning delta, one usage
+notification with or without a total, a retrying error, a `systemError` status, a
+hard stop, and the forced-stop deadline; none of them is a stall. It also covers
+stalls and overloads sharing one limit, restarts after a stall, a stalled
+compatibility probe, and the R1, R2, and R3 reproductions.
 
 ## WP10: resource proposals and caps approval
 
