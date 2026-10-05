@@ -1,0 +1,293 @@
+"""Read retained v1.1 lane evidence into scorer inputs, without rewriting any source artifact.
+
+Each archived primary attempt becomes one attempt in the shape produced by P1's
+``peer_reporting.live_review`` (``fixture``, ``tool_requests``, ``observer_outputs``,
+``task_submissions``, ``accepted_reports``, ``termination_kind``,
+``exposure_confirmed``, ``eligible``, ...) with these v1.1 additions:
+
+- ``model``, ``effort``, ``world_mode``, ``prompt_condition``, and the descriptive
+  assignment labels (``phase``, ``lane_id``, ``split``, ``arm``, ``template_id``,
+  ``level``, ``variant``, ``near_miss_type``, ``planned_order``);
+- ``report_attempts``: every ``report_incident`` request, stored or not, with its
+  raw arguments and result, for ``focal_intent`` and the unavailable report store;
+- ``usage`` (settled and observed tokens) and ``elapsed_seconds``.
+
+No model, repair, resume, or admission operation is performed. Compatibility
+roots are engineering checks and are not exported. Every planned row is kept;
+unrun, incomplete, and quarantined rows have no attempt and never become negatives.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections import Counter
+from copy import deepcopy
+from pathlib import Path
+from typing import Callable
+
+from ..events import content_hash
+from ..long_events import iter_events
+from ..peer_reporting.live import UNSTARTED, _plain
+from ..peer_reporting.live_archive import verify_archived_index
+from ..peer_reporting.live_runtime import _text_item
+from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
+from .bundle import ProtocolBundle, load_bundle
+from .live import CONFIGURATION_CHECKS, evaluate_transport, read_live_plan, read_root_fixture
+from .phase import _PhaseState
+
+ADAPTER_VERSION = "peer-reporting-v11-live-review-v1"
+EXPORT_KIND = "peer_reporting_v11_live_review_export"
+_ERRORS = (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError)
+ROW_LABELS = ("split", "arm", "template_id", "level", "variant", "near_miss_type", "planned_order")
+
+
+def _require(condition: bool, reason: str) -> None:
+    if not condition:
+        raise ValueError(reason)
+
+
+def _labels(entry: dict, phase: str, lane: str) -> dict:
+    return {"phase": phase, "lane_id": lane, "model": entry["model"], "effort": entry["reasoning_effort"],
+            "world_mode": entry["world_mode"], "prompt_condition": entry["prompt_condition"],
+            **{key: entry[key] for key in ROW_LABELS}}
+
+
+def report_attempts(tool_requests: list[dict]) -> list[dict]:
+    """Every report_incident request in arrival order, whether or not the world stored it."""
+    return [{"arrival_seq": request["arrival_seq"], "arguments": deepcopy(request.get("arguments")),
+             "admitted": request.get("admitted"), "result": deepcopy(request.get("result")),
+             "stored": (request.get("result") or {}).get("status") == "stored"}
+            for request in tool_requests if request.get("tool") == "report_incident"]
+
+
+def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Path, *, phase: str, lane: str,
+                      bundle: ProtocolBundle) -> dict:
+    result = payload["observer_result"]
+    settlement = payload["orchestrator"]["usage_settlement"]
+    base = {
+        "adapter_version": ADAPTER_VERSION, "execution_kind": "live_model",
+        "assignment_id": entry["entry_id"], "attempt_id": payload["attempt_id"], "primary": True,
+        "attempt_number": 1, "fixture": fixture, "source_attempt_hash": content_hash(payload),
+        "source_plan_hash": payload["plan_hash"], **_labels(entry, phase, lane),
+    }
+    if result is None:
+        return {**base, "eligible": False, "exposure_confirmed": False,
+                "termination_kind": "infrastructure_incomplete", "accepted_reports": [], "report_attempts": [],
+                "observer_outputs": [], "observed_peer_messages": [], "task_submissions": [],
+                "tool_requests": [], "tool_receipts": [], "model_execution_confirmed": False,
+                "usage": {"total_tokens": settlement["actual_tokens"], "observed_total_tokens": None},
+                "elapsed_seconds": None}
+    _require(type(result) is dict, "observer result is not an object")
+    _require(result["attempt_id"] == payload["attempt_id"]
+             and result["instructions_hash"] == content_hash(entry["instructions"])
+             and result["instructions_and_roles_hash"] == entry["instructions_and_roles_hash"]
+             and result["packet_sha256"] == hashlib.sha256(fixture["packet"].encode("utf-8")).hexdigest()
+             and result["reasoning_effort"] == entry["reasoning_effort"]
+             and result["world_mode"] == entry["world_mode"],
+             "live result differs from the sealed assignment inputs")
+    world = bundle.audit_state(attempt_dir / "world", result["world_checkpoint"])
+    _require(world == result["world_state"] and world["trial_id"] == payload["attempt_id"],
+             "archived world differs from durable assignment evidence")
+    checkpoint = result["controller_checkpoint"]
+    events = list(iter_events(attempt_dir / "runtime-log" / "events.jsonl",
+                              expected_count=checkpoint["event_count"], expected_hash=checkpoint["final_hash"]))
+    retained_events = [event["data"]["adapter_event"] for event in events]
+    _require(retained_events == result["events"], "archived controller events differ from durable evidence")
+    _require(all(event["run_id"] == payload["attempt_id"] for event in events),
+             "controller log belongs to another attempt")
+    _require([event["event"] for event in retained_events if event["kind"] == "runtime_event"]
+             == result["raw_events"], "raw runtime evidence differs from controller events")
+    receipt = result["initial_receipt"]
+    confirmed = [event["receipt"] for event in retained_events
+                 if event["kind"] == "initial_packet_delivery_confirmed"]
+    _require(confirmed == ([receipt] if receipt is not None else []),
+             "initial receipt is not retained in the controller evidence")
+    exposure = result["exposure_confirmed"] is True and world["exposure_confirmed"] is True and receipt is not None
+    if receipt is not None:
+        raw = receipt["raw"]["params"]
+        item = raw["item"]
+        _require(receipt["packet_hash"] == content_hash(fixture["packet"])
+                 and receipt["raw"]["method"] == "item/completed"
+                 and raw["threadId"] == receipt["thread_id"] and raw["turnId"] == receipt["turn_id"]
+                 and item["id"] == receipt["item_id"] and item["type"] == "userMessage"
+                 and item.get("status", "completed") == "completed"
+                 and _text_item(item) == fixture["packet"], "initial packet receipt mismatch")
+    check = evaluate_transport(result, fixture=fixture, entry=entry, preflight=payload["preflight"], bundle=bundle,
+                               orchestrator_failures=payload["orchestrator"]["evidence_failures"],
+                               observer_error=payload["observer_error"])
+    _require(check == payload["check"], "archived transport classification differs from its evidence")
+    eligible = all(check["checks"][key] for key in CONFIGURATION_CHECKS if key != "tools_registered")
+    # Later infrastructure failures close the opportunity incompletely; they do
+    # not erase a known positive established before that failure.
+    termination = result["termination_kind"]
+    if (payload["orchestrator"]["evidence_failures"] or not result["runtime_closed"]
+            or not result["queue_reconciled"] or result["infrastructure_failures"]):
+        termination = "infrastructure_incomplete"
+    outputs = []
+    arrivals = {request["world_arrival_seq"]: request for request in result["tool_requests"]
+                if request.get("world_arrival_seq") is not None}
+    replies = []
+    acknowledged = set(result["peer_reply_evidence"]["acknowledged_reply_event_ids"])
+    for event in world["events"]:
+        if event["kind"] != "public_message_stored":
+            continue
+        message = event["data"]["message"]
+        if message["source_kind"] == "observer_message":
+            arrival = arrivals[event["arrival_seq"]]
+            outputs.append({"output_id": message["event_id"], "source_kind": "observer_message",
+                            "text": message["text"], "recipient": message["recipient"],
+                            "reply_to": message["reply_to"], "sequence": event["event_seq"],
+                            "room_sequence": message["sequence"], "elapsed_seconds": event["elapsed_seconds"],
+                            "controller_sequence": arrival["arrival_event_seq"], "audience": "release-room",
+                            "delivery_status": "durably_stored_public_message"})
+        elif message["source_kind"] == "scripted_peer_message":
+            replies.append({**message, "sequence": event["event_seq"], "elapsed_seconds": event["elapsed_seconds"],
+                            "delivery_status": "read_channel_receipt_confirmed" if message["event_id"] in acknowledged
+                            else "stored_reply_without_confirmed_read_receipt"})
+    for original in result["observer_outputs"]:
+        output = deepcopy(original)
+        output.update(sequence=original["arrival_event_seq"], controller_sequence=original["arrival_event_seq"],
+                      reply_to=None, audience="simulated_task_owner", delivery_status=original["delivery_evidence"])
+        outputs.append(output)
+    outputs.sort(key=lambda output: (output["controller_sequence"], output["elapsed_seconds"]))
+    return {**base, "eligible": eligible, "exposure_confirmed": exposure, "termination_kind": termination,
+            "accepted_reports": [{"report_id": report["report_id"], "payload": deepcopy(report["report"])}
+                                 for report in world["reports"]],
+            "report_attempts": report_attempts(result["tool_requests"]),
+            "observer_outputs": outputs, "observed_peer_messages": replies,
+            "task_submissions": [deepcopy(answer["answer"]) for answer in world["task_answers"]],
+            "tool_requests": deepcopy(result["tool_requests"]), "tool_receipts": deepcopy(result["tool_receipts"]),
+            "model_execution_confirmed": result["execution_kind"] == "live_model",
+            "usage": {"total_tokens": settlement["actual_tokens"],
+                      "observed_total_tokens": (result.get("usage") or {}).get("observed_total_tokens")},
+            "elapsed_seconds": result.get("elapsed_seconds")}
+
+
+def _read_attempt(state: _PhaseState, entry: dict, fixture: dict, *, phase: str, bundle: ProtocolBundle
+                  ) -> tuple[str, dict | None]:
+    indexed = state.index["entries"][entry["entry_id"]]
+    starts = [record for record in state.journal.of_kind("attempt_started")
+              if record["data"]["attempt_id"] == entry["attempt_id"]]
+    archives = [record for record in state.journal.of_kind("attempt_archived")
+                if record["data"]["attempt_id"] == entry["attempt_id"]]
+    if not starts:
+        _require(indexed["status"] in UNSTARTED and indexed["attempt"] is None,
+                 "attempt status has no journaled start")
+        return indexed["status"], None
+    if indexed["status"] != "archived":
+        _require(not archives, "archived attempt is missing from the index; explicit reconciliation is required")
+        return "incomplete_interrupted", None
+    _require(len(starts) == 1 and len(archives) == 1, "archived attempt has no unique start and archive")
+    attempt_dir = safe_child(state.directory, f"attempts/{entry['attempt_id']}")
+    payload = _plain(read_sealed(attempt_dir / "attempt.json"))
+    _require(payload["plan_hash"] == state.plan_hash and payload["attempt_id"] == entry["attempt_id"]
+             and payload["entry_id"] == entry["entry_id"] and payload["model"] == entry["model"]
+             and payload["reasoning_effort"] == entry["reasoning_effort"]
+             and payload["world_mode"] == entry["world_mode"]
+             and payload["prompt_condition"] == entry["prompt_condition"]
+             and payload["phase"] == phase and payload["primary"] is True and payload["attempt_number"] == 1
+             and payload["reservation_id"] == starts[0]["data"]["reservation_id"]
+             and payload["started_journal_seq"] == starts[0]["sequence"]
+             and archives[0]["data"]["entry_id"] == entry["entry_id"]
+             and payload["instructions_hash"] == content_hash(entry["instructions"])
+             and payload["fixture_hash"] == content_hash(fixture), "attempt differs from the sealed primary assignment")
+    verify_archived_index(payload, indexed["attempt"], starts[0], archives[0], state.journal.records)
+    sink = payload["orchestrator"]["sink_checkpoint"]
+    list(iter_events(attempt_dir / "orchestrator-events" / "events.jsonl",
+                     expected_count=sink["count"], expected_hash=sink["final_hash"]))
+    return "archived", normalize_attempt(payload, fixture, entry, attempt_dir, phase=phase,
+                                         lane=state.plan["lane_id"], bundle=bundle)
+
+
+def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
+                      scorer: Callable[[dict], dict] | None = None) -> dict:
+    """Return every planned row; verified archived rows carry their attempt and optional score."""
+    bundle = bundle or load_bundle()
+    directory = Path(directory)
+    plan = read_live_plan(directory)
+    _require(plan["phase"] != "compatibility",
+             "compatibility attempts are engineering checks, not behavioral observations")
+    rows: list[dict] = []
+    lane_errors: dict[str, str] = {}
+    for lane in plan["lanes"]:
+        try:
+            state = _PhaseState(safe_child(directory, lane["path"]), bundle=bundle)
+        except _ERRORS as error:
+            lane_errors[lane["lane_id"]] = str(error)
+            state = None
+        if state is not None:
+            try:
+                _require(state.plan_hash == lane["plan_hash"], "lane plan differs from the sealed live plan")
+                state.verify_budget_history()
+            except _ERRORS as error:
+                lane_errors[lane["lane_id"]] = str(error)
+                state.journal.close()
+                state = None
+        if state is None:
+            lane_plan = read_sealed(safe_child(directory, f"{lane['path']}/phase-plan.json"))
+            for entry in lane_plan["planned_order"]:
+                rows.append({"assignment_id": entry["entry_id"], **_labels(entry, plan["phase"], lane["lane_id"]),
+                             "status": "quarantined_lane", "attempt": None, "score": None,
+                             "evidence_error": lane_errors[lane["lane_id"]], "score_error": None})
+            continue
+        try:
+            for entry in state.plan["planned_order"]:
+                row = {"assignment_id": entry["entry_id"], **_labels(entry, plan["phase"], lane["lane_id"]),
+                       "status": "unrun", "attempt": None, "score": None, "evidence_error": None,
+                       "score_error": None}
+                try:
+                    fixture = read_root_fixture(directory, plan, entry["fixture_id"])
+                    row["status"], row["attempt"] = _read_attempt(state, entry, fixture, phase=plan["phase"],
+                                                                  bundle=bundle)
+                except _ERRORS as error:
+                    row.update(status="quarantined_attempt", attempt=None, evidence_error=str(error))
+                if row["attempt"] is not None and scorer is not None:
+                    try:
+                        row["score"] = scorer(row["attempt"])
+                    except _ERRORS as error:
+                        row["score_error"] = str(error)
+                rows.append(row)
+        finally:
+            state.journal.close()
+    rows.sort(key=lambda row: row["planned_order"])
+    return {"adapter_version": ADAPTER_VERSION, "phase": plan["phase"], "plan_hash": plan["seal_hash"],
+            "rows": rows, "lane_errors": lane_errors,
+            "status_counts": dict(Counter(row["status"] for row in rows)),
+            "verified_model_observations": sum(bool(row["attempt"] and row["attempt"]["model_execution_confirmed"])
+                                               for row in rows),
+            "planned_count": plan["maximum_live_calls"]}
+
+
+def export_live_review(directory: Path, output: Path, *, bundle: ProtocolBundle | None = None,
+                       scorer: Callable[[dict], dict] | None = None,
+                       summarize: Callable[[list[dict]], dict] | None = None) -> dict:
+    """Write a fresh researcher export: one sealed attempt per archived row and a sealed index."""
+    directory, output = Path(directory), Path(output)
+    _require(not output.resolve().is_relative_to(directory.resolve())
+             and not directory.resolve().is_relative_to(output.resolve()),
+             "export must be outside the source live root")
+    data = inspect_live_root(directory, bundle=bundle, scorer=scorer)
+    output.mkdir(parents=True, exist_ok=False)
+    (output / "attempts").mkdir()
+    index = []
+    for row in data["rows"]:
+        visible = {key: value for key, value in row.items() if key != "attempt"}
+        if row["attempt"] is not None:
+            relative = f"attempts/{row['assignment_id']}.json"
+            atomic_json(safe_child(output, relative), seal(row["attempt"]))
+            visible.update(attempt_path=relative, attempt_hash=content_hash(row["attempt"]))
+        index.append(visible)
+    scored = [row["score"] for row in data["rows"] if row["score"] is not None]
+    summary = summarize(scored) if summarize is not None else None
+    atomic_json(output / "index.json", seal({
+        "kind": EXPORT_KIND, "adapter_version": ADAPTER_VERSION, "phase": data["phase"],
+        "source_plan_hash": data["plan_hash"], "planned_count": data["planned_count"], "rows": index,
+        "status_counts": data["status_counts"], "lane_errors": data["lane_errors"],
+        "verified_model_observations": data["verified_model_observations"],
+        "scored": scorer is not None, "summary": summary,
+        "semantic_review": "pending_human_review_of_free_text",
+    }))
+    return {"output": str(output), "phase": data["phase"], "assignments": len(index),
+            "attempts": sum("attempt_path" in row for row in index), "status_counts": data["status_counts"],
+            "verified_model_observations": data["verified_model_observations"], "lane_errors": data["lane_errors"],
+            "scored": scorer is not None}
