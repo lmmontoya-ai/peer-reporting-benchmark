@@ -258,6 +258,7 @@ truth = {
                   operation_time, artifact, storage_stage, authorized}],
   "focal_operation_id",            # null for benign, ambiguity, accusation
   "unauthorized_operation_ids",
+  "operation_stems": {operation_name: [stems]},   # from the template, for the scorer
   "innocent_actor_ids",            # roster peers with no unauthorized operation
   "unverified_claim": {message_id, alleged_actor_id, alleged_operation,
                        actual_operation_occurred: false, observer_can_decide_allegation: false} | null,
@@ -504,6 +505,52 @@ by the existing P1 tests.
 | `cli.py` | offline and live commands | WP1, WP6 |
 
 Tests go in `tests/v11/`, one file per module.
+
+### 13.1 Interfaces
+
+Work packages build against these signatures. Change them only through the integration
+branch.
+
+```python
+# schemas.py (WP3)
+SCHEMA_VERSION: str; TOOL_DESCRIPTORS: list[dict]; INPUT_SCHEMAS: dict; OUTPUT_SCHEMAS: dict
+class V11SchemaError(ValueError):            # attributes: field: str, rule: str, limit: int | None
+def validate_input(name: str, arguments: object) -> None    # raises V11SchemaError
+def validate_output(name: str, value: object) -> None
+
+# world.py (WP3). Same public methods and properties as peer_reporting.world.PeerWorld:
+# dispatch, confirm_exposure, close, result_for, snapshot, checkpoint, failure, closed,
+# close_reason, exposure_confirmed, events, requests, reports, task_answers, messages.
+class V11World:
+    def __init__(self, fixture: dict, directory: Path, trial_id: str = "offline-trial",
+                 max_tool_requests: int = 32, world_mode: str = "normal") -> None
+def audit_state(directory: Path, checkpoint: dict | None = None) -> dict
+
+# incidents.py (WP2)
+CUE_WORDS: tuple[str, ...]
+def load_template(template_id: str) -> dict
+def load_all_templates() -> dict[str, dict]
+def validate_template(template: dict) -> list[str]      # empty list means valid
+
+# ladder.py (WP5)
+def build_fixture(template: dict, *, split: str, seed: int, level: str, variant: str,
+                  near_miss_type: str | None = None, parameters: dict | None = None) -> dict
+def verify_fixture(fixture: dict, template: dict) -> list[str]
+def is_authorized(operation: dict, records: dict, policy: dict) -> bool   # verifier-side rule
+
+# prompts.py (WP6)
+def build_instructions(condition: str, template: dict, budget_policy: dict | None = None) -> str
+
+# structured.py, score.py (WP4)
+def report_coverage(payload: dict, truth: dict) -> dict      # uses truth["operation_stems"]
+def score_trial(attempt: dict) -> dict                         # attempt["fixture"] holds truth
+def summarize(scored: list[dict]) -> dict
+```
+
+`attempt` has the shape produced by `peer_reporting.live_review` for P1 (keys include
+`fixture`, `tool_requests`, `observer_outputs`, `task_submissions`, `accepted_reports`,
+`termination_kind`, `exposure_confirmed`, `eligible`). v1.1 live review must keep this
+shape and add `world_mode` and `effort`.
 
 ## 14 Verification checklist
 
