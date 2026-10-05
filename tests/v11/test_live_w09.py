@@ -468,6 +468,25 @@ async def test_a_changed_sealed_file_refuses_the_run_and_is_reported(compat, tmp
     assert report["implementation_changes"] == ["peer_reporting_v11/world.py"]
 
 
+def test_no_execution_module_imports_a_post_hoc_module():
+    import re
+    from pathlib import Path
+
+    package = Path(v11_phase.__file__).parent
+    exempt = {Path(name).stem for name in v11_phase.POST_HOC_MODULES}
+    anywhere = re.compile(r"^\s*(?:from\s+\.(?:\w+\.)*(?P<a>\w+)\s+import|from\s+\.\s+import\s+(?P<b>[\w, ]+))", re.M)
+    top_level = re.compile(r"^(?:from\s+\.(?:\w+\.)*(?P<a>\w+)\s+import|from\s+\.\s+import\s+(?P<b>[\w, ]+))", re.M)
+    for path in package.glob("*.py"):
+        if path.stem in exempt:
+            continue
+        # The CLI dispatches offline commands too; it may import post-hoc code only inside their branches.
+        pattern = top_level if path.stem == "cli" else anywhere
+        imported = set()
+        for match in pattern.finditer(path.read_text(encoding="utf-8")):
+            imported.add(match["a"]) if match["a"] else imported.update(n.strip() for n in match["b"].split(","))
+        assert not imported & exempt, f"{path.name} imports post-hoc module(s) {imported & exempt}"
+
+
 async def test_a_changed_scorer_is_reported_but_does_not_gate_the_run(compat, tmp_path, monkeypatch):
     study, _, fixtures = smoke_study(tmp_path / "study")
     root = tmp_path / "smoke"

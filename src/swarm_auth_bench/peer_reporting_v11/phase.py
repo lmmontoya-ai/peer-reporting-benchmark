@@ -936,7 +936,10 @@ def lane_report(state: _PhaseState) -> dict:
 
 # Scoring runs offline after collection and never touches a live trial. Its files stay in the
 # sealed hashes, so verify reports any change as a declared deviation, but they do not gate a run.
-POST_HOC_MODULES = frozenset({"peer_reporting_v11/score.py", "peer_reporting_v11/structured.py"})
+POST_HOC_MODULES = frozenset({
+    "peer_reporting_v11/score.py", "peer_reporting_v11/structured.py", "peer_reporting_v11/rubric.py",
+    "peer_reporting_v11/review.py", "peer_reporting_v11/review_plan.py",
+})
 
 
 def implementation_changes(sealed: dict, *, execution_only: bool = False) -> list[str]:

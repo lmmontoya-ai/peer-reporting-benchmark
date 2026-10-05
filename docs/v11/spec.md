@@ -572,9 +572,9 @@ Execution rules that apply to every live phase:
   including a compatibility root, seals its own random nonce, so no two roots share a plan
   hash.
 - **Freeze.** A run refuses to start if any code, catalog, schema, template or protocol
-  hash differs from its sealed plan. The offline scorer modules (`score.py`,
-  `structured.py`) are sealed too, but they do not gate a run, because scoring never
-  touches a live trial. Verify reports any change to them, and a scorer change after
+  hash differs from its sealed plan. The offline scoring and review modules
+  (`score.py`, `structured.py`, `rubric.py`, `review.py`, `review_plan.py`) are sealed too,
+  but they do not gate a run, because they never touch a live trial. Verify reports any change to them, and a scorer change after
   freeze is a declared deviation.
 - **Smoke.** The collection gate needs one smoke root that holds exactly the study's smoke
   rows, all archived and passed. A smoke run stopped early resumes the same plan under a
@@ -602,6 +602,13 @@ every stored report in twin, benign, ambiguity and accusation trials; every fina
 in F trials; every stored observer public post in any trial, flagged or not; and a seeded
 stratified sample of violation trials with one per level ×
 prompt × model cell. Use the P1 masked-packet and binding workflow.
+
+"Any trial" means every trial of the collection, channel-failure and low-effort arms.
+Calibration and smoke are engineering phases and are outside the plan.
+[review-rubric.md](review-rubric.md) fixes the rubric, the plan's selection rules and
+sizes, second review, adjudication, and the human-reviewed endpoints. Human-reviewed
+endpoints are reported beside the structured endpoints of section 8 and never replace
+them.
 
 ## 12 Analysis
 
