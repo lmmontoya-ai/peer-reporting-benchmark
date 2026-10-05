@@ -153,6 +153,91 @@ def test_a_truth_conflict_waits_for_adjudication(tmp_path):
     assert result["outputs"][0]["resolution"] == "adjudicated"
 
 
+@pytest.mark.parametrize("case", ["self_adjudication", "missing_second", "no_initial"])
+def test_packet_resolution_rejects_astras_three_adjudication_bypasses(tmp_path, case):
+    item = fixture()
+    focal = operations(item)["focal"]["operation_id"]
+    packet = bundle_for(replay(tmp_path, item, [report(item, actors=[])]), scope="reports_and_posts")["packet"]
+    (identifier,) = output_ids(packet, "private_report")
+    first = review(reviewer="human-A", claims=[(focal, True)])
+    second = review(reviewer="human-B", concern=True, uncertainty="decidable")
+    records = {"self_adjudication": [first, second], "missing_second": [first], "no_initial": []}[case]
+    uploads = [upload(packet, {identifier: record}) for record in records]
+    with pytest.raises(ValueError, match="adjudicat"):
+        resolve_packet_reviews(packet, uploads, second_review=True, adjudications={identifier: first})
+
+
+@pytest.mark.parametrize("second_review", [False, True])
+def test_a_third_human_can_resolve_a_retained_disagreement(tmp_path, second_review):
+    item = fixture()
+    focal = operations(item)["focal"]["operation_id"]
+    attempt = replay(tmp_path, item, [report(item, actors=[])])
+    bundle = bundle_for(attempt, scope="reports_and_posts")
+    packet = bundle["packet"]
+    (identifier,) = output_ids(packet, "private_report")
+    first = review(reviewer="a", claims=[(focal, True)])
+    second = review(reviewer="b", concern=True, uncertainty="decidable")
+    adjudicator = review(reviewer="c", claims=[(focal, True)])
+    resolved = resolve_packet_reviews(packet, [upload(packet, {identifier: record}) for record in (first, second)],
+                                      second_review=second_review, adjudications={identifier: adjudicator})
+    assert resolved[identifier]["initial_reviews"] == [first, second]
+    assert resolved[identifier]["adjudication"] == adjudicator
+    assert resolved[identifier]["disputed_labels"] == ["unauthorized_claims", "uncertainty"]
+    result = human_endpoints(attempt, bundle["bindings"], resolved, structured=structured(attempt))
+    assert values(result)["supported_focal_report"] is True
+    assert values(result)["report_false_alarm"] is False
+
+
+@pytest.mark.parametrize("reviewer", ["a", "adjudicator"])
+@pytest.mark.parametrize("second_review", [False, True])
+def test_single_record_conflict_requires_another_reviewer_and_any_planned_second_review(
+        tmp_path, reviewer, second_review):
+    item = fixture()
+    focal = operations(item)["focal"]["operation_id"]
+    packet = bundle_for(replay(tmp_path, item, [report(item, actors=[])]), scope="reports_and_posts")["packet"]
+    (identifier,) = output_ids(packet, "private_report")
+    first = review(reviewer="a", claims=[(focal, False)], unsupported=True)
+    adjudicator = review(reviewer=reviewer, claims=[(focal, True)])
+    if reviewer == "a" or second_review:
+        with pytest.raises(ValueError, match="distinct|required second review"):
+            resolve_packet_reviews(packet, [upload(packet, {identifier: first})], second_review=second_review,
+                                   adjudications={identifier: adjudicator})
+    else:
+        resolved = resolve_packet_reviews(packet, [upload(packet, {identifier: first})], second_review=False,
+                                          adjudications={identifier: adjudicator})
+        assert resolved[identifier]["status"] == "final"
+
+
+def test_a_single_review_without_a_record_conflict_cannot_be_adjudicated(tmp_path):
+    item = fixture()
+    focal = operations(item)["focal"]["operation_id"]
+    packet = bundle_for(replay(tmp_path, item, [report(item, actors=[])]), scope="reports_and_posts")["packet"]
+    (identifier,) = output_ids(packet, "private_report")
+    first = review(reviewer="a", claims=[(focal, True)])
+    with pytest.raises(ValueError, match="both initial reviews"):
+        resolve_packet_reviews(packet, [upload(packet, {identifier: first})], second_review=False,
+                               adjudications={identifier: review(reviewer="adjudicator")})
+
+
+@pytest.mark.parametrize("corrected", [False, True])
+def test_record_conflict_adjudication_with_both_required_reviews_can_confirm_or_correct(tmp_path, corrected):
+    item = fixture()
+    focal = operations(item)["focal"]["operation_id"]
+    attempt = replay(tmp_path, item, [report(item, actors=[])])
+    bundle = bundle_for(attempt, scope="reports_and_posts")
+    packet = bundle["packet"]
+    (identifier,) = output_ids(packet, "private_report")
+    reviews = [review(reviewer=reviewer, claims=[(focal, False)], unsupported=True) for reviewer in ("a", "b")]
+    adjudicator = review(reviewer="c", claims=[(focal, corrected)], unsupported=not corrected)
+    resolved = resolve_packet_reviews(packet, [upload(packet, {identifier: record}) for record in reviews],
+                                      second_review=True, adjudications={identifier: adjudicator})
+    assert resolved[identifier]["initial_reviews"] == reviews
+    result = human_endpoints(attempt, bundle["bindings"], resolved, structured=structured(attempt))
+    assert result["outputs"][0]["status"] == "final"
+    assert values(result)["supported_focal_report"] is corrected
+    assert values(result)["report_false_alarm"] is not corrected
+
+
 def test_second_review_needs_two_agreeing_reviewers(tmp_path):
     item = fixture(variant="twin")
     attempt = replay(tmp_path, item, [post("All grants look exact to me.")])

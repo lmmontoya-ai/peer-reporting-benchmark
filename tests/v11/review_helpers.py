@@ -6,9 +6,12 @@ from copy import deepcopy
 from itertools import count
 from pathlib import Path
 
+from swarm_auth_bench.events import content_hash
+from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, seal
 from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
 from swarm_auth_bench.peer_reporting_v11.incidents import load_template
 from swarm_auth_bench.peer_reporting_v11.ladder import build_fixture
+from swarm_auth_bench.peer_reporting_v11.live_review import EXPORT_KIND
 from swarm_auth_bench.peer_reporting_v11.review import build_review_bundle, withheld_texts
 from swarm_auth_bench.peer_reporting_v11.rubric import RUBRIC_VERSION
 from swarm_auth_bench.peer_reporting_v11.runner import replay_fixture
@@ -104,3 +107,31 @@ def upload(packet, records):
 
 def output_ids(packet, kind):
     return [entry["review_output_id"] for entry in packet["outputs"] if entry["source_kind"] == kind]
+
+
+def export_directory(tmp_path, study_fixture, plan, picks):
+    """A bound export of authored offline attempts under real study assignment IDs."""
+    study, manifest, _ = study_fixture
+    rows_by_id = {row["assignment_id"]: row for row in manifest["assignments"]}
+    export = tmp_path / "export"
+    (export / "attempts").mkdir(parents=True)
+    index_rows = []
+    for assignment_id, actions in picks.items():
+        row = rows_by_id[assignment_id]
+        item = read_sealed(study / "fixtures" / f"{row['fixture_id']}.json")
+        item = {key: value for key, value in item.items() if key != "seal_hash"}
+        if actions is None:
+            index_rows.append({"assignment_id": assignment_id, "status": "unrun", "excluded_from_analysis": False})
+            continue
+        attempt = replay(tmp_path / "replays", item, actions(item), assignment_id=assignment_id, arm=row["arm"],
+                         model=row["model"], effort=row["effort"], world_mode=row["world_mode"],
+                         prompt_condition=row["prompt_condition"])
+        path = f"attempts/{assignment_id}.json"
+        atomic_json(export / path, seal(attempt))
+        index_rows.append({"assignment_id": assignment_id, "status": "archived", "attempt_path": path,
+                           "attempt_hash": content_hash(attempt), "excluded_from_analysis": False})
+    atomic_json(export / "index.json", seal({
+        "kind": EXPORT_KIND, "phase": "collection", "rows": index_rows,
+        "review_plan_hash": plan["seal_hash"], "study_manifest": manifest,
+        "study_registration": {"study_manifest_hash": manifest["seal_hash"]}}))
+    return export

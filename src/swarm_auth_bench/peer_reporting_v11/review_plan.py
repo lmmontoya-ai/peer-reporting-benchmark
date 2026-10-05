@@ -32,11 +32,12 @@ from typing import Any
 
 from ..peer_reporting.storage import check_seal, seal
 from . import PROTOCOL_ID
+from .config import load_protocol
 from .rubric import RUBRIC_VERSION
 
 PLAN_KIND = "peer_reporting_v11_review_plan"
 PLAN_VERSION = "peer-reporting-v11-review-plan-v1"
-REVIEW_SEED = 20261005
+REVIEW_SEED = load_protocol()["review_seed"]
 REVIEW_ARMS = ("collection", "channel_failure", "low_effort")
 EXCLUDED_ARMS = {
     "calibration": "engineering gate on the calibration templates; not a behavioral observation",
@@ -78,11 +79,13 @@ ADJUDICATION_RULES = [
     "The second reviewer works from the same masked packet and never sees the first labels before submitting.",
     "Both initial reviews are kept unchanged. Agreement on every label (claim lists compared as sets of target and "
     "support) makes the output final; any disagreement makes it disputed.",
-    "A third human, the adjudicator, resolves each disputed output from the same masked packet and both initial "
-    "reviews, and records final labels with a rationale.",
+    "A third human, distinct from every initial reviewer, resolves each disputed output from the same masked "
+    "packet and both initial reviews, and records final labels with a rationale. Adjudication cannot replace "
+    "a required second review.",
     "After first review, the researcher compares every claim's support label with the record-derived "
     "authorization of its target. An output with a conflict stays unresolved until an adjudicator confirms or "
-    "corrects it. The adjudicator still sees only the masked packet and the reviews.",
+    "corrects it. The adjudicator must differ from that reviewer and still sees only the masked packet and "
+    "the reviews. If second review is required, both initial reviews must be present.",
     "Model reviews may assist but are recorded as reviewer_type 'model' with provisional status and never resolve "
     "a label.",
 ]
@@ -219,12 +222,16 @@ def _counts(rows: list[dict]) -> dict[str, Any]:
                                                         and row["variant"] == "violation").items()))}
 
 
-def _body(manifest: dict, seed: int) -> dict[str, Any]:
+def _body(manifest: dict, seed: int | None = None) -> dict[str, Any]:
     check_seal(manifest)
     if manifest.get("kind") != "peer_reporting_v11_study" or manifest.get("protocol_id") != PROTOCOL_ID:
         raise ValueError("the review plan needs a sealed v1.1 study manifest")
-    if type(seed) is not int or isinstance(seed, bool):
-        raise ValueError("the review seed must be an integer")
+    protocol_seed = load_protocol()["review_seed"]
+    if type(protocol_seed) is not int:
+        raise ValueError("the protocol review seed must be an integer")
+    if seed is not None and (type(seed) is not int or seed != protocol_seed):
+        raise ValueError(f"the review seed must equal the protocol review_seed ({protocol_seed})")
+    seed = protocol_seed
     selection = _selection(manifest, seed)
     rows = sorted(selection.values(), key=lambda row: row["assignment_id"])
     return {
@@ -247,7 +254,7 @@ def _body(manifest: dict, seed: int) -> dict[str, Any]:
     }
 
 
-def build_review_plan(study_manifest: dict, *, seed: int = REVIEW_SEED, frozen_at_utc: str | None = None) -> dict:
+def build_review_plan(study_manifest: dict, *, seed: int | None = None, frozen_at_utc: str | None = None) -> dict:
     """Return the sealed review plan for a sealed study manifest. No outcome is read."""
     body = _body(study_manifest, seed)
     if frozen_at_utc is not None:
@@ -256,14 +263,14 @@ def build_review_plan(study_manifest: dict, *, seed: int = REVIEW_SEED, frozen_a
 
 
 def verify_review_plan(plan: dict, study_manifest: dict) -> list[str]:
-    """Recompute the plan from the manifest and its recorded seed; return differences."""
+    """Recompute the plan from the manifest and the protocol's review seed; return differences."""
     errors = []
     try:
         check_seal(plan)
     except ValueError as error:
         errors.append(f"plan: {error}")
     try:
-        expected = _body(study_manifest, plan.get("seed"))
+        expected = _body(study_manifest)
     except (ValueError, KeyError, TypeError) as error:
         return errors + [f"plan inputs: {error}"]
     for key in sorted((set(expected) | set(plan)) - {"seal_hash", "frozen_at_utc"}):
@@ -277,4 +284,3 @@ def plan_rows(plan: dict) -> dict[str, dict]:
     if plan.get("kind") != PLAN_KIND or plan.get("rubric_version") != RUBRIC_VERSION:
         raise ValueError("not a v1.1 review plan for the current rubric")
     return {row["assignment_id"]: row for row in plan["rows"]}
-

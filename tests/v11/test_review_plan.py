@@ -9,9 +9,12 @@ import pytest
 
 from swarm_auth_bench.peer_reporting.storage import read_sealed, seal
 from swarm_auth_bench.peer_reporting_v11.cli import main
+from swarm_auth_bench.peer_reporting_v11.config import load_protocol
 from swarm_auth_bench.peer_reporting_v11.review_plan import (
     REVIEW_SEED,
     SCOPES,
+    _counts,
+    _selection,
     build_review_plan,
     plan_rows,
     rank,
@@ -119,14 +122,44 @@ def test_the_plan_is_deterministic_sealed_and_verifiable(plan, wp6_study):
     assert verify_review_plan(plan, manifest) == []
     frozen = build_review_plan(manifest, frozen_at_utc="2026-10-05T00:00:00+00:00")
     assert verify_review_plan(frozen, manifest) == []
-    other = build_review_plan(manifest, seed=REVIEW_SEED + 1)
-    assert other["counts"]["first_review_by_scope"] == plan["counts"]["first_review_by_scope"]
-    assert [row["scope"] for row in other["rows"]] != [row["scope"] for row in plan["rows"]]
     tampered = deepcopy({key: value for key, value in plan.items() if key != "seal_hash"})
     tampered["rows"][0]["second_review"] = not tampered["rows"][0]["second_review"]
     assert "plan rows differs from the recomputed plan" in verify_review_plan(seal(tampered), manifest)
     assert any("seal" in error for error in verify_review_plan({**plan, "seed": 7}, manifest))
     assert set(plan_rows(plan)) == {row["assignment_id"] for row in plan["rows"]}
+
+
+@pytest.mark.parametrize("seed", [1, 2, REVIEW_SEED + 1, True, "20261005"])
+def test_build_refuses_any_seed_other_than_the_protocol_seed(wp6_study, seed):
+    _, manifest, _ = wp6_study
+    with pytest.raises(ValueError, match="protocol review_seed"):
+        build_review_plan(manifest, seed=seed)
+
+
+def test_two_fully_recomputed_plans_with_alternative_seeds_cannot_verify(plan, wp6_study):
+    _, manifest, _ = wp6_study
+    assert plan["seed"] == load_protocol()["review_seed"]
+    alternate = []
+    for seed in (1, 2):
+        changed = deepcopy({key: value for key, value in plan.items() if key != "seal_hash"})
+        changed["seed"] = seed
+        changed["rows"] = sorted(_selection(manifest, seed).values(), key=lambda row: row["assignment_id"])
+        changed["counts"] = _counts(changed["rows"])
+        alternate.append(seal(changed))
+    assert [row["scope"] for row in alternate[0]["rows"]] != [row["scope"] for row in alternate[1]["rows"]]
+    for other in alternate:
+        assert "plan seed differs from the recomputed plan" in verify_review_plan(other, manifest)
+    assert verify_review_plan(plan, manifest) == []
+
+
+def test_build_and_verify_read_the_current_protocol_seed(plan, wp6_study, monkeypatch):
+    _, manifest, _ = wp6_study
+    changed_protocol = {**load_protocol(), "review_seed": REVIEW_SEED + 1}
+    monkeypatch.setattr("swarm_auth_bench.peer_reporting_v11.review_plan.load_protocol", lambda: changed_protocol)
+    changed = build_review_plan(manifest)
+    assert changed["seed"] == changed_protocol["review_seed"]
+    assert verify_review_plan(changed, manifest) == []
+    assert "plan seed differs from the recomputed plan" in verify_review_plan(plan, manifest)
 
 
 def test_the_plan_reads_only_manifest_labels(plan, wp6_study):
@@ -151,3 +184,13 @@ def test_review_plan_command_writes_once(wp6_study, tmp_path, capsys):
     assert verify_review_plan(stored, manifest) == []
     assert main(["review-plan", str(directory), "--output", str(output)]) == 2
     assert "never overwritten" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_review_plan_command_has_no_seed_override(wp6_study, tmp_path, capsys):
+    directory, _, _ = wp6_study
+    output = tmp_path / "review-plan.json"
+    with pytest.raises(SystemExit) as error:
+        main(["review-plan", str(directory), "--output", str(output), "--seed", "1"])
+    assert error.value.code == 2
+    assert "unrecognized arguments: --seed 1" in capsys.readouterr().err
+    assert not output.exists()
