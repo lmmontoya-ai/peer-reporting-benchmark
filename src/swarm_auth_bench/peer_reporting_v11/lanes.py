@@ -5,7 +5,7 @@ at a time in its own sealed phase directory, with its own journal and budget
 ledger. A global slot limits the attempts that run at once across all lanes to
 ``global_max_concurrency`` (at most six).
 
-The admission policy is ported from the private reasoning-effort study. Any
+The admission policy is ported from an earlier unpublished multi-lane study. Any
 failed execution check, including unknown final usage, holds all new admission.
 So do the admission cutoff, the forced-stop deadline, a parent stop file, a
 halted lane, and retained incomplete or failed evidence. Active attempts finish

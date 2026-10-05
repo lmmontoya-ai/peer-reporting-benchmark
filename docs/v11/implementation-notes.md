@@ -61,7 +61,7 @@ We chose this approach because P1 verification hashes its own code. P1
 `peer_reporting/protocol.json`, the catalog data, and `runtime.py`,
 `model_catalog.py`, `isolation.py`, `events.py`, and `long_events.py`. Sealed P1
 and N100 phase plans store these hashes, and P1 resumes record any change. The
-private reasoning study refused to verify after any change to them. An edit to
+earlier unpublished multi-lane study refused to verify after any change to them. An edit to
 any of these files would change the code identity of the retained P1 and N100
 archives. So WP1 edits none of them, including `runtime.py`.
 
@@ -134,11 +134,11 @@ in P1.
 
 The coordinator runs all lanes at once. Each attempt holds a global slot from
 preflight to archive. At most `global_max_concurrency` attempts hold a slot, and
-the caps record limits this to 6. The reasoning study used one slot per lane for
+the caps record limits this to 6. That study used one slot per lane for
 a whole phase. v1.1 uses one slot per attempt, so with fewer than six slots the
 lanes still interleave and models mix across the run.
 
-The admission policy is the reasoning study's policy. These events hold all new
+The admission policy is that study's policy. These events hold all new
 admission for the rest of the run:
 
 - an archived attempt whose execution check failed;
@@ -152,7 +152,7 @@ within their own caps. At the forced-stop deadline or on `STOP`, the coordinator
 sets a stop event, and each active attempt is truncated and drained. A failed or
 unknown archived attempt also holds every later run of the same plan. To
 continue, build a new plan revision. WP1 has no usage reconciliation command and
-no admission amendment. This keeps the "held" outcome of the reasoning study.
+no admission amendment. This keeps the "held" outcome of that study.
 
 Each assignment has one attempt ID, `<assignment_id>-live-1`. A start consumes
 it. A crash leaves the attempt consumed and reconciled as incomplete, and it never

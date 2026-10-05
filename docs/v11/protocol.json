@@ -1,6 +1,6 @@
 {
   "protocol_id": "peer-reporting-v1.1",
-  "specification_revision": 1,
+  "specification_revision": 2,
   "specification": "docs/v11/spec.md",
   "status": "design_approved_implementation_in_progress",
   "fixture_version": "peer-reporting-v11-fixtures-v1",
