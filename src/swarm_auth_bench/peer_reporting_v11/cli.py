@@ -53,6 +53,48 @@ def _amendments(command: argparse.ArgumentParser) -> None:
                          help="sealed, user-approved amendment to record in the study first (repeatable)")
 
 
+def _review_commands(commands) -> None:
+    plan = commands.add_parser("review-plan", help="seal the human review plan from a study manifest; reads no "
+                                                   "outcome")
+    plan.add_argument("study", type=Path, help="sealed v1.1 study directory")
+    plan.add_argument("--output", type=Path, help="new plan file (default: STUDY/review-plan.json)")
+    plan.add_argument("--seed", type=int, help="selection seed (default: the frozen review seed)")
+    packets = commands.add_parser("review-packets", help="write masked reviewer packets and private bindings")
+    packets.add_argument("export", type=Path, help="directory written by export-review")
+    packets.add_argument("--plan", type=Path, required=True, help="sealed review plan")
+    packets.add_argument("--output", type=Path, required=True, help="fresh output directory")
+    upload = commands.add_parser("validate-review-upload", help="validate returned review labels")
+    upload.add_argument("upload", type=Path)
+    upload.add_argument("--packet", type=Path, required=True, help="the reviewer packet the labels answer")
+    upload.add_argument("--controller", type=Path, help="researcher-only controller record; checks the bindings")
+
+
+def _review(args: argparse.Namespace) -> dict:
+    from datetime import datetime, timezone
+
+    from ..peer_reporting.storage import atomic_json, read_sealed
+    from .collection import STUDY_MANIFEST
+    from .review import write_review_packets
+    from .review_plan import REVIEW_SEED, build_review_plan
+
+    if args.command == "review-plan":
+        output = args.output or args.study / "review-plan.json"
+        if output.exists():
+            raise ValueError(f"{output} already exists; a frozen review plan is never overwritten")
+        plan = build_review_plan(read_sealed(args.study / STUDY_MANIFEST),
+                                 seed=REVIEW_SEED if args.seed is None else args.seed,
+                                 frozen_at_utc=datetime.now(timezone.utc).isoformat())
+        atomic_json(output, plan)
+        return {"output": str(output), "seal_hash": plan["seal_hash"], "seed": plan["seed"],
+                "study_manifest_hash": plan["study_manifest_hash"], "counts": plan["counts"], "live_model_calls": 0}
+    if args.command == "review-packets":
+        return write_review_packets(args.export, read_sealed(args.plan), args.output)
+    from .review import validate_review_upload
+
+    return validate_review_upload(read_json(args.upload), read_json(args.packet),
+                                  controller=read_sealed(args.controller) if args.controller else None)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m swarm_auth_bench.peer_reporting_v11", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -100,6 +142,7 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("--no-score", action="store_true")
     _study(export, "study directory in which the root is registered")
     _prior_roots(export)
+    _review_commands(commands)
     for name in LIVE_COMMANDS:
         command = commands.add_parser(name, help=f"run the sealed {name} phase after explicit authorization")
         command.add_argument("root", type=Path, help="sealed live root built for this phase")
@@ -122,6 +165,8 @@ def _parser() -> argparse.ArgumentParser:
 def _run(args: argparse.Namespace) -> dict:
     from .bundle import load_bundle
 
+    if args.command in ("review-plan", "review-packets", "validate-review-upload"):
+        return _review(args)
     if args.command in ("build-study", "verify-study"):
         from .collection import build_study, verify_study
         from .config import load_protocol
