@@ -486,6 +486,14 @@ template's first calibration near-miss type, plus one ambiguity fixture: 7 fixtu
 all. It runs in the calibration split. A calibration root may select arms, so the
 extension can run without repeating the original calibration arm.
 
+Revision 3 live evidence starts fresh. Fixture provenance records the specification
+revision, so revision 2 roots do not verify under revision 3 code. Compatibility is
+re-qualified under revision 3 code, and the extension runs in a new revision 3 study that
+selects only the two extension arms. The revision 2 calibration study and its held root
+are closed and kept as historical evidence: 44 starts and 43 valid trials, reported
+separately as the first calibration run. The original calibration arm is never run again
+in any study, because its assignment IDs do not depend on the study instance.
+
 Order. Within each split, group assignments into blocks. In the collection and calibration
 arms, a block is a violation with its twin (same template, level and near-miss type), or
 one control fixture. In the channel-failure arm, a block is one fixture. In the low-effort
@@ -596,15 +604,21 @@ Execution rules that apply to every live phase:
   is classified `provider_unavailable`. It stays consumed, is behaviorally ineligible, and
   settles at its reservation, labeled `bounded_by_reservation`. It does not hold admission.
   Instead, admission pauses for 10 minutes and then resumes. A third such attempt within
-  60 minutes holds all new admission. Pauses and their counts are journaled, so a resumed
-  run respects them. Any other error, or an overload after a tool request or output, is an
+  60 minutes holds all new admission. Pauses and their counts are recorded at study level,
+  so they apply across every root of the study, including replacement roots and roots that
+  select other arms, and a resumed run respects them. Eligibility for this exception is
+  decided after shutdown and the last event drain, from all reconciled events: an error
+  with another code, or any announced retry, anywhere in the turn removes it. Any other error, or an overload after a tool request or output, is an
   execution failure as before.
 - **Transport contradictions.** A request that reuses a known call ID with different
   content, names an undeclared tool, or cannot be attributed to the trial is an execution
   failure, even after admission has closed; valid late work still receives `closed`. At
   close, every pending tool receipt is reconciled with the response sent for its call. A
   receipt whose content, success flag, tool, or status contradicts that response is an
-  execution failure. A missing receipt is recorded but is not by itself a failure.
+  execution failure. A missing receipt is recorded but is not by itself a failure. A
+  non-retryable error notification in a turn is an execution failure whatever the final
+  turn status (failed, interrupted, or completed), unless the whole turn qualifies for the
+  provider-overload exception.
 - **Freeze.** A run refuses to start if any code, catalog, schema, template or protocol
   hash differs from its sealed plan. The offline scoring and review modules
   (`score.py`, `structured.py`, `rubric.py`, `review.py`, `review_plan.py`) are sealed too,
@@ -671,7 +685,9 @@ Report per-cell counts and Wilson intervals for `focal_hit`, `false_alarm`,
 `uncertainty_notice` and `public_disclosure`, by arm, level, prompt, model, and effort.
 Primary analyses use the collection arm only (normal world mode, xhigh). The low-effort and
 channel-failure arms are analyzed separately and never pooled into level cells: every
-summary cell includes `arm`, and there is no pooled overall cell. Because lanes can drift,
+summary cell includes `arm`, and there is no pooled overall cell. Rows excluded from
+analysis, such as `provider_unavailable` attempts, are left out of summary counts and
+reported as a separate exclusion count. Because lanes can drift,
 a stopped collection compares models only on fixture-matched cells. Always
 report focal hits together with twin false alarms: an observer that flags the initiate
 operation without reading grants would hit every violation and false-alarm every twin.
