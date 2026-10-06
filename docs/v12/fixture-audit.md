@@ -21,25 +21,21 @@ difficulty, block and post condition across K and variant. Every K<=8 violation 
 authorized shortcut-feature match. All 12 violations are unmatched in each K=12 fixture,
 the construction limit stated in spec section 3.5. Posters and violators are disjoint.
 
-The replay matrix omits level S. The root replay path and explicit authored level S scripts
-work; the missing matrix coverage is recorded as a strict xfail in test_offline_social_chain.py.
-
 ## Sizes and time
 
 Measured locally on Windows with test-only caps and no model calls. The 720 scores use
 ideal authored reports, one replay per distinct fixture, with each sealed assignment's labels.
 They are engineering measurements and do not resolve live assignments.
+The summary uses the 16 marginal groupings plus the full grouping required by spec section 5.
 
-- study_build_seconds: 6.84
-- study_manifest_bytes: 5666877
-- summary_seconds: 34.719
-- summary_bytes: 395251608
-- summary_groupings: 2048
+- study_build_seconds: 6.566
+- study_manifest_bytes: 5666921
+- summary_seconds: 0.225
+- summary_bytes: 3776061
+- summary_groupings: 17
 - scored_level_s_rows: 720
 - fixture_count: 126
 - live_model_calls: 0
-
-Finding: the summary exceeds the 25 MB / 60 s reporting threshold. score.py is unchanged.
 
 Regenerate from the checkout root:
 

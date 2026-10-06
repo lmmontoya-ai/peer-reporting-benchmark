@@ -153,12 +153,11 @@ def write_audit(output: Path, rows: list[dict], metrics: dict) -> None:
               "difficulty, block and post condition across K and variant. Every K<=8 violation has an",
               "authorized shortcut-feature match. All 12 violations are unmatched in each K=12 fixture,",
               "the construction limit stated in spec section 3.5. Posters and violators are disjoint.", "",
-              "The replay matrix omits level S. The root replay path and explicit authored level S scripts",
-              "work; the missing matrix coverage is recorded as a strict xfail in test_offline_social_chain.py.",
-              "", "## Sizes and time", "",
+              "## Sizes and time", "",
               "Measured locally on Windows with test-only caps and no model calls. The 720 scores use",
               "ideal authored reports, one replay per distinct fixture, with each sealed assignment's labels.",
-              "They are engineering measurements and do not resolve live assignments.", ""]
+              "They are engineering measurements and do not resolve live assignments.",
+              "The summary uses the 16 marginal groupings plus the full grouping required by spec section 5.", ""]
     for key, value in metrics.items():
         lines.append(f"- {key}: {value}")
     if metrics["summary_bytes"] > 25_000_000 or metrics["summary_seconds"] > 60:
@@ -221,7 +220,7 @@ def main() -> None:
                        summary_bytes=len((canonical_json(summary) + "\n").encode("utf-8")),
                        summary_groupings=len(summary["groupings"]), scored_level_s_rows=len(scores),
                        fixture_count=len(rows), live_model_calls=0)
-        assert metrics["summary_groupings"] == 2048
+        assert metrics["summary_groupings"] == 17
         write_audit(args.output, rows, metrics)
         print(json.dumps(metrics, indent=2))
 

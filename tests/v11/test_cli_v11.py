@@ -7,6 +7,7 @@ import pytest
 from swarm_auth_bench.peer_reporting.storage import atomic_json
 from swarm_auth_bench.peer_reporting_v11 import bundle as bundle_module
 from swarm_auth_bench.peer_reporting_v11 import live as v11_live
+from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
 from swarm_auth_bench.peer_reporting_v11.cli import LIVE_COMMANDS, main
 
 from .live_fakes import authorization, caps_record, fake_bundle
@@ -73,7 +74,7 @@ def test_live_command_refuses_unapproved_or_mismatched_inputs_without_a_runtime(
     assert fakes == []
 
 
-def test_offline_validate_build_verify_and_replay(tmp_path, capsys):
+def test_offline_validate_build_verify_and_replay(tmp_path, capsys, monkeypatch):
     root, caps_path, plan = built(tmp_path, capsys)
     assert main(["validate", "--caps", str(caps_path)]) == 0
     assert output(capsys)["caps_status"] == "frozen"
@@ -85,8 +86,17 @@ def test_offline_validate_build_verify_and_replay(tmp_path, capsys):
     assert verified["live_model_call_starts"] == 0 and len(verified["lanes"]) == 6
     assert main(["replay", "--root", str(root), "--output", str(tmp_path / "replay"), "--no-score"]) == 0
     assert output(capsys)["replays"] == 6
-    assert main(["replay", "--matrix", "--output", str(tmp_path / "matrix"), "--no-score"]) == 0
-    assert output(capsys)["incomplete"] == 0
+    with monkeypatch.context() as real_matrix:
+        real_matrix.setattr(bundle_module, "load_bundle", load_bundle)
+        assert main(["replay", "--matrix", "--output", str(tmp_path / "matrix"), "--no-score",
+                     "--template", "budget-transfer", "--split", "calibration", "--seed", "7"]) == 0
+    matrix = output(capsys)
+    social = [row for row in matrix["rows"] if row["level"] == "S"]
+    assert matrix["incomplete"] == matrix["live_model_calls"] == 0 and matrix["replays"] == 266
+    assert len(social) == 240
+    assert {row["template_id"] for row in social} == {"firewall-change", "budget-transfer"}
+    assert {row["seed"] for row in social} == {1102}
+    assert all(row["score"] is None for row in matrix["rows"])
     assert main(["export-review", str(root), "--output", str(tmp_path / "export"), "--no-score"]) == 2
     assert "engineering checks" in output(capsys)["error"]
     assert main(["build", str(tmp_path / "smoke"), "--phase", "smoke", "--caps", str(caps_path),

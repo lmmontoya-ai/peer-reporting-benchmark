@@ -1,13 +1,17 @@
 """Offline replay through the v1.1 world with an authored observer script (spec W08). No model call."""
 
 import hashlib
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from swarm_auth_bench.peer_reporting.storage import read_sealed
-from swarm_auth_bench.peer_reporting_v11 import runner
+from swarm_auth_bench.peer_reporting_v11 import runner, world
+from swarm_auth_bench.peer_reporting_v11.config import SOCIAL_FIELDS
 from swarm_auth_bench.peer_reporting_v11.live_review import ROW_LABELS
+from swarm_auth_bench.peer_reporting_v11.score import score_trial
 
 from .live_fakes import build_fixture, compat_root, fake_bundle, load_template
 
@@ -82,23 +86,43 @@ def test_unavailable_report_store_replay_stores_nothing_and_posts_publicly(tmp_p
     assert len(posts) == 1 and fixture()["truth"]["focal_operation_id"] in posts[0]["text"]
 
 
-def test_matrix_replays_every_level_variant_world_mode_and_effort(tmp_path):
+def test_matrix_replays_every_level_variant_world_mode_and_effort(tmp_path, monkeypatch):
+    # The golden was captured from the pre-S matrix using this fixed world clock.
+    monkeypatch.setattr(world, "time", SimpleNamespace(time=lambda: 1700000000.0, monotonic=lambda: 100.0))
+    golden = json.loads((Path(__file__).parent / "fixtures/replay-matrix-pre-level-s-golden.json").read_text(
+        encoding="utf-8"))
     seen = []
 
     def scorer(attempt):
         seen.append((attempt["level"], attempt["variant"], attempt["world_mode"], attempt["effort"]))
-        return {"variant": attempt["variant"]}
+        return score_trial(attempt, allow_replay=True)
 
-    summary = runner.replay_matrix(tmp_path / "matrix", bundle=fake_bundle(), scorer=scorer)
+    summary = runner.replay_matrix(tmp_path / "matrix", scorer=scorer)
     assert summary["live_model_calls"] == 0 and summary["incomplete"] == 0 and summary["replays"] == len(seen)
-    assert {level for level, *_ in seen} == set(runner.LEVELS)
+    assert {level for level, *_ in seen} == {*runner.LEVELS, "S"}
     assert {variant for _, variant, *_ in seen} == {"violation", "twin", *runner.CONTROL_VARIANTS}
     assert {mode for *_, mode, _ in seen} == {"normal", "report_store_unavailable"}
     assert {effort for *_, effort in seen} == {"xhigh", "low"}
     l2 = {row["near_miss_type"] for row in summary["rows"] if row["level"] == "L2"}
     assert l2 == set(runner.NEAR_MISS_TYPES)
     assert all(row["termination_kind"] == "natural_end" and row["score"] for row in summary["rows"])
-    assert read_sealed(tmp_path / "matrix" / "replay-index.json")["replays"] == len(seen)
+    assert read_sealed(tmp_path / "matrix" / "replay-index.json")["replays"] == len(seen) == 266
+    earlier_cells = [cell for cell in runner.matrix_cells() if cell["level"] != "S"]
+    assert earlier_cells == golden["cells"]
+    earlier_rows = [{**row, "score": None} for row in summary["rows"] if row["level"] != "S"]
+    assert {**summary, "rows": earlier_rows, "replays": len(earlier_rows)} == golden["summary"]
+    for row in summary["rows"]:
+        if row["level"] != "S":
+            continue
+        attempt = read_sealed(tmp_path / "matrix" / row["assignment_id"] / "attempt.json")
+        score = row["score"]
+        assert attempt["arm"] == score["arm"] == row["arm"]
+        assert attempt["template_id"] == score["template_id"] == row["template_id"]
+        assert attempt["split"] == row["split"] == "calibration"
+        assert attempt["effort"] == score["effort"] == row["effort"]
+        assert row["seed"] == 1102
+        assert score["eligibility"]["eligible"] and not score["eligibility"]["resolves_assignment"]
+        assert all(row[key] == attempt["fixture"]["parameters"][key] == score[key] for key in SOCIAL_FIELDS)
 
 
 def test_replay_of_a_sealed_live_plan_reads_but_never_writes_the_root(tmp_path):

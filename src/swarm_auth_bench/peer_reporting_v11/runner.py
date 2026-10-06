@@ -20,6 +20,7 @@ from ..events import content_hash
 from ..peer_reporting.score import TERMINATION_KINDS
 from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
 from .bundle import ProtocolBundle, load_bundle
+from .config import SOCIAL_ARMS, SOCIAL_FIELDS, load_protocol, social_fixture_cells
 from .lanes import EFFORTS, PROMPT_CONDITIONS, TOOL_REQUEST_CAP, lane_id, validate_effort, validate_world_mode
 from .live import read_live_plan, read_root_fixture
 from .live_review import report_attempts
@@ -225,7 +226,7 @@ def replay_live_root(root: Path, output: Path, *, assignment_ids: list[str] | No
 
 
 def matrix_cells(near_miss_types: tuple[str, ...] = NEAR_MISS_TYPES) -> list[dict]:
-    """Every level and variant, every near-miss type at L2, the controls, F mode, and both efforts."""
+    """Earlier matrix cells, then all five social arms on both calibration templates."""
     first = near_miss_types[0]
     cells = []
     for level in LEVELS:
@@ -241,13 +242,20 @@ def matrix_cells(near_miss_types: tuple[str, ...] = NEAR_MISS_TYPES) -> list[dic
                       "world_mode": "report_store_unavailable", "effort": effort, "prompt_condition": "guided"})
     cells.append({"level": "L2", "variant": "twin", "near_miss_type": first, "world_mode": "normal",
                   "effort": "low", "prompt_condition": "guided"})
+    protocol = load_protocol()
+    for template_id in protocol["templates"]["calibration"]:
+        for arm in SOCIAL_ARMS:
+            cells.extend({**cell, "near_miss_type": None, "template_id": template_id, "split": "calibration",
+                          "seed": protocol["seeds"]["calibration"], "arm": arm,
+                          "world_mode": "normal", "effort": protocol["arms"][arm]["effort"],
+                          "prompt_condition": "neutral"} for cell in social_fixture_cells(arm))
     return cells
 
 
 def replay_matrix(output: Path, *, template_id: str = "release-request", split: str = "collection",
                   seed: int = 1101, model: str = "gpt-6-sol", bundle: ProtocolBundle | None = None,
                   scorer: Callable[[dict], dict] | None = None) -> dict:
-    """Build, verify, and replay every matrix cell for one template; no plan, caps, or model needed."""
+    """Replay earlier cells on the requested template and S on both calibration templates offline."""
     bundle = bundle or load_bundle()
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
@@ -256,12 +264,16 @@ def replay_matrix(output: Path, *, template_id: str = "release-request", split: 
     for number, cell in enumerate(matrix_cells()):
         if cell["prompt_condition"] not in PROMPT_CONDITIONS:
             raise ValueError("matrix prompt condition is not a v1.1 condition")
-        fixture = bundle.build_fixture(template, split=split, seed=seed, level=cell["level"],
-                                       variant=cell["variant"], near_miss_type=cell["near_miss_type"])
-        errors = bundle.verify_fixture(fixture, template)
+        cell_template_id = cell.get("template_id", template_id)
+        cell_split, cell_seed = cell.get("split", split), cell.get("seed", seed)
+        cell_template = bundle.load_template(cell_template_id) if cell["level"] == "S" else template
+        social = {key: cell[key] for key in SOCIAL_FIELDS} if cell["level"] == "S" else {}
+        fixture = bundle.build_fixture(cell_template, split=cell_split, seed=cell_seed, level=cell["level"],
+                                       variant=cell["variant"], near_miss_type=cell["near_miss_type"], **social)
+        errors = bundle.verify_fixture(fixture, cell_template)
         if errors:
             raise ValueError(f"matrix fixture {cell} failed verification: {errors}")
-        identifier = f"offline-{number:02d}-" + content_hash([template_id, split, seed, cell])[:16]
+        identifier = f"offline-{number:02d}-" + content_hash([cell_template_id, cell_split, cell_seed, cell])[:16]
         labels = {"assignment_id": identifier, "source_plan_hash": None, "phase": "offline_matrix",
                   "lane_id": lane_id(model, cell["effort"]), "model": model, "split": split,
                   "arm": "offline_matrix", "template_id": template_id, "planned_order": number, **cell}
@@ -272,7 +284,9 @@ def replay_matrix(output: Path, *, template_id: str = "release-request", split: 
 
 
 def _row(attempt: dict, score: dict | None) -> dict:
-    return {**{key: attempt[key] for key in ("assignment_id", "attempt_id", "level", "variant", "near_miss_type",
+    social = ({"arm": attempt["arm"], **{key: attempt["fixture"]["parameters"][key]
+               for key in ("template_id", "split", "seed", *SOCIAL_FIELDS)}} if attempt["level"] == "S" else {})
+    return {**social, **{key: attempt[key] for key in ("assignment_id", "attempt_id", "level", "variant", "near_miss_type",
                                              "world_mode", "effort", "prompt_condition", "termination_kind",
                                              "exposure_confirmed", "eligible", "storage_failure")},
             "accepted_reports": len(attempt["accepted_reports"]), "report_attempts": len(attempt["report_attempts"]),
