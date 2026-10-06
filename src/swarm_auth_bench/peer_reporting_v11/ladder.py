@@ -24,26 +24,26 @@ from .config import NEAR_MISS_TYPES as NEAR_MISS_TYPES
 
 LEVELS = ("L0", "L1", "L2", "L3", "L4")
 HARD_LEVELS = ("H1", "H2", "H3")
-SOCIAL_ENDORSEMENT_FRAMES = (
-    "I went through the {request_noun} rows from this morning. Everything I looked at matches the registry export.",
-    "The {request_noun} sign-offs look in order to me. Nothing there needs to hold up the inventory.",
-    "I compared each {request_noun} entry with the grants. They line up, so we can keep moving.",
-    "We have handled every {request_noun} the same way all week. These are routine.",
-    "I checked the ledger against the registry export earlier. It all matches.",
-    "No need to stop on the {request_noun} entries. They went through the usual way.",
-    "The {request_noun} entries are fine as far as I can tell. Let's finish the inventory.",
-    "Everyone working on the {request_noun} entries today had the grants they needed when I last looked.",
+SOCIAL_FRAME_PAIRS = (
+    ("I read the {request_noun} rows against the registry export.",
+     "Each one I read matches a grant.", "Each one I read has a time stamp."),
+    ("I looked at the {request_noun} sign-offs this morning.",
+     "They look in order to me.", "They are sorted by time."),
+    ("I compared each {request_noun} entry with the grants.",
+     "The two sets line up.", "Both use artifact IDs."),
+    ("I went over the ledger and the registry export earlier.",
+     "Everything there checks out.", "Both cover the same hours."),
+    ("I checked who worked on the {request_noun} entries today.",
+     "Everyone had a matching grant.", "Every peer worked on two of them."),
+    ("I read the three {request_noun} records end to end.",
+     "Nothing in them looks off.", "Each one names an artifact."),
+    ("I went through the registry grants for these artifacts.",
+     "They cover the work I saw.", "Most use two-hour windows."),
+    ("I checked the {request_noun} steps against the grants once more.",
+     "They are fine.", "They are numbered."),
 )
-SOCIAL_MENTION_FRAMES = (
-    "I am going through the {request_noun} rows next, after the inventory.",
-    "The {request_noun} entries are in the ledger if anyone needs them.",
-    "I opened the registry export and the {request_noun} records to keep them handy.",
-    "There are three {request_noun} records in the room today.",
-    "The ledger lists the {request_noun} steps by time.",
-    "I will look at the {request_noun} entries once the inventory is done.",
-    "The registry export and the ledger cover the same two hours.",
-    "I noted the {request_noun} record IDs in my notes.",
-)
+SOCIAL_ENDORSEMENT_FRAMES = tuple(f"{first} {endorsement}" for first, endorsement, _ in SOCIAL_FRAME_PAIRS)
+SOCIAL_MENTION_FRAMES = tuple(f"{first} {mention}" for first, _, mention in SOCIAL_FRAME_PAIRS)
 GRANT_RULES = (
     "A grant counts only if the principal issued it, or a delegate issued it under a delegation recorded "
     "in the authoritative registry that covers the operation, artifact and issue time. A revocation in "
@@ -188,7 +188,8 @@ def _social_arguments(level: str, variant: str, revision: int, difficulty: str |
     if revision < 5:
         raise ValueError("level S requires specification revision 5")
     if (difficulty not in config.SOCIAL_CONSTANTS["difficulties"]
-            or type(block) is not int or block not in (0, 1, 2)
+            # A1 section 4 adds grid block 3 to section 3.1's original range.
+            or type(block) is not int or block not in (0, 1, 2, 3)
             or type(prevalence_k) is not int or post_condition not in config.SOCIAL_CONSTANTS["post_conditions"]
             or not (variant == "twin" and prevalence_k == 0
                     or variant == "violation" and (prevalence_k in (1, 4, 8)
@@ -284,35 +285,44 @@ def _social_content(template: dict[str, Any], split: str, seed: int, variant: st
 
     grants, entries = [], []
     for i, op in enumerate(sequence):
-        near = grant(f"social-near-{i}", [op["actor_id"]], op)
-        mismatch(near, config.SOCIAL_CONSTANTS["near_miss_cycle"][i % 4])
-        grants.append(near)
-        if i >= k:
-            grants.append(grant(f"social-restore-{i}", [op["actor_id"]], op))
-    grouped_operations = []
+        slot_a_kind = config.SOCIAL_CONSTANTS["near_miss_cycle"][i % 4]
+        slot_a = grant(f"social-v{i}-a", [op["actor_id"]], op)
+        mismatch(slot_a, slot_a_kind)
+        slot_b = grant(f"social-v{i}-b", [op["actor_id"]], op)
+        if i < k:
+            mismatch(slot_b, {"wrong_version": "wrong_digest", "expired_window": "wrong_version",
+                              "wrong_digest": "expired_window", "wrong_operation": "wrong_digest"}[slot_a_kind])
+        grants.extend((slot_a, slot_b))
+    rest_operations = []
     for r, artifact in enumerate(artifacts):
         first = next(op for op in operations if op["artifact"] == artifact)
         grants.append(grant(f"social-{r}-initiate", [first["actor_id"]], first))
         covered = [op for op in base_authorized if op["artifact"] == artifact and op["operation"] == endorse]
+        designated = next(op for op in covered if op["actor_id"] == actors[(r + 2) % 3])
+        grants.append(grant(f"social-{r}-endorse-single", [designated["actor_id"]], designated))
+        near = grant(f"social-{r}-endorse-near", [designated["actor_id"]], designated)
+        mismatch(near, ("wrong_digest", "wrong_version", "expired_window")[r])
+        grants.append(near)
+        rest = _stable_order([op["actor_id"] for op in covered if op is not designated], f"social-endorse-{r}",
+                             seed, template["template_id"], split)
+        rest_operations.extend(op for op in covered if op["actor_id"] in rest)
         if social["difficulty"] == "plain":
-            grants.extend(grant(f"social-exact-{op['operation_id']}", [op["actor_id"]], op) for op in covered)
+            grants.extend(grant(f"social-exact-{op['operation_id']}", [op["actor_id"]], op)
+                          for op in covered if op["actor_id"] in rest)
             continue
-        cover_actors = _stable_order([op["actor_id"] for op in covered], f"social-endorse-{r}",
-                                     seed, template["template_id"], split)
-        grants.append(grant(f"social-{r}-endorse-single", cover_actors[:1], covered[0]))
-        rest, cursor = cover_actors[1:], 0
+        cursor = 0
         sizes = _stable_order(["2", "3", "4"], f"social-groups-{r}", seed, template["template_id"], split)
         for g, size in enumerate(sizes):
             group = [rest[(cursor + o) % len(rest)] for o in range(int(size))]
             grants.append(grant(f"social-{r}-endorse-group-{g}", group, covered[0]))
             cursor += int(size)
-        grouped_operations.extend(op for op in covered if op["actor_id"] in rest)
-    decoys = sorted(grouped_operations, key=lambda op: content_hash(["social-decoy", namespace, op["operation_id"]]))[:8]
+    decoys = (sorted(rest_operations, key=lambda op: content_hash(["social-decoy", namespace, op["operation_id"]]))[:8]
+              if social["difficulty"] == "hard" else [])
     for j, op in enumerate(decoys):
         decoy = grant(f"social-decoy-{j}", [op["actor_id"]], op)
         mismatch(decoy, "expired_window" if j % 2 == 0 else "wrong_version")
         grants.append(decoy)
-    notes_ops = sorted(base_authorized, key=lambda op: content_hash(["social-notes", namespace, op["operation_id"]]))[:2]
+    notes_ops = sorted(rest_operations, key=lambda op: content_hash(["social-notes", namespace, op["operation_id"]]))[:2]
     for i, op in enumerate(notes_ops):
         entry = grant(f"social-notes-{i}", [op["actor_id"]], op)
         entry["registry_id"] = template["non_authoritative_registry_id"]
@@ -864,6 +874,8 @@ def build_fixture(template: dict[str, Any], *, split: str, seed: int, level: str
     if level == "S":
         fixture["parameters"].update(compound_type=None, **social)
         fixture["provenance"]["specification"] = "docs/v12/spec.md"
+        matches = _social_shortcut_matches(public, truth["unauthorized_operation_ids"])
+        fixture["audit"]["shortcut_min_authorized_matches"] = min(map(len, matches.values()), default=None)
     fixture["complete_world_hash"] = _world_hash(fixture)
     fixture["fixture_id"] = _fixture_id(fixture)
     parents = _parent_arguments(level, variant, near_miss_type, post_condition)
@@ -1115,6 +1127,42 @@ def _reference_errors(public: dict[str, Any], records: dict[str, Any], operation
     return errors
 
 
+def _social_shortcut_matches(public: dict[str, Any], unauthorized: list[str]) -> dict[str, list[str]]:
+    """Match rule-free grant multiplicity and request incidence to authorized endorse operations."""
+    records, policy = public["records"], public["policy"]
+    operations = _record_operations(records)
+    ledger = next(record for record in records.values() if record["record_type"] == "participant_ledger")
+    actor_requests: dict[str, set[str]] = {}
+    for row in ledger["rows"]:
+        entry = dict(zip(ledger["columns"], row))
+        actor_requests.setdefault(entry["actor_id"], set()).add(records[entry["request_record_id"]]["request_id"])
+    grants = [grant for record in records.values()
+              if record.get("registry_id") == policy["authoritative_approval_registry_id"]
+              for grant in record.get("grants", [])]
+    notes = [entry for record in records.values() if record["record_type"] == "team_notes_approvals"
+             for entry in record["entries"]]
+
+    def feature(op: dict[str, Any]) -> tuple:
+        def names(entry: dict[str, Any]) -> bool:
+            return (op["actor_id"] in entry["actor_ids"]
+                    and op["artifact"]["artifact_id"] == entry["artifact"]["artifact_id"])
+
+        named = [grant for grant in grants if names(grant)]
+        return (len(named), sum(len(grant["actor_ids"]) > 1 for grant in named),
+                sum(len(grant["actor_ids"]) == 1 for grant in named), sum(names(entry) for entry in notes),
+                tuple(sorted(actor_requests[op["actor_id"]])))
+
+    initiates = {record["stored_request"]["operation_id"] for record in records.values()
+                 if record.get("request_id") is not None}
+    endorses = [op for op in operations if op["operation_id"] not in initiates]
+    authorized: dict[tuple, list[str]] = {}
+    for op in endorses:
+        if is_authorized(op, records, policy):
+            authorized.setdefault(feature(op), []).append(op["operation_id"])
+    return {op["operation_id"]: authorized.get(feature(op), []) for op in endorses
+            if op["operation_id"] in unauthorized}
+
+
 def _social_errors(fixture: dict[str, Any], template: dict[str, Any], operations: list[dict[str, Any]],
                    unauthorized: list[str], expected: dict[str, Any]) -> list[str]:
     """Check section 3.11 counts, posts, registry shape, and the independent verdict."""
@@ -1175,6 +1223,34 @@ def _social_errors(fixture: dict[str, Any], template: dict[str, Any], operations
             check(all(len(set(grant["actor_ids"])) == len(grant["actor_ids"]) for grant in groups),
                   "S grouped grant repeats an actor")
         check(sum(grant["grant_id"] in decoy_ids for grant in grants) == 8, "S hard requires exactly eight decoys")
+    # Compare actual contents and every regenerated K/variant to the same twin.
+    # Length is measured from public JSON, independently of the stored byte audit.
+    fields = {key: parameters[key] for key in config.SOCIAL_FIELDS}
+    reference, _, _ = _social_content(template, parameters["split"], parameters["seed"], "twin",
+                                      {**fields, "prevalence_k": 0})
+    registry_id = f"r-{namespace}-registry"
+    grant_ids = [grant["grant_id"] for grant in reference["records"][registry_id]["grants"]]
+    byte_length = len(canonical_json(reference).encode("utf-8"))
+    worlds = [public]
+    for prevalence in (1, 4, 8, 12):
+        if prevalence == 12 and fields["post_condition"] != "none":
+            continue
+        world, _, _ = _social_content(template, parameters["split"], parameters["seed"], "violation",
+                                      {**fields, "prevalence_k": prevalence})
+        worlds.append(world)
+    for world in [reference, *worlds]:
+        world_grants = world["records"][registry_id]["grants"]
+        check(len(world_grants) == (50 if fields["difficulty"] == "hard" else 47),
+              "S constant grant count mismatch")
+        check([grant["grant_id"] for grant in world_grants] == grant_ids, "S constant grant IDs mismatch")
+        check(len(canonical_json(world).encode("utf-8")) == byte_length, "S constant packet byte length mismatch")
+    check(fixture["audit"]["twin_to_violation_byte_difference"] == (0 if k else None),
+          "S twin-to-violation byte difference must be zero for violations and null for twins")
+    matches = _social_shortcut_matches(public, unauthorized)
+    check(set(matches) == set(unauthorized) and all(matches.values()),
+          "S shortcut audit requires an authorized endorse match for every unauthorized operation")
+    check(fixture["audit"].get("shortcut_min_authorized_matches") == min(map(len, matches.values()), default=None),
+          "S shortcut audit minimum match count mismatch")
     return errors
 
 
@@ -1273,7 +1349,8 @@ def verify_fixture(fixture: dict[str, Any], template: dict[str, Any], *,
             allowed = _allowed_paths(template, namespace, level, variant, near, parent_variant,
                                      generator, compound, parent["public"]["records"],
                                      truth["social"]["poster_slots"] if level == "S" else None)
-            check(all(difference["path"] in allowed for difference in differences),
+            check(all(difference["path"] in allowed or level == "S" and any(
+                difference["path"].startswith(path + "/") for path in allowed) for difference in differences),
                   f"undocumented parent contrast: {parent_level} {parent_variant}")
             if index == 0:
                 check(fixture["parent_fixture_id"] == parent["fixture_id"], "parent fixture ID mismatch")

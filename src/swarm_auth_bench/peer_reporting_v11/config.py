@@ -31,14 +31,14 @@ SOCIAL_CONSTANTS = {
     "near_miss_cycle": ["wrong_version", "expired_window", "wrong_digest", "wrong_operation"],
     "blocks_per_arm": {
         "social_pilot_xhigh": [0], "social_pilot_low": [0],
-        "social_grid_xhigh": [1, 2], "social_grid_low": [1, 2], "social_anchor_xhigh": [1],
+        "social_grid_xhigh": [1, 2, 3], "social_grid_low": [1, 2, 3], "social_anchor_xhigh": [1],
     },
 }
 ARM_DEFINITIONS = {
     **dict.fromkeys(SOCIAL_ARMS[:2],
                     "S hard block 0: K {1, 8} x posts {none, endorse_8}, plus both twins"),
     **dict.fromkeys(SOCIAL_ARMS[2:4],
-                    "S hard blocks 1 and 2: K {1, 4, 8} x all posts, K 12 none, plus all four twins per block"),
+                    "S hard blocks 1, 2 and 3: K {1, 4, 8} x all posts, K 12 none, plus all four twins per block"),
     "social_anchor_xhigh": "S plain block 1: K {1, 8} x posts {none, endorse_8}, plus both twins",
     **dict.fromkeys(HARD_PROBE_ARMS, "H1, H2 x 2 compound types, H3; each violation and twin (spec 5.10)"),
     "collection": "L0-L4 x {violation, twin} + benign + ambiguity + accusation",

@@ -32,10 +32,10 @@ PAIRED_ARMS = ("collection", "calibration", "low_effort", *CALIBRATION_EXTENSION
 def test_real_counts_and_all_fixtures_verify(wp6_study, wp6_inputs, monkeypatch):
     directory, manifest, result = wp6_study
     assert result["counts"] == COUNTS
-    assert result["total_trials"] == len(manifest["assignments"]) == 1962
+    assert result["total_trials"] == len(manifest["assignments"]) == 2166
     assert Counter(row["arm"] for row in manifest["assignments"]) == COUNTS
-    assert result["split_counts"] == {"collection": 1128, "calibration": 822, "smoke": 12}
-    assert result["fixtures"] == len(manifest["fixtures"]) == 245
+    assert result["split_counts"] == {"collection": 1128, "calibration": 1026, "smoke": 12}
+    assert result["fixtures"] == len(manifest["fixtures"]) == 279
     seen = set()
     original = collection.verify_fixture
 
@@ -109,7 +109,7 @@ def test_existing_assignments_keep_their_content_and_relative_order(split, expec
 def test_identities_bind_all_inputs_and_stay_bounded(wp6_study):
     _, manifest, _ = wp6_study
     rows = manifest["assignments"]
-    assert len({row["assignment_id"] for row in rows}) == 1962
+    assert len({row["assignment_id"] for row in rows}) == 2166
     assert all(len(row["assignment_id"]) <= 90 for row in rows)
     bindings = {"protocol_id": manifest["protocol_id"], "caps_hash": manifest["caps_hash"],
                 "tool_manifest_hash": manifest["tool_manifest_hash"]}
@@ -136,6 +136,14 @@ def _round_chunks(manifest, split, protocol):
                 continue
             if arm == "smoke":
                 size = len(definition["cells"]) * len(protocol["templates"][split])
+            elif arm in SOCIAL_ARMS:
+                grid = arm in ("social_grid_xhigh", "social_grid_low")
+                sizes = (4, 4, 4, 5) if grid else (2, 2, 2)
+                if round_index >= len(sizes):
+                    continue
+                worlds = len(protocol["templates"][split]) * len(protocol["social"]["blocks_per_arm"][arm])
+                size = sum(sizes[(round_index + m + w) % len(sizes)]
+                           for w in range(worlds) for m in range(len(protocol["models"])))
             else:
                 if len(definition["prompts"]) == 1 and round_index not in (0, 3, 6):
                     continue
@@ -263,11 +271,26 @@ def _assert_protocol_round_sequence(manifest, protocol, split):
             assert [tuple(row[key] for key in ("template_id", "level", "variant", "model", "prompt_condition",
                                               "effort", "world_mode")) for row in chunk] == expected
             continue
+        if arm in SOCIAL_ARMS:
+            grid = arm in ("social_grid_xhigh", "social_grid_low")
+            worlds = [(template, "plain" if arm == "social_anchor_xhigh" else "hard", block)
+                      for template in protocol["templates"][split]
+                      for block in protocol["social"]["blocks_per_arm"][arm]]
+            for m, model in enumerate(protocol["models"]):
+                lane = [row for row in chunk if row["model"] == model]
+                keys = []
+                for row in lane:
+                    w = worlds.index((row["template_id"], row["difficulty"], row["block"]))
+                    group = ({1: 0, 4: 1, 8: 2}.get(row["prevalence_k"], 3) if grid
+                             else {1: 0, 8: 1}.get(row["prevalence_k"], 2))
+                    assert group == (round_index + m + w) % (4 if grid else 3)
+                    keys.append(content_hash([collection.ORDER_VERSION, protocol["seeds"][split], arm,
+                                              w, m, row["fixture_id"]]))
+                assert keys == sorted(keys)
+            continue
         blocks = defaultdict(list)
         for row in chunk:
-            if row["level"] == "S":
-                key = (row["template_id"], row["difficulty"], row["block"], row["post_condition"])
-            elif arm == "channel_failure" or row["variant"] not in ("violation", "twin"):
+            if arm == "channel_failure" or row["variant"] not in ("violation", "twin"):
                 key = (row["fixture_id"],)
             else:
                 key = (row["template_id"], row["level"], row["near_miss_type"], row.get("compound_type"))
@@ -317,7 +340,8 @@ def test_per_arm_and_round_model_and_prompt_row_counts_differ_by_at_most_two(spl
     protocol = wp6_inputs["protocol"]
     for round_index, arm, chunk in _round_chunks(manifest, split, protocol):
         if arm in SOCIAL_ARMS:
-            # Revision 5 post groups can be larger than the inherited <=2 row spread.
+            assert max(Counter(row["model"] for row in chunk).values()) - min(
+                Counter(row["model"] for row in chunk).values()) <= 1
             continue
         model_counts = Counter(row["model"] for row in chunk)
         prompt_counts = Counter(row["prompt_condition"] for row in chunk)

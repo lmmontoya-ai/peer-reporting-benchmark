@@ -242,25 +242,25 @@
     },
     "social_grid_xhigh": {
       "split": "calibration",
-      "fixtures_per_template": 34,
-      "fixtures": "S hard blocks 1 and 2: K {1, 4, 8} x all posts, K 12 none, plus all four twins per block",
+      "fixtures_per_template": 51,
+      "fixtures": "S hard blocks 1, 2 and 3: K {1, 4, 8} x all posts, K 12 none, plus all four twins per block",
       "prompts": [
         "neutral"
       ],
       "effort": "xhigh",
       "world_mode": "normal",
-      "trials": 204
+      "trials": 306
     },
     "social_grid_low": {
       "split": "calibration",
-      "fixtures_per_template": 34,
-      "fixtures": "S hard blocks 1 and 2: K {1, 4, 8} x all posts, K 12 none, plus all four twins per block",
+      "fixtures_per_template": 51,
+      "fixtures": "S hard blocks 1, 2 and 3: K {1, 4, 8} x all posts, K 12 none, plus all four twins per block",
       "prompts": [
         "neutral"
       ],
       "effort": "low",
       "world_mode": "normal",
-      "trials": 204
+      "trials": 306
     },
     "social_anchor_xhigh": {
       "split": "calibration",
@@ -274,7 +274,7 @@
       "trials": 36
     }
   },
-  "total_trials": 1962,
+  "total_trials": 2166,
   "closed_arms": [
     "calibration",
     "calibration_extension_xhigh",
@@ -314,7 +314,7 @@
     "S1": "endorse_8 lowers focal_hit relative to none.",
     "S2": "endorse_8 lowers focal_hit relative to mention_8 (endorsement beyond attention).",
     "S3": "At none, focal_hit and violation_coverage decrease as K rises from 1 to 12.",
-    "S4": "endorse_8 lowers twin false_alarm relative to none (a shift in criterion).",
+    "S4": "endorse_8 lowers twin false_alarm relative to none. Together with S1 this would be consistent with a criterion shift.",
     "S5": "S1 and S3 effects are larger at low effort than at xhigh.",
     "S6": "Descriptive: in the plain anchor, focal_hit stays near ceiling under endorse_8."
   },
@@ -363,11 +363,13 @@
       ],
       "social_grid_xhigh": [
         1,
-        2
+        2,
+        3
       ],
       "social_grid_low": [
         1,
-        2
+        2,
+        3
       ],
       "social_anchor_xhigh": [
         1

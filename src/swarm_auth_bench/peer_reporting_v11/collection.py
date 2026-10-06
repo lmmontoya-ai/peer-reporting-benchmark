@@ -20,6 +20,7 @@ from .bundle import load_bundle
 from .config import (
     CALIBRATION_EXTENSION_ARMS,
     SOCIAL_ARMS,
+    SOCIAL_CONSTANTS,
     SOCIAL_FIELDS,
     SPLITS,
     arm_fixture_cells,
@@ -49,8 +50,59 @@ def assignment_identity(row: dict, *, protocol_id: str, tool_manifest_hash: str,
     return "v11-" + content_hash(identity)
 
 
+def _social_worlds(protocol: dict, arm: str) -> list[tuple]:
+    difficulty = "plain" if arm == "social_anchor_xhigh" else "hard"
+    return [(template, difficulty, block) for template in protocol["templates"]["calibration"]
+            for block in SOCIAL_CONSTANTS["blocks_per_arm"][arm]]
+
+
+def _social_group(row: dict, grid: bool) -> int:
+    return ({1: 0, 4: 1, 8: 2}.get(row["prevalence_k"], 3) if grid
+            else {1: 0, 8: 1}.get(row["prevalence_k"], 2))
+
+
+def _verify_social_order(rows: list[dict], protocol: dict) -> None:
+    """Require A1's complete cells, whole contrast groups, rotation, lane order and balance."""
+    models, seed = protocol["models"], protocol["seeds"]["calibration"]
+    for arm in SOCIAL_ARMS:
+        selected = [row for row in rows if row["arm"] == arm]
+        if not selected:
+            continue
+        grid = arm in SOCIAL_ARMS[2:4]
+        group_count = 4 if grid else 3
+        worlds = _social_worlds(protocol, arm)
+        cells = social_fixture_cells(arm)
+        expected = Counter((template, model, *(cell[key] for key in ("variant", *SOCIAL_FIELDS)))
+                           for template in protocol["templates"]["calibration"] for model in models for cell in cells)
+        actual = Counter((row["template_id"], row["model"], *(row[key] for key in ("variant", *SOCIAL_FIELDS)))
+                         for row in selected)
+        identities = Counter((row["fixture_id"], row["model"]) for row in selected)
+        if actual != expected or set(identities.values()) != {1}:
+            raise ValueError(f"{arm}: S round order must cover every fixture-model exactly once")
+        if {row["round"] for row in selected} != set(range(group_count)):
+            raise ValueError(f"{arm}: S round indices differ from the group count")
+        for row in selected:
+            w = worlds.index(tuple(row[key] for key in ("template_id", "difficulty", "block")))
+            m = models.index(row["model"])
+            if _social_group(row, grid) != (row["round"] + m + w) % group_count:
+                raise ValueError(f"{arm}: S group must run whole with one model in one round under the rotation")
+        for round_index in range(group_count):
+            counts = Counter(row["model"] for row in selected if row["round"] == round_index)
+            totals = [counts[model] for model in models]
+            allowed = {25, 26} if grid else {4}
+            if not set(totals) <= allowed or max(totals) - min(totals) > 1:
+                raise ValueError(f"{arm}: S per-round model counts must balance within one")
+            for m, model in enumerate(models):
+                lane = [row for row in selected if row["round"] == round_index and row["model"] == model]
+                keys = [content_hash([ORDER_VERSION, seed, arm,
+                                      worlds.index(tuple(row[key] for key in ("template_id", "difficulty", "block"))),
+                                      m, row["fixture_id"]]) for row in lane]
+                if keys != sorted(keys):
+                    raise ValueError(f"{arm}: S within-lane order differs from the content hash order")
+
+
 def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
-    """Run spec 9's Latin-square cells in rounds, keeping each violation/twin block intact."""
+    """Run inherited spec 9 rounds, with the A1 rotation and lane order for S only."""
     cells = {}
     arm_fixtures: dict[str, dict[str, dict]] = defaultdict(dict)
     for row in rows:
@@ -79,13 +131,22 @@ def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
                         row = cells[arm, matching[0], model, cell["prompt"], cell["effort"], cell["world_mode"]]
                         scheduled.append((round_index, arm_index, cell_index, template_index, row))
             continue
+        if arm in SOCIAL_ARMS:
+            grid = arm in SOCIAL_ARMS[2:4]
+            worlds = _social_worlds(protocol, arm)
+            for round_index in range(4 if grid else 3):
+                for m, model in enumerate(models):
+                    for fixture_id, fixture in fixtures.items():
+                        w = worlds.index(tuple(fixture[key] for key in ("template_id", "difficulty", "block")))
+                        if _social_group(fixture, grid) != (round_index + m + w) % (4 if grid else 3):
+                            continue
+                        row = cells[arm, fixture_id, model, "neutral", definition["effort"], definition["world_mode"]]
+                        order_key = content_hash([ORDER_VERSION, seed, arm, w, m, fixture_id])
+                        scheduled.append((round_index, arm_index, m, order_key, row))
+            continue
         groups: dict[tuple, list[str]] = defaultdict(list)
         for fixture_id, row in fixtures.items():
-            if row["level"] == "S":
-                # Revision 5 section 4 keeps post groups intact. Their sizes can
-                # make the inherited section 9 <=2 row spread infeasible.
-                block_key = (row["template_id"], row["difficulty"], row["block"], row["post_condition"])
-            elif arm != "channel_failure" and row["variant"] in ("violation", "twin"):
+            if arm != "channel_failure" and row["variant"] in ("violation", "twin"):
                 block_key = ("pair", row["template_id"], row["level"], row["near_miss_type"],
                              row.get("compound_type"))
             else:
@@ -118,7 +179,9 @@ def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
     if len(ordered) != len(rows):
         raise ValueError("round order does not cover every assignment cell")
     # The round is explicit so the live dispatcher can apply the spec 9 round barrier.
-    return [{**item[-1], "planned_order": position, "round": item[0]} for position, item in enumerate(ordered)]
+    result = [{**item[-1], "planned_order": position, "round": item[0]} for position, item in enumerate(ordered)]
+    _verify_social_order(result, protocol)
+    return result
 
 
 def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, instance_nonce: str
