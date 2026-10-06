@@ -522,8 +522,8 @@ class FakeTransport(V11PeerRuntime):
                 await self._push("thread/tokenUsage/updated", {**scope, "tokenUsage": {"total": {
                     "totalTokens": step[1], "inputTokens": 0, "outputTokens": 0}}})
             elif step[0] == "message":
-                await self._push("item/completed", {**scope, "item": {
-                    "id": "agent-item-1", "type": "agentMessage", "text": step[1]}})
+                self.last_agent_item = {"id": "agent-item-1", "type": "agentMessage", "text": step[1]}
+                await self._push("item/completed", {**scope, "item": dict(self.last_agent_item)})
             elif step[0] == "raw":  # an arbitrary scoped notification, e.g. a native tool item
                 await self._push(step[1], {**scope, **step[2]})
             elif step[0] == "raw_thread":  # lifecycle notifications without a top-level turn ID
@@ -563,6 +563,9 @@ class FakeTransport(V11PeerRuntime):
                 await self._push("thread/status/changed", {"threadId": self.thread_id, "status": interrupted_status})
         if end is not None and not self.interrupt.is_set():
             turn = {"id": self.turn_id, "status": end[1], **({"error": end[2]} if end[2] is not None else {})}
+        if turn["status"] == "completed" and getattr(self, "last_agent_item", None) is not None:
+            # The guest app-server repeats the final agentMessage in a completed turn (itemsView "summary").
+            turn = {**turn, "itemsView": "summary", "items": [dict(self.last_agent_item)]}
         await self._push("turn/completed", {"threadId": self.thread_id, "turn": turn})
 
     async def close(self):

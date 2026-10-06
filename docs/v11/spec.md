@@ -745,6 +745,12 @@ Execution rules that apply to every live phase:
   non-retryable error notification in a turn is an execution failure whatever the final
   turn status (failed, interrupted, or completed), unless the whole turn qualifies for the
   provider-overload exception.
+  Items embedded in `turn/started` or `turn/completed` are reconciled against the items
+  delivered as standalone `item/completed` notifications. A completed turn repeats its final
+  agent message there (`itemsView: "summary"`); an embedded item equal in every field to a
+  delivered item is that repeat and needs nothing more. Any other embedded item, including
+  one whose completion arrives only embedded, is model evidence the turn loop never
+  consumed, and it is an execution failure.
 - **Freeze.** A run refuses to start if any code, catalog, schema, template or protocol
   hash differs from its sealed plan. The offline scoring and review modules
   (`score.py`, `structured.py`, `rubric.py`, `review.py`, `review_plan.py`) are sealed too,

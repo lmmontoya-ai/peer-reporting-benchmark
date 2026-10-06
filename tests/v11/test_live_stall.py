@@ -609,3 +609,39 @@ async def test_a_study_pause_naming_another_root_path_is_refused(compat, tmp_pat
         atomic_json(path, seal({**record, "root_path": "roots/not-the-producing-root"}))
     with pytest.raises(v11_live.EvidenceError, match="another root path"):
         v11_live.verify_live_root(root, bundle=fake_bundle(), study_directory=study)
+
+
+# Guest finding (revision 4 probe): a completed turn repeats its final agentMessage with itemsView "summary".
+
+
+def test_only_an_exact_repeat_of_a_completed_item_is_reconciled_in_a_completed_turn():
+    from swarm_auth_bench.peer_reporting_v11.live_runtime import _Controller
+
+    def controller_with(events):
+        controller = _Controller.__new__(_Controller)
+        controller.raw_events, controller.failures, controller.session = events, [], None
+        controller.queue_reconciled, controller.emitted = True, []
+        controller.emit = lambda kind, **data: controller.emitted.append((kind, data))
+        return controller
+
+    message = {"delivery": None, "id": "agent-item-1", "memoryCitation": None, "phase": "final_answer",
+               "questions": None, "text": "Done.", "type": "agentMessage"}
+    def trace(embedded, standalone_method="item/completed"):
+        return [{"kind": "codex_event", "agent_id": "observer", "raw": {"method": standalone_method,
+                 "params": {"threadId": "t", "turnId": "u", "item": dict(message)}}},
+                {"kind": "codex_event", "agent_id": "observer", "raw": {"method": "turn/started",
+                 "params": {"threadId": "t", "turn": {"id": "u", "items": [], "itemsView": "notLoaded"}}}},
+                {"kind": "codex_event", "agent_id": "observer", "raw": {"method": "turn/completed",
+                 "params": {"threadId": "t", "turn": {"id": "u", "status": "completed", "itemsView": "summary",
+                                                      "items": embedded}}}}]
+    cases = (([dict(message)], "item/completed", False), ([], "item/completed", False),
+             ([{**message, "text": "Other."}], "item/completed", True),
+             ([{**message, "phase": "commentary"}], "item/completed", True),
+             ([{"id": "never-sent", "type": "agentMessage", "text": "x"}], "item/completed", True),
+             ([{**message, "type": "reasoning"}], "item/completed", True),
+             ([dict(message)], "item/started", True))
+    for embedded, standalone_method, expected_failure in cases:
+        controller = controller_with(trace(embedded, standalone_method))
+        controller.reconcile_turn_notifications(None)
+        unresolved = "unreconciled items in turn lifecycle notification" in controller.failures
+        assert unresolved is expected_failure, embedded

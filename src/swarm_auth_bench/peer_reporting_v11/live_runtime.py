@@ -623,6 +623,22 @@ class _Controller:
         """
         completed, contradicted, unresolved = 0, [], []
         session = self.session
+        # A completed turn may repeat an item already delivered as a standalone item/completed (the guest sends
+        # the final agentMessage again with itemsView "summary"). Only an exact repeat is reconciled; any other
+        # embedded item, including one whose completion arrived only embedded, is model evidence the turn loop
+        # never consumed.
+        delivered: dict[str, list[dict]] = {}
+        for event in self.raw_events:
+            raw = event.get("raw") or {}
+            params = raw.get("params") or {}
+            item = params.get("item") if type(params) is dict else None
+            if (event.get("kind") == "codex_event" and raw.get("method") == "item/completed"
+                    and type(item) is dict and type(item.get("id")) is str):
+                delivered.setdefault(item["id"], []).append(item)
+
+        def repeated(item: object) -> bool:
+            return type(item) is dict and type(item.get("id")) is str and item in delivered.get(item["id"], [])
+
         for index, event in enumerate(self.raw_events):
             raw = event.get("raw") or {}
             method = raw.get("method")
@@ -638,7 +654,7 @@ class _Controller:
             entry = {"raw_event_index": index, "method": method, "params": deepcopy(params)}
             if type(turn) is dict:
                 items = turn.get("items", [])
-                if type(items) is not list or items:
+                if type(items) is not list or not all(repeated(item) for item in items):
                     unresolved.append(entry)
             if method == "turn/completed":
                 completed += 1
