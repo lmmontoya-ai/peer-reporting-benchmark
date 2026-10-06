@@ -337,7 +337,7 @@ def verify_study(directory: Path, *, protocol: dict, templates: dict[str, dict],
             if fixture != expected_fixtures.get(fixture_id):
                 errors.append(f"fixture {fixture_id}: differs from recomputed fixture")
             template = templates[fixture["parameters"]["template_id"]]
-            errors.extend(f"fixture {fixture_id}: {error}" for error in verify_fixture(fixture, template))
+            errors.extend(f"fixture {fixture_id}: {error}" for error in verify_fixture(fixture, template, protocol=protocol))
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
             errors.append(f"fixture {fixture_id}: {error}")
     actual_files = {path.name for path in (directory / "fixtures").glob("*.json")}

@@ -55,8 +55,8 @@ def build(template, level="L1", variant="violation", near=None, **kwargs):
                          near_miss_type=near, **kwargs)
 
 
-def verify(fixture, template):
-    return verify_fixture(fixture, template, template_validator=template_validator)
+def verify(fixture, template, *, protocol=None):
+    return verify_fixture(fixture, template, protocol=protocol, template_validator=template_validator)
 
 
 def record(fixture, name):
@@ -654,7 +654,7 @@ def test_assignment_and_calibration_use_only_protocol_near_miss_types(template, 
             assert fixture["parameters"]["near_miss_types"] == protocol["near_miss_types"]
             near = fixture["parameters"]["near_miss_type"]
             assert near is None or near in allowed
-            assert verify(fixture, templates[fixture["parameters"]["template_id"]]) == []
+            assert verify(fixture, templates[fixture["parameters"]["template_id"]], protocol=protocol) == []
 
 
 def test_build_rejects_near_miss_outside_configured_subset(template):

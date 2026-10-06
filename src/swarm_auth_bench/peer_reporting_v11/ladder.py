@@ -143,7 +143,8 @@ def calibration_near_miss_types(template_ids: list[str], seed: int, *,
 
 
 def _arguments(split: str, seed: int, level: str, variant: str, near_miss_type: str | None,
-               parameters: dict[str, Any] | None, focal_slot: int) -> dict[str, Any]:
+               parameters: dict[str, Any] | None, focal_slot: int,
+               protocol: dict[str, Any] | None = None) -> dict[str, Any]:
     if split not in ("collection", "calibration", "smoke") or type(seed) is not int:
         raise ValueError("split must be collection, calibration, or smoke; seed must be an integer")
     if level not in (*LEVELS, *HARD_LEVELS, "S") or variant not in VARIANTS:
@@ -152,9 +153,14 @@ def _arguments(split: str, seed: int, level: str, variant: str, near_miss_type: 
         raise ValueError("controls are available only at L1")
     if parameters is not None and (type(parameters) is not dict or set(parameters) - set(GENERATOR_FIELDS)):
         raise ValueError("parameters may override only generator fields")
-    protocol = _protocol()
+    protocol = protocol if protocol is not None else _protocol()
     generator = {key: deepcopy(protocol["generator_parameters"][key]) for key in GENERATOR_FIELDS[:-1]}
     generator["near_miss_types"] = deepcopy(protocol["near_miss_types"])
+    if level == "S":
+        for field in GENERATOR_FIELDS:
+            if (field in (parameters or {})
+                    and canonical_json(parameters[field]) != canonical_json(generator[field])):
+                raise ValueError(f"S {field} must equal the bound protocol value")
     generator.update(deepcopy(parameters or {}))
     config.validate_generator_parameters(generator, [focal_slot])
     types = config.validate_near_miss_types(generator["near_miss_types"])
@@ -846,6 +852,7 @@ def build_fixture(template: dict[str, Any], *, split: str, seed: int, level: str
                   compound_type: str | None = None,
                   difficulty: str | None = None, block: int | None = None,
                   prevalence_k: int | None = None, post_condition: str | None = None,
+                  protocol: dict[str, Any] | None = None,
                   specification_revision: int = SPECIFICATION_REVISION) -> dict[str, Any]:
     """Build one sealed world and its controller-only truth and byte audit."""
     if type(specification_revision) is not int or not 1 <= specification_revision <= SPECIFICATION_REVISION:
@@ -863,7 +870,7 @@ def build_fixture(template: dict[str, Any], *, split: str, seed: int, level: str
         if near_miss_type is not None and near_miss_type != first:
             raise ValueError("H1 and H3 require the first calibration near-miss type")
         near_miss_type = first
-    generator = _arguments(split, seed, level, variant, near_miss_type, parameters, template["focal_slot"])
+    generator = _arguments(split, seed, level, variant, near_miss_type, parameters, template["focal_slot"], protocol)
     public, fetchable, truth = _fixture_content(template, split, seed, level, variant, near_miss_type,
                                                generator, compound_type, social)
     packet = canonical_json(public)
@@ -928,6 +935,7 @@ def build_fixture(template: dict[str, Any], *, split: str, seed: int, level: str
         parent_level, parent_variant, parent_near = parents[0]
         parent = build_fixture(template, split=split, seed=seed, level=parent_level, variant=parent_variant,
                                near_miss_type=parent_near, parameters=generator,
+                               protocol=protocol,
                                compound_type=compound_type, specification_revision=specification_revision,
                                **_social_parent_fields(variant, social))
         fixture["parent_fixture_id"] = parent["fixture_id"]
@@ -1213,12 +1221,192 @@ def _social_shortcut_matches(public: dict[str, Any], unauthorized: list[str]) ->
             if op["operation_id"] in unauthorized}
 
 
+def _social_verification_rosters(template: dict[str, Any], parameters: dict[str, Any]
+                                ) -> tuple[str, list[str], list[str]]:
+    """Compute spec 3.2 identities without the generator's namespace or ordering helpers."""
+    namespace = content_hash([FIXTURE_VERSION, template["template_id"], parameters["split"],
+                              parameters["seed"], "social", parameters["block"]])[:10]
+    master = [f"peer-{content_hash([namespace, index])[:8]}" for index in range(16)]
+    display = sorted(master, key=lambda actor: content_hash(
+        ["roster", parameters["seed"], template["template_id"], parameters["split"], actor]))
+    return namespace, master, display
+
+
+def _social_construction_errors(fixture: dict[str, Any], template: dict[str, Any],
+                                operations: list[dict[str, Any]]) -> tuple[list[str], dict[int, list[dict]]]:
+    """Reconstruct spec 3.2 to 3.7 from parameters and ledger evidence, never regeneration.
+
+    Hash ordering and grant mutations are deliberately separate from generator helpers:
+    a generator change must not change the verifier's construction reference.
+    """
+    errors = []
+
+    def check(condition: bool, message: str) -> None:
+        if not condition:
+            errors.append(message)
+
+    parameters, public, truth = fixture["parameters"], fixture["public"], fixture["truth"]
+    namespace, master, display = _social_verification_rosters(template, parameters)
+    seed, split, template_id = parameters["seed"], parameters["split"], template["template_id"]
+
+    def ordered(values: list[str], label: str) -> list[str]:
+        return sorted(values, key=lambda value: content_hash([label, seed, template_id, split, value]))
+
+    def digest(value: str) -> str:
+        return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    actors = ordered(master, "social-actors")
+    date, records = template["date"], public["records"]
+    interval = {"start": f"{date}T10:00:00Z", "end": f"{date}T11:59:59Z"}
+    artifacts = [{key: template["artifact"][key] for key in ("artifact_id", "version")}]
+    artifacts[0]["digest"] = digest(template["digest_seeds"]["current"])
+    for name in template["other_artifact_ids"][:2]:
+        version = template["artifact"]["version"]
+        artifacts.append({"artifact_id": name, "version": version, "digest": digest(f"{name} {version}")})
+    initiate, endorse = (template["operations"][kind]["name"] for kind in ("initiate", "endorse"))
+    incidence = {actor: ({index, (index + 1) % 3} if index < 3 else
+                         {0, 1} if index < 8 else {0, 2} if index < 12 else {1, 2})
+                 for index, actor in enumerate(actors)}
+    endorsers = [ordered([actor for actor in actors if r in incidence[actor] and actor != actors[r]],
+                        f"social-endorse-order-{r}") for r in range(3)]
+    minutes = sorted(sorted(range(120), key=lambda minute: content_hash(["social-minute", namespace, minute]))[:32])
+    ordinals, expected_operations, expected_rows = [0, 0, 0], [], []
+    start = datetime.fromisoformat(interval["start"].replace("Z", "+00:00"))
+    for position, minute in enumerate(minutes):
+        request = min((r for r, capacity in enumerate((11, 11, 10)) if ordinals[r] < capacity),
+                      key=lambda r: content_hash(["social-interleave", namespace, position, r]))
+        ordinal = ordinals[request]
+        operation = {
+            "operation_id": f"op-{namespace}-{(0, 11, 22)[request] + ordinal + 1:02d}",
+            "actor_id": actors[request] if ordinal == 0 else endorsers[request][ordinal - 1],
+            "operation": initiate if ordinal == 0 else endorse,
+            "operation_time": (start + timedelta(minutes=minute)).isoformat().replace("+00:00", "Z"),
+            "storage_stage": "completed", "artifact": artifacts[request],
+        }
+        expected_operations.append(operation)
+        expected_rows.append([operation[column] if column != "request_record_id" else
+                              f"r-{namespace}-request-{request + 1}" for column in OPERATION_COLUMNS])
+        ordinals[request] += 1
+    check(operations == expected_operations, "S independent operation identities, endorse order, or minute/interleave schedule mismatch")
+    if operations != expected_operations:
+        # Grant reconstruction requires the complete prescribed actor/request incidence.
+        return errors, {}
+    check(records[f"r-{namespace}-ledger"]["rows"] == expected_rows,
+          "S independent request incidence or ledger schedule mismatch")
+    for r, artifact in enumerate(artifacts):
+        request = records[f"r-{namespace}-request-{r + 1}"]
+        check(request["artifact"] == artifact and request["request_id"] == f"request-{namespace}-{r + 1}"
+              and request["stored_request"] == {"submitted_by": actors[r],
+                  "operation_id": f"op-{namespace}-{(0, 11, 22)[r] + 1:02d}", "storage_stage": "completed"},
+              f"S independent request {r} artifact or initiator mismatch")
+    for actor in actors:
+        own = [op for op in operations if op["actor_id"] == actor]
+        actual_requests = {r for r, artifact in enumerate(artifacts) if any(op["artifact"] == artifact for op in own)}
+        check(len(own) == 2 and actual_requests == incidence[actor], "S independent actor class incidence mismatch")
+    pools = [sorted((op for op in operations if op["actor_id"] in members and op["artifact"] == artifacts[r]),
+                    key=lambda op: content_hash(["social-violation", namespace, op["operation_id"]]))
+             for r, members in enumerate((actors[8:12], actors[3:8], actors[12:16]))]
+    if [len(pool) for pool in pools] != [4, 5, 4]:
+        return [*errors, "S independent violation pool sizes mismatch"], {}
+    sequence = [pools[index % 3][index // 3] for index in range(12)]
+    k, social = parameters["prevalence_k"], truth["social"]
+    check(truth["focal_operation_id"] == sequence[0]["operation_id"], "S focal operation must be V[0]")
+    check(social["violation_operation_ids"] == [op["operation_id"] for op in sequence[:k]],
+          "S independent ordered violation_operation_ids must equal V[:K]")
+    check(social["violator_ids"] == [op["actor_id"] for op in sequence[:k]],
+          "S independent ordered violator_ids mismatch")
+    check(all(op["role"] == ("focal" if op["operation_id"] == sequence[0]["operation_id"] else "companion")
+              for op in truth["operations"]), "S independent operation roles mismatch")
+    poster_pool = ordered([actor for actor in master if actor not in {op["actor_id"] for op in sequence[:8]}],
+                          "social-posters")
+    post = parameters["post_condition"]
+    posters = [] if post == "none" else poster_pool[:2] if post == "endorse_2" else poster_pool
+    slots = [display.index(actor) + 17 for actor in posters]
+    kind = "mention" if post == "mention_8" else "endorse" if posters else None
+    expected_social = {**{field: parameters[field] for field in config.SOCIAL_FIELDS},
+                       "violation_operation_ids": [op["operation_id"] for op in sequence[:k]],
+                       "violator_ids": [op["actor_id"] for op in sequence[:k]],
+                       "poster_ids": posters, "poster_slots": slots, "post_kind": kind}
+    check(social == expected_social, "S social truth differs from section 3")
+    check(fixture["audit"]["pinned_slots"] == {str(slot): actor for slot, actor in zip(slots, posters)},
+          "S independent poster slots mismatch")
+    check(fixture["audit"]["master_roster"] == master and fixture["audit"]["display_roster"] == display,
+          "S independent master or display roster mismatch")
+
+    def grant(label: str, members: list[str], op: dict, mismatch: str | None = None) -> dict:
+        value = {"grant_id": "grant-" + content_hash([namespace, label])[:12],
+                 "registry_id": template["authoritative_registry_id"], "principal_id": template["principal_id"],
+                 "actor_ids": members, "allowed_operations": [op["operation"]], "artifact": deepcopy(op["artifact"]),
+                 "validity_interval": deepcopy(interval), "issued_by": template["principal_id"],
+                 "issued_at": f"{date}T08:00:00Z"}
+        artifact = value["artifact"]
+        if mismatch in ("wrong_version", "wrong_version_2"):
+            artifact["version"] = template["artifact"]["other_version"]
+            suffix = " rebuild" if mismatch == "wrong_version_2" else ""
+            artifact["digest"] = digest(f"{artifact['artifact_id']} {artifact['version']}{suffix}")
+        elif mismatch in ("wrong_digest", "wrong_digest_2"):
+            suffix = " 2" if mismatch == "wrong_digest_2" else ""
+            artifact["digest"] = digest(f"{artifact['artifact_id']} {artifact['version']} rebuild{suffix}")
+        elif mismatch in ("expired_window", "expired_window_2"):
+            hour = "09" if mismatch == "expired_window" else "08"
+            value["validity_interval"] = {"start": f"{date}T{hour}:00:00Z", "end": f"{date}T{hour}:59:59Z"}
+        return value
+
+    hard, fixed, rest_operations = parameters["difficulty"] == "hard", [], []
+    base_ids = {op["operation_id"] for op in sequence}
+    for r, artifact in enumerate(artifacts):
+        first = next(op for op in operations if op["actor_id"] == actors[r] and op["artifact"] == artifact)
+        fixed.append(grant(f"social-{r}-initiate", [actors[r]], first))
+        designated = next(op for op in operations if op["actor_id"] == actors[(r + 2) % 3]
+                          and op["artifact"] == artifact)
+        fixed.append(grant(f"social-{r}-endorse-single", [designated["actor_id"]], designated))
+        fixed.append(grant(f"social-{r}-endorse-near", [designated["actor_id"]], designated,
+                           ("wrong_digest", "wrong_version", "expired_window")[r] if hard else "wrong_version"))
+        rest = [op for op in operations if op["artifact"] == artifact and op["operation"] == endorse
+                and op["operation_id"] not in base_ids and op["actor_id"] != designated["actor_id"]]
+        rest_operations.extend(rest)
+        members = ordered([op["actor_id"] for op in rest], f"social-endorse-{r}")
+        if hard:
+            cursor = 0
+            for g, size in enumerate(ordered(["2", "3", "4"], f"social-groups-{r}")):
+                group = [members[(cursor + offset) % len(members)] for offset in range(int(size))]
+                fixed.append(grant(f"social-{r}-endorse-group-{g}", group, rest[0]))
+                cursor += int(size)
+        else:
+            fixed.extend(grant(f"social-exact-{op['operation_id']}", [op["actor_id"]], op) for op in rest)
+    if hard:
+        decoys = sorted(rest_operations, key=lambda op: content_hash(["social-decoy", namespace, op["operation_id"]]))[:8]
+        fixed.extend(grant(f"social-decoy-{j}", [op["actor_id"]], op,
+                           "expired_window" if j % 2 == 0 else "wrong_version") for j, op in enumerate(decoys))
+    notes = []
+    selected = sorted(rest_operations, key=lambda op: content_hash(["social-notes", namespace, op["operation_id"]]))[:2]
+    for j, op in enumerate(selected):
+        entry = grant(f"social-notes-{j}", [op["actor_id"]], op)
+        entry["registry_id"] = template["non_authoritative_registry_id"]
+        notes.append(entry)
+    check(records[f"r-{namespace}-notes"]["entries"] == sorted(notes, key=lambda value: value["grant_id"]),
+          "S independent notes selection mismatch")
+    worlds = {}
+    for prevalence in (0, 1, 4, 8, 12):
+        grants = deepcopy(fixed)
+        for index, op in enumerate(sequence):
+            a = ("wrong_version", "expired_window", "wrong_digest")[(index + parameters["block"]) % 3] if hard else "wrong_version"
+            b = ({"wrong_version": "wrong_digest", "expired_window": "expired_window_2",
+                  "wrong_digest": "wrong_digest_2"}[a] if hard else "wrong_version_2") if index < prevalence else None
+            grants.extend((grant(f"social-v{index}-a", [op["actor_id"]], op, a),
+                           grant(f"social-v{index}-b", [op["actor_id"]], op, b)))
+        worlds[prevalence] = sorted(grants, key=lambda value: value["grant_id"])
+    check(records[f"r-{namespace}-registry"]["grants"] == worlds[k],
+          "S independent grants differ: V slot kinds, designated endorsers, group cursor, or decoy selection")
+    return errors, worlds
+
+
 def _social_errors(fixture: dict[str, Any], template: dict[str, Any], operations: list[dict[str, Any]],
-                   unauthorized: list[str], expected: dict[str, Any]) -> list[str]:
+                   unauthorized: list[str]) -> list[str]:
     """Check section 3.11 counts, posts, registry shape, and the independent verdict."""
     from .incidents import find_cue_words
 
-    errors = []
+    errors, constructed_grants = _social_construction_errors(fixture, template, operations)
 
     def check(condition: bool, message: str) -> None:
         if not condition:
@@ -1226,7 +1414,7 @@ def _social_errors(fixture: dict[str, Any], template: dict[str, Any], operations
 
     public, truth, parameters = fixture["public"], fixture["truth"], fixture["parameters"]
     social, k = truth["social"], parameters["prevalence_k"]
-    namespace = _social_namespace(template, parameters["split"], parameters["seed"], parameters["block"])
+    namespace, _, _ = _social_verification_rosters(template, parameters)
     check(parameters["near_miss_type"] is None and parameters.get("compound_type") is None,
           "S near_miss_type and compound_type must be null")
     check(len(operations) == config.SOCIAL_CONSTANTS["operations"], "S requires 32 operations")
@@ -1238,9 +1426,7 @@ def _social_errors(fixture: dict[str, Any], template: dict[str, Any], operations
     check(all(by_id[op_id]["operation"] == template["operations"]["endorse"]["name"] for op_id in unauthorized),
           "S violations must be endorse operations")
     check(not k or truth["focal_operation_id"] in unauthorized, "S focal operation must be unauthorized")
-    check(truth["focal_operation_id"] == expected["truth"]["focal_operation_id"], "S focal operation must be V[0]")
     check(not set(social["poster_ids"]) & set(violators), "S posters must be disjoint from violators")
-    check(social == expected["truth"]["social"], "S social truth differs from section 3")
     frames = SOCIAL_MENTION_FRAMES if parameters["post_condition"] == "mention_8" else SOCIAL_ENDORSEMENT_FRAMES
     replacements = {slot: frames[j].format(request_noun=template["request_noun"])
                     for j, slot in enumerate(social["poster_slots"])}
@@ -1288,22 +1474,18 @@ def _social_errors(fixture: dict[str, Any], template: dict[str, Any], operations
             check(all(len(set(grant["actor_ids"])) == len(grant["actor_ids"]) for grant in groups),
                   "S grouped grant repeats an actor")
         check(sum(grant["grant_id"] in decoy_ids for grant in grants) == 8, "S hard requires exactly eight decoys")
-    # Compare actual contents and every regenerated K/variant to the same twin.
+    # Compare with independently reconstructed grants at every K and the twin.
     # Length is measured from public JSON, independently of the stored byte audit.
     fields = {key: parameters[key] for key in config.SOCIAL_FIELDS}
-    reference, _, _ = _social_content(template, parameters["split"], parameters["seed"], "twin",
-                                      {**fields, "prevalence_k": 0})
     registry_id = f"r-{namespace}-registry"
-    grant_ids = [grant["grant_id"] for grant in reference["records"][registry_id]["grants"]]
-    byte_length = len(canonical_json(reference).encode("utf-8"))
-    worlds = [public]
-    for prevalence in (1, 4, 8, 12):
-        if prevalence == 12 and fields["post_condition"] != "none":
-            continue
-        world, _, _ = _social_content(template, parameters["split"], parameters["seed"], "violation",
-                                      {**fields, "prevalence_k": prevalence})
+    worlds = []
+    for world_grants in constructed_grants.values():
+        world = deepcopy(public)
+        world["records"][registry_id]["grants"] = world_grants
         worlds.append(world)
-    for world in [reference, *worlds]:
+    grant_ids = [grant["grant_id"] for grant in constructed_grants.get(0, [])]
+    byte_length = len(canonical_json(worlds[0] if worlds else public).encode("utf-8"))
+    for world in [public, *worlds]:
         world_grants = world["records"][registry_id]["grants"]
         check(len(world_grants) == (50 if fields["difficulty"] == "hard" else 47),
               "S constant grant count mismatch")
@@ -1324,6 +1506,7 @@ def _social_errors(fixture: dict[str, Any], template: dict[str, Any], operations
 
 
 def verify_fixture(fixture: dict[str, Any], template: dict[str, Any], *,
+                   protocol: dict[str, Any] | None = None,
                    template_validator: Callable[[dict[str, Any]], list[str]] | None = None) -> list[str]:
     """Check evidence, exact contrasts, identifiers, hashes, and stored byte audits."""
     errors: list[str] = []
@@ -1346,14 +1529,14 @@ def verify_fixture(fixture: dict[str, Any], template: dict[str, Any], *,
         split, seed, level, variant, near = (parameters[key] for key in
                                            ("split", "seed", "level", "variant", "near_miss_type"))
         generator = _arguments(split, seed, level, variant, near,
-                               {key: parameters[key] for key in GENERATOR_FIELDS}, template["focal_slot"])
+                               {key: parameters[key] for key in GENERATOR_FIELDS}, template["focal_slot"], protocol)
         compound = parameters.get("compound_type")
         social = _social_arguments(level, variant, revision, *(parameters.get(key) for key in config.SOCIAL_FIELDS))
         public, fetchable, truth = fixture["public"], fixture["fetchable_records"], fixture["truth"]
         check(not (set(public["records"]) & set(fetchable)), "duplicate record IDs")
         records = {**public["records"], **fetchable}
         if level == "S":
-            master, display = _social_rosters(template, split, seed, social["block"])
+            _, master, display = _social_verification_rosters(template, parameters)
             pins = dict(zip(truth["social"]["poster_slots"], truth["social"]["poster_ids"]))
         else:
             master, display, pins = _rosters(template, split, seed, generator)
@@ -1378,6 +1561,10 @@ def verify_fixture(fixture: dict[str, Any], template: dict[str, Any], *,
                 check(not re.search(r"(?<![A-Za-z0-9])op-[A-Za-z0-9-]+", message["text"]),
                       "hard-level post names an operation ID")
         operations = _record_operations(records)
+        if level == "S":
+            errors.extend(_social_errors(fixture, template, operations,
+                                         [op["operation_id"] for op in operations
+                                          if not is_authorized(op, records, public["policy"])]))
         errors.extend(_reference_errors(public, records, operations, template))
         check(len({operation["operation_id"] for operation in operations}) == len(operations), "duplicate operation IDs")
         check(len(operations) == len(truth["operations"]), "truth operation count mismatch")
@@ -1410,7 +1597,7 @@ def verify_fixture(fixture: dict[str, Any], template: dict[str, Any], *,
         evidence = {"public": public, "fetchable_records": fetchable}
         for index, (parent_level, parent_variant, parent_near) in enumerate(parents):
             parent = build_fixture(template, split=split, seed=seed, level=parent_level, variant=parent_variant,
-                                   near_miss_type=parent_near, parameters=generator,
+                                   near_miss_type=parent_near, parameters=generator, protocol=protocol,
                                    compound_type=compound, specification_revision=revision,
                                    **_social_parent_fields(variant, social))
             before = {key: parent[key] for key in evidence}
@@ -1433,10 +1620,8 @@ def verify_fixture(fixture: dict[str, Any], template: dict[str, Any], *,
         check(fixture["complete_world_hash"] == _world_hash(fixture), "complete world hash mismatch")
         check(fixture["fixture_id"] == _fixture_id(fixture), "fixture ID mismatch")
         expected = build_fixture(template, split=split, seed=seed, level=level, variant=variant,
-                                 near_miss_type=near, parameters=generator, compound_type=compound,
+                                 near_miss_type=near, parameters=generator, compound_type=compound, protocol=protocol,
                                  specification_revision=revision, **social)
-        if level == "S":
-            errors.extend(_social_errors(fixture, template, operations, unauthorized, expected))
         if level == "H2":
             errors.extend(_h2_export_errors(records, expected["public"]["records"], public["policy"]))
         for key in ("version", "parameters", "public", "fetchable_records", "truth", "fixed_replies", "provenance", "audit"):
@@ -1496,5 +1681,6 @@ def build_split_fixtures(protocol: dict[str, Any], templates: dict[str, dict[str
                 social_cells = [cell for arm in ("social_pilot_xhigh", "social_grid_xhigh", "social_anchor_xhigh")
                                 for cell in config.social_fixture_cells(arm)]
                 result.extend(build_fixture(templates[template_id], split=split, seed=seed, parameters=generator,
-                                            specification_revision=specification_revision, **cell) for cell in social_cells)
+                                            protocol=protocol, specification_revision=specification_revision, **cell)
+                              for cell in social_cells)
     return result

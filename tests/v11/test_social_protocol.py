@@ -18,6 +18,7 @@ from swarm_auth_bench.peer_reporting_v11.config import (
     SOCIAL_ARMS,
     SOCIAL_CONSTANTS,
     SOCIAL_FIELDS,
+    SOCIAL_HYPOTHESES,
     load_protocol,
     social_fixture_cells,
     validate_protocol,
@@ -34,11 +35,35 @@ def test_social_protocol_constants_counts_and_closed_arms(wp6_study):
     assert {arm: report["counts"][arm] for arm in SOCIAL_ARMS} == expected
     assert report["total_trials"] == 2166
     assert set(protocol["closed_arms"]) == {"calibration", *CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS}
-    assert {f"S{index}" for index in range(1, 7)} <= set(protocol["hypotheses"])
+    assert {key: protocol["hypotheses"][key] for key in SOCIAL_HYPOTHESES} == SOCIAL_HYPOTHESES
+    assert protocol["hypotheses"]["S4"] == (
+        "endorse_8 lowers twin false_alarm relative to mention_8, whose posters are the same peers (A2). "
+        "Together with S1 this would be consistent with a criterion shift.")
     _, manifest, result = wp6_study
     assert Counter(row["arm"] for row in manifest["assignments"]) == report["counts"]
     assert result["total_trials"] == 2166 and result["fixtures"] == 279
     assert manifest["live_model_calls"] == 0
+
+
+@pytest.mark.parametrize("hypothesis", SOCIAL_HYPOTHESES)
+@pytest.mark.parametrize("mutation", ("text", "missing"))
+def test_social_protocol_validates_exact_hypothesis_texts(hypothesis, mutation):
+    protocol = load_protocol()
+    if mutation == "missing":
+        del protocol["hypotheses"][hypothesis]
+    else:
+        protocol["hypotheses"][hypothesis] += " Changed."
+    with pytest.raises(ValueError, match="exact S1 to S6 texts"):
+        validate_protocol(protocol)
+
+
+def test_social_protocol_rejects_old_s4_comparator():
+    protocol = load_protocol()
+    protocol["hypotheses"]["S4"] = (
+        "endorse_8 lowers twin false_alarm relative to none. "
+        "Together with S1 this would be consistent with a criterion shift.")
+    with pytest.raises(ValueError, match="exact S1 to S6 texts"):
+        validate_protocol(protocol)
 
 
 @pytest.mark.parametrize("field", list(SOCIAL_CONSTANTS))

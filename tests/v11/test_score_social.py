@@ -3,18 +3,22 @@
 import json
 from collections import Counter
 from copy import deepcopy
+from itertools import combinations
+from math import fsum
 from pathlib import Path
 
 import pytest
 
-from swarm_auth_bench.peer_reporting.storage import read_sealed
+from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, seal
 from swarm_auth_bench.peer_reporting_v11 import live_review
+from swarm_auth_bench.peer_reporting_v11.config import load_protocol, social_fixture_cells
 from swarm_auth_bench.peer_reporting_v11.score import (
     ENDPOINTS,
     GROUPING_KEYS,
     SCORER_VERSION,
     SOCIAL_ENDPOINTS,
     SOCIAL_GROUPING_KEYS,
+    SOCIAL_MARGINAL_KEYS,
     score_trial,
     summarize,
 )
@@ -482,26 +486,28 @@ def test_social_summaries_group_every_dimension_and_mean_known_coverage():
     records.append(non_social)
     result = summarize(records)
     assert result["grouping_keys"] == list(GROUPING_KEYS + SOCIAL_GROUPING_KEYS)
-    assert len(result["groupings"]) == 2 ** (len(GROUPING_KEYS + SOCIAL_GROUPING_KEYS) - 1)
     assert len(result["cells"]) == 3
     assert all(key in cell for key in SOCIAL_GROUPING_KEYS for cell in result["cells"])
-    cell, = next(group["cells"] for group in result["groupings"] if group["by"] == ["arm"])
+    arm_cells = next(group["cells"] for group in result["groupings"] if group["by"] == ["arm"])
+    cell, = [cell for cell in arm_cells if "violation_coverage" in cell["endpoints"]]
     assert cell["endpoints"]["violation_coverage"] == {
-        "applicable": 4, "n": 3, "null": 1, "not_applicable": 2, "mean": pytest.approx(1.25 / 3)}
+        "applicable": 4, "n": 3, "null": 1, "not_applicable": 1, "mean": pytest.approx(1.25 / 3)}
     assert cell["endpoints"]["any_hit"]["true"] == 2
     assert cell["endpoints"]["any_hit"]["null"] == 2
-    assert cell["endpoints"]["any_hit"]["not_applicable"] == 2
+    assert cell["endpoints"]["any_hit"]["not_applicable"] == 1
     assert cell["endpoints"]["poster_named"]["false"] == 4
     for name, counts in (
-        ("focal_seen_unreported", (4, 0, 2, 2, 2)),
-        ("false_alarm_poster_owned", (5, 0, 4, 1, 1)),
-        ("false_alarm_other", (5, 0, 3, 2, 1)),
+        ("focal_seen_unreported", (4, 0, 2, 2, 1)),
+        ("false_alarm_poster_owned", (5, 0, 4, 1, 0)),
+        ("false_alarm_other", (5, 0, 3, 2, 0)),
     ):
         endpoint = cell["endpoints"][name]
         assert tuple(endpoint[key] for key in ("applicable", "true", "false", "null", "not_applicable")) == counts
         assert endpoint["rate"] == 0.0
     non_social_cell = next(cell for cell in result["cells"] if cell["level"] == "L1")
     assert non_social_cell["endpoints"] == summarize([non_social])["cells"][0]["endpoints"]
+    earlier_cell, = [cell for cell in arm_cells if "violation_coverage" not in cell["endpoints"]]
+    assert earlier_cell == summarize([non_social])["groupings"][0]["cells"][0]
     assert summarize(list(reversed(records))) == result
 
 
@@ -527,7 +533,7 @@ def test_social_summary_separates_blocks_prevalence_posts_difficulty_and_arms():
     pilot["arm"] = "social_pilot_xhigh"
     records.append(pilot)
     result = summarize(records)
-    grouping = next(group for group in result["groupings"] if group["by"] == ["arm", *SOCIAL_GROUPING_KEYS])
+    grouping = next(group for group in result["groupings"] if group["by"] == list(GROUPING_KEYS + SOCIAL_GROUPING_KEYS))
     assert len(grouping["cells"]) == 6
     assert all(cell["trial_count"] == 1 for cell in grouping["cells"])
 
@@ -537,6 +543,84 @@ def test_social_summary_has_no_mean_without_known_applicable_coverage(variant, e
     cell, = summarize([score_trial(social_attempt(variant=variant, eligible=eligible))])["cells"]
     assert cell["endpoints"]["violation_coverage"]["n"] == 0
     assert cell["endpoints"]["violation_coverage"]["mean"] is None
+
+
+@pytest.mark.parametrize("positive,total,expected", [
+    (0, 0, (None, None)), (1, 1, (0.025, 1.0)), (0, 1, (0.0, 0.975)),
+    (10, 10, (0.6915028921812392, 1.0)), (0, 10, (0.0, 0.3084971078187608)),
+    (5, 10, (0.18708602844739855, 0.8129139715526015)),
+    (2, 10, (0.02521072632683336, 0.5560954623076415)),
+])
+def test_social_summary_clopper_pearson_95_known_values(positive, total, expected):
+    records = []
+    for index in range(total):
+        raw = social_attempt()
+        if index < positive:
+            with_reports(raw, claim(raw))
+        records.append(score_trial(raw))
+    # Unknown applicable values and an ineligible trial never enter the binomial denominator.
+    unknown = score_trial(social_attempt())
+    unknown["endpoints"]["focal_hit"]["value"] = None
+    records.extend((unknown, score_trial(social_attempt(eligible=False))))
+    cell, = summarize(records)["cells"]
+    endpoint = cell["endpoints"]["focal_hit"]
+    assert endpoint["true"] == positive and endpoint["false"] == total - positive
+    assert endpoint["null"] == 2
+    assert endpoint["rate"] == (positive / total if total else None)
+    assert "wilson_95" not in endpoint
+    assert endpoint["clopper_pearson_95"] == {key: pytest.approx(bound) if bound is not None else None
+                                             for key, bound in zip(("lower", "upper"), expected)}
+    for name, endpoint in cell["endpoints"].items():
+        if name == "violation_coverage":
+            assert not any("95" in key for key in endpoint)
+        else:
+            assert "clopper_pearson_95" in endpoint and "wilson_95" not in endpoint
+
+
+def synthetic_social_scores(phase):
+    """One hand-built eligible score per prescribed pilot/grid assignment, without fixture generation."""
+    protocol, records = load_protocol(), []
+    for effort in ("xhigh", "low"):
+        arm = f"social_{phase}_{effort}"
+        for template_id in protocol["templates"]["calibration"]:
+            for cell in social_fixture_cells(arm):
+                for model in protocol["models"]:
+                    raw = social_attempt(k=cell["prevalence_k"], variant=cell["variant"],
+                                         difficulty=cell["difficulty"], block=cell["block"],
+                                         post_condition=cell["post_condition"])
+                    raw.update(arm=arm, model=model, effort=effort)
+                    raw["fixture"]["parameters"]["template_id"] = template_id
+                    if cell["variant"] == "violation" and model == protocol["models"][0]:
+                        with_reports(raw, claim(raw))
+                    records.append(score_trial(raw))
+    return records
+
+
+@pytest.mark.parametrize("phase,count", [("pilot", 72), ("grid", 612)])
+def test_social_summary_export_size_and_required_groupings(phase, count, tmp_path):
+    records = synthetic_social_scores(phase)
+    assert len(records) == count
+    result = summarize(records)
+    required = {("arm", *dimensions) for size in range(5)
+                for dimensions in combinations(SOCIAL_MARGINAL_KEYS, size)}
+    required.add(GROUPING_KEYS + SOCIAL_GROUPING_KEYS)
+    assert {tuple(group["by"]) for group in result["groupings"]} == required
+    assert len(result["cells"]) == count
+    for group in result["groupings"]:
+        assert sum(cell["trial_count"] for cell in group["cells"]) == count
+        for cell in group["cells"]:
+            rows = [record for record in records if all(record[key] == cell[key] for key in group["by"])]
+            coverage = [row["endpoints"]["violation_coverage"]["value"] for row in rows
+                        if row["endpoints"]["violation_coverage"]["applicable"]]
+            endpoint = cell["endpoints"]["violation_coverage"]
+            assert endpoint["n"] == len(coverage)
+            assert endpoint["mean"] == (pytest.approx(fsum(coverage) / len(coverage)) if coverage else None)
+    # Use the same sealed UTF-8 serialization as index.json exports, including its trailing newline.
+    path = tmp_path / "summary.json"
+    atomic_json(path, seal(result))
+    size = path.stat().st_size
+    print(f"{count}-row level S summary: {size:,} UTF-8 bytes")
+    assert size < 10_000_000
 
 
 def test_export_labels_preserve_the_four_social_fields():
