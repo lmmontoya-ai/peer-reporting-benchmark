@@ -17,6 +17,7 @@ from swarm_auth_bench.peer_reporting_v11.live_runtime import (
 from swarm_auth_bench.runtime import RuntimeProtocolError
 
 from .live_fakes import (
+    OVERLOAD_MESSAGE,
     FakeTransport,
     FakeV11World,
     build_fixture,
@@ -48,6 +49,42 @@ async def observe(tmp_path, *, model="gpt-6-sol", effort="low", mode="normal", s
                                      world_mode=mode, bundle=bundle, caps=caps, qualification=preflight,
                                      runtime=runtime)
     return result, runtime, sample, preflight
+
+
+@pytest.mark.parametrize("ending", ["failed", "completed"])
+@pytest.mark.parametrize("boundary", ["in_turn", "last_drain"])
+@pytest.mark.parametrize("scope", ["missing_turn", "wrong_turn", "wrong_thread", "wrong_agent"])
+async def test_unattributable_nonretryable_error_fails_with_or_without_a3(tmp_path, monkeypatch, ending,
+                                                                       boundary, scope):
+    error = {"message": OVERLOAD_MESSAGE, "codexErrorInfo": "serverOverloaded", "additionalDetails": None}
+    params = {"error": error, "willRetry": False}
+    method = "raw"
+    if scope == "missing_turn":
+        method = "raw_thread"
+    elif scope == "wrong_turn":
+        params["turnId"] = "wrong-turn"
+    elif scope == "wrong_thread":
+        params["threadId"] = "wrong-thread"
+    else:
+        from swarm_auth_bench.peer_reporting_v11.live_runtime import _Controller
+
+        event = _Controller.event
+
+        async def foreign_error(self, retained):
+            if retained.get("method") == "error":
+                retained = {**retained, "agent_id": "foreign-agent"}
+            await event(self, retained)
+
+        monkeypatch.setattr(_Controller, "event", foreign_error)
+    if boundary == "last_drain":
+        method += "_on_close"
+    steps = [(method, "error", params), ("end", ending, error if ending == "failed" else None)]
+    result, _, _, _ = await observe(tmp_path, steps=steps)
+    assert result["termination_kind"] == "infrastructure_incomplete" and result["provider_overload"] is None
+    assert "non-retryable provider error notification" in result["infrastructure_failures"]
+    failure = next(event for event in result["events"] if event["kind"] == "infrastructure_failed"
+                   and event.get("reason") == "non-retryable provider error notification")
+    assert len(failure["error_notifications"]) == 1 and failure["error_notifications"][0]["attributed"] is False
 
 
 def test_v11_runtime_accepts_low_and_xhigh_while_p1_still_pins_xhigh():

@@ -248,8 +248,13 @@ EXECUTION_POLICY = {
     "soft_stop_policy": "root_STOP_or_stop_file_refuses_new_admission_active_attempts_finish_within_caps",
     "hard_stop_or_deadline_policy": ("root_HARD_STOP_hard_stop_file_or_deadline_truncates_active_attempts"
                                      "_consumed_ineligible_not_an_execution_failure"),
-    "provider_overload_policy": ("server_overloaded_before_any_tool_request_and_output_is_provider_unavailable"
-                                 "_decided_after_the_last_drain_from_every_reconciled_error"
+    "provider_overload_policy": ("A3_exactly_one_retained_error_notification_attributed_to_observer_thread_and_turn"
+                                 "_serverOverloaded_willRetry_false_matching_failed_turn_error"
+                                 "_no_other_error_code_or_announced_retry"
+                                 "_every_admitted_request_has_one_sent_response_unique_call_ids_declared_attributable_tools"
+                                 "_receipts_and_turn_notifications_reconciled_cleanup_confirmed"
+                                 "_decided_after_shutdown_and_the_last_drain_is_provider_unavailable"
+                                 "_prior_tools_and_output_allowed_overload_stage_before_tool_or_after_tool"
                                  "_consumed_ineligible_settled_at_reservation_pauses_admission_600s"
                                  "_third_within_3600s_holds_pauses_recorded_at_study_level_and_journaled"),
     "provider_pause_recovery": ("a_pause_classified_settlement_journaled_without_its_study_pause"

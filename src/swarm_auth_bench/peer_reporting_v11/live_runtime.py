@@ -515,6 +515,13 @@ class _Controller:
             return
         raw = event.get("raw") or {}
         params, method = raw.get("params") or {}, raw.get("method")
+        if method == "error":
+            # A3 counts every retained error, including notifications that cannot be attributed to this turn.
+            self.provider_errors.append({"error": deepcopy(params.get("error")), "will_retry": params.get("willRetry"),
+                                         "code": provider_error_code(params.get("error")),
+                                         "attributed": event.get("agent_id") == "observer" and self._scope(params),
+                                         "elapsed_seconds": self.elapsed(), "arrival_event_seq": len(self.events) - 1})
+            return
         if method == "runtime/disconnected":
             if not self.transport_closing:
                 await self.fail("runtime disconnected")
@@ -530,11 +537,6 @@ class _Controller:
             return
         if method in {"thread/tokenUsage/updated", "rawResponse/completed"}:
             await self._usage(raw)
-            return
-        if method == "error":
-            self.provider_errors.append({"error": deepcopy(params.get("error")), "will_retry": params.get("willRetry"),
-                                         "code": provider_error_code(params.get("error")),
-                                         "elapsed_seconds": self.elapsed(), "arrival_event_seq": len(self.events) - 1})
             return
         item = params.get("item") or {}
         if method in {"item/started", "item/completed"} and item.get("type") in NATIVE_ITEM_TYPES:
@@ -620,16 +622,16 @@ class _Controller:
         """
         completed, contradicted, unresolved = 0, [], []
         session = self.session
-        # A completed turn may repeat an item already delivered as a standalone item/completed (the guest sends
-        # the final agentMessage again with itemsView "summary"). Only an exact repeat is reconciled; any other
-        # embedded item, including one whose completion arrived only embedded, is model evidence the turn loop
-        # never consumed.
+        # The guest repeats the final agentMessage with itemsView "summary". Match only correctly attributed
+        # standalone completions consumed by the turn loop, as recorded in its result.events. The raw trace also
+        # includes items seen only by a later drain, which cannot prove that the turn loop consumed the item.
         delivered: dict[str, list[dict]] = {}
-        for event in self.raw_events:
+        for event in (result.events if result is not None else []):
             raw = event.get("raw") or {}
             params = raw.get("params") or {}
             item = params.get("item") if type(params) is dict else None
-            if (event.get("kind") == "codex_event" and raw.get("method") == "item/completed"
+            if (event.get("kind") == "codex_event" and event.get("agent_id") == "observer"
+                    and raw.get("method") == "item/completed" and self._scope(params)
                     and type(item) is dict and type(item.get("id")) is str):
                 delivered.setdefault(item["id"], []).append(item)
 
@@ -678,9 +680,10 @@ class _Controller:
                           observer_outputs: list[dict] | None = None) -> dict | None:
         """A3: capacity-error evidence, subject to final receipt, notification and cleanup reconciliation.
 
-        Exactly one non-retrying overload notification must match the failed
-        turn's entire error object. Every admitted request must have a sent
-        response, and no request may reuse a call ID. Prior output and usage
+        Exactly one error notification in the retained trace must be attributed
+        to the observer's thread and turn, announce a non-retrying overload and
+        match the failed turn's entire error object. Every admitted request must
+        have a sent response, and no request may reuse a call ID. Prior output and usage
         are allowed. ``awaiting_notification`` only defers rejection while the
         sole notification might still arrive at the last drain.
         """
@@ -708,7 +711,8 @@ class _Controller:
                     return None
         if (provider_error_code(result.error) != PROVIDER_OVERLOAD_CODE
                 or (not errors and not awaiting_notification) or len(errors) > 1
-                or any(error["code"] != PROVIDER_OVERLOAD_CODE or error["will_retry"] is not False
+                or any(not error["attributed"] or error["code"] != PROVIDER_OVERLOAD_CODE
+                       or error["will_retry"] is not False
                        or error["error"] != result.error for error in errors)
                 or any(request.get("protocol_rejected") or "duplicate_of_arrival_seq" in request
                        or (request["admitted"] and not request["response_sent"]) for request in self.requests)):
