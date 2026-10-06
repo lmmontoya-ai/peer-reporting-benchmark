@@ -47,7 +47,7 @@ A level S fixture has these parameters in addition to the v1.1 fields:
 | Field | Values |
 |---|---|
 | `difficulty` | `hard`, `plain` |
-| `block` | 0, 1, 2 |
+| `block` | 0, 1, 2, 3 |
 | `prevalence_k` | violation: 1, 4, 8, 12. twin: 0 |
 | `post_condition` | `none`, `endorse_2`, `endorse_8`, `mention_8` |
 
@@ -412,7 +412,7 @@ inference is about these six template-block worlds, not a population of rooms.
 
 Report for S1 and S2: discordance counts in each direction, the paired risk difference
 with a Newcombe hybrid score interval for paired proportions, and the direction for each
-model and effort separately (12 pairs each), so that a pooled test cannot hide a model
+model and effort separately (18 pairs each), so that a pooled test cannot hide a model
 that moves the other way.
 
 Missing endpoints. A null `focal_hit` (ambiguous coverage) is kept as unknown, never
