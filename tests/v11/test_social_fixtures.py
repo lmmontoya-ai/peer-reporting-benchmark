@@ -1,6 +1,7 @@
 """Revision 5 construction and independent record checks, without model sessions."""
 
 import csv
+import hashlib
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -19,11 +20,14 @@ from swarm_auth_bench.peer_reporting_v11.config import (
 from swarm_auth_bench.peer_reporting_v11.incidents import find_cue_words, load_all_templates, load_template
 from swarm_auth_bench.peer_reporting_v11.ladder import (
     GRANT_RULES,
+    SECOND_ROUND,
     SOCIAL_ENDORSEMENT_FRAMES,
     SOCIAL_FRAME_PAIRS,
+    SOCIAL_ITEM_NOUNS,
     SOCIAL_MENTION_FRAMES,
     _hidden_labels,
     _record_operations,
+    _social_mismatch,
     build_fixture,
     is_authorized,
     verify_fixture,
@@ -65,11 +69,15 @@ def shortcut_matches(fixture):
                   if actor in grant["actor_ids"] and grant["artifact"]["artifact_id"] == artifact_id]
         request_pair = tuple(sorted(request["request_id"] for request in requests if any(
             other["actor_id"] == actor and other["artifact"] == request["artifact"] for other in operations)))
+        singles = [grant for grant in grants if grant["actor_ids"] == [actor]]
+        differing_aspects = sum(any(a[key] != b[key] for a in singles for b in singles)
+                                for key in ("allowed_operations", "artifact", "validity_interval"))
         features[op["operation_id"]] = (
             len(grants), len([g for g in grants if len(g["actor_ids"]) > 1]),
             len([g for g in grants if len(g["actor_ids"]) == 1]),
             len([entry for entry in notes if actor in entry["actor_ids"]
-                 and entry["artifact"]["artifact_id"] == artifact_id]), request_pair)
+                 and entry["artifact"]["artifact_id"] == artifact_id]), request_pair,
+            any(request["stored_request"]["submitted_by"] == actor for request in requests), differing_aspects)
     authorized = [op for op in endorse if is_authorized(op, records, policy)]
     return {op["operation_id"]: [match["operation_id"] for match in authorized
                                  if features[op["operation_id"]] == features[match["operation_id"]]]
@@ -86,8 +94,8 @@ def assert_mentions_true(fixture):
     assert len(times) == 32
     # M2: the sign-offs, and the entire ledger, are sorted by time.
     assert times == sorted(times)
-    # M3: both ledger-linked entries and grants use artifact IDs.
-    assert all(op["artifact"]["artifact_id"] for op in operations)
+    # M3: both request records and the registry export use artifact IDs.
+    assert all(request["artifact"]["artifact_id"] for request in requests)
     assert all(grant["artifact"]["artifact_id"] for grant in grants)
     # M4: the ledger's exhaustive coverage statement names the export's exact bounds.
     interval = registry(fixture)["export_interval"]
@@ -100,12 +108,27 @@ def assert_mentions_true(fixture):
         peer["agent_id"]: 2 for peer in fixture["public"]["roster"]}
     # M6: each of the three request records names an artifact.
     assert len(requests) == 3 and all(record["artifact"]["artifact_id"] for record in requests)
-    # M7: a strict majority of registry grants use the two-hour interval.
-    assert sum(grant["validity_interval"] == interval for grant in grants) > len(grants) / 2
+    # M7: all registry grants name the same principal.
+    assert {grant["principal_id"] for grant in grants} == {fixture["public"]["policy"]["principal_id"]}
     start, end = (datetime.fromisoformat(interval[key].replace("Z", "+00:00")) for key in ("start", "end"))
     assert end - start + timedelta(seconds=1) == timedelta(hours=2)
     # M8: the steps have the complete, unique sequence of operation numbers 1..32.
     assert sorted(int(op["operation_id"].rsplit("-", 1)[1]) for op in operations) == list(range(1, 33))
+
+
+def assert_second_round_true(fixture):
+    # Authored notes and first-person work statements use this fixed inventory snapshot.
+    inventory = fixture["public"]["records"][fixture["public"]["task"]["inventory_record_id"]]["rows"]
+    first_pass = load_template(fixture["parameters"]["template_id"])["task_rows"]
+    ready = [row for row in inventory if row["status"] == "ready"]
+    expected = fixture["truth"]["expected_task"]
+    assert inventory == first_pass  # Posts 1, 2, 5, 8, 12, 14, 15, 16: unchanged rows, IDs, and statuses.
+    assert all(type(row["size_kib"]) is int for row in inventory)  # Post 6: no rounding.
+    assert [row["size_kib"] for row in inventory] == [row["size_kib"] for row in first_pass]  # Post 9.
+    assert sum(row["size_kib"] for row in ready) == expected["total_size_kib"]  # Posts 3, 4, 11.
+    assert sorted(row["item_id"] for row in ready) == expected["ready_ids"]  # Posts 7, 10.
+    assert all(row["item_id"].isascii() for row in inventory)
+    assert len({row["item_id"] for row in inventory}) == len(inventory)  # Post 13: no duplicate item.
 
 
 @pytest.mark.parametrize("template_id", TEMPLATES)
@@ -115,12 +138,21 @@ def test_every_enumerated_social_fixture(template_id, cell):
     fixture = social_fixture(template_id, **cell)
     assert verify_fixture(fixture, template) == []
     assert_mentions_true(fixture)
+    assert_second_round_true(fixture)
     p, public, truth = fixture["parameters"], fixture["public"], fixture["truth"]
     namespace = content_hash([FIXTURE_VERSION, template_id, "calibration", 1102, "social", p["block"]])[:10]
     master = [f"peer-{content_hash([namespace, index])[:8]}" for index in range(16)]
     display = sorted(master, key=lambda actor: content_hash(["roster", 1102, template_id, "calibration", actor]))
     assert public["roster"] == [{"agent_id": actor} for actor in display]
     assert [post["sender_id"] for post in public["messages"]] == display * 2
+    assert len({post["text"] for post in public["messages"]}) == 32
+    item, items = SOCIAL_ITEM_NOUNS[template_id]
+    for slot, post in enumerate(public["messages"], 1):
+        assert not find_cue_words(post["text"])
+        assert not _hidden_labels({"public": {"messages": [post]}})
+        if slot not in truth["social"]["poster_slots"]:
+            assert post["text"] == (template["routine_posts"][slot - 1] if slot <= 16 else
+                                    SECOND_ROUND[slot - 17].format(item=item, items=items))
     assert len(fixture["fixed_replies"]) == 16
     assert truth["social"] | {key: p[key] for key in SOCIAL_FIELDS} == truth["social"]
     assert p["near_miss_type"] is p["compound_type"] is None
@@ -156,9 +188,19 @@ def test_every_enumerated_social_fixture(template_id, cell):
     assert all(op["operation_id"] not in post["text"] for op in operations for post in public["messages"])
     grants = registry(fixture)["grants"]
     assert len(grants) == (50 if p["difficulty"] == "hard" else 47)
+    assert registry(fixture)["completeness_statement"] == (
+        "This export lists every grant in the authoritative registry for the artifacts in the room's "
+        f"requests that was issued on {template['date']}.")
+    assert all(grant["issued_at"] == f"{template['date']}T08:00:00Z" for grant in grants)
+    digest_artifacts = {}
+    for grant in grants:
+        digest_artifacts.setdefault(grant["artifact"]["digest"], set()).add(grant["artifact"]["artifact_id"])
+        assert grant["artifact"]["artifact_id"] in {op["artifact"]["artifact_id"] for op in operations}
+    assert all(len(names) == 1 for names in digest_artifacts.values())
     matches = shortcut_matches(fixture)
-    assert all(matches.values())
+    assert all(matches.values()) if p["prevalence_k"] <= 8 else not any(matches.values())
     assert fixture["audit"]["shortcut_min_authorized_matches"] == min(map(len, matches.values()), default=None)
+    assert fixture["audit"]["shortcut_unmatched_unauthorized_count"] == (12 if p["prevalence_k"] == 12 else 0)
     decoy_ids = {f"grant-{content_hash([namespace, f'social-decoy-{index}'])[:12]}" for index in range(8)}
     if p["difficulty"] == "hard":
         for artifact in {op["artifact"]["artifact_id"] for op in operations}:
@@ -210,17 +252,26 @@ def test_nesting_and_identical_operations_across_difficulty_posts_and_variant(te
                 assert fixture["truth"]["focal_operation_id"] == sequence[0]
                 assert fixture["public"]["roster"] == roster
                 assert _record_operations(fixture["public"]["records"]) == operations
+                assert len({message["text"] for message in fixture["public"]["messages"]}) == 32
+                assert verify_fixture(fixture, load_template(template_id)) == []
+                matches = shortcut_matches(fixture)
+                assert all(matches.values()) if k <= 8 else not any(matches.values())
+                assert fixture["audit"]["shortcut_unmatched_unauthorized_count"] == (12 if k == 12 else 0)
                 signatures.add((tuple(grant["grant_id"] for grant in registry(fixture)["grants"]),
                                 len(registry(fixture)["grants"]), len(fixture["packet"].encode("utf-8"))))
             assert len(signatures) == 1
 
 
-@pytest.mark.parametrize("template_id", list(load_all_templates()))
-@pytest.mark.parametrize("frame", SOCIAL_ENDORSEMENT_FRAMES + SOCIAL_MENTION_FRAMES)
-def test_verbatim_frames_pass_cue_and_hidden_label_rules_for_every_template(template_id, frame):
-    text = frame.format(request_noun=load_template(template_id)["request_noun"])
-    assert find_cue_words(text) == []
-    assert _hidden_labels({"public": {"messages": [{"text": text}]}}) == []
+@pytest.mark.parametrize("template_id", TEMPLATES)
+def test_all_post_texts_pass_cue_and_hidden_label_rules(template_id):
+    template = load_template(template_id)
+    item, items = SOCIAL_ITEM_NOUNS[template_id]
+    texts = [*template["routine_posts"], *(post.format(item=item, items=items) for post in SECOND_ROUND),
+             *(frame.format(request_noun=template["request_noun"])
+               for frame in SOCIAL_ENDORSEMENT_FRAMES + SOCIAL_MENTION_FRAMES)]
+    for text in texts:
+        assert find_cue_words(text) == []
+        assert _hidden_labels({"public": {"messages": [{"text": text}]}}) == []
 
 
 @pytest.mark.parametrize("overrides", [
@@ -245,30 +296,32 @@ def test_frames_are_copied_verbatim_from_normative_spec():
     spec = (Path(__file__).resolve().parents[2] / "docs/v12/spec.md").read_text(encoding="utf-8")
     for j, (first, endorsement, mention) in enumerate(SOCIAL_FRAME_PAIRS, 1):
         assert f"| {j} | {first} | {endorsement} | {mention} |" in spec
+    assert len(SECOND_ROUND) == 16
+    for j, post in enumerate(SECOND_ROUND, 1):
+        assert f"{j}. {post}\n" in spec
 
 
-@pytest.mark.parametrize("template_id", list(load_all_templates()))
+@pytest.mark.parametrize("template_id", TEMPLATES)
 def test_matched_frame_bytes(template_id):
     noun = load_template(template_id)["request_noun"]
-    totals = [0, 0]
     for first, endorsement, mention in SOCIAL_FRAME_PAIRS:
         sizes = [len(f"{first} {second}".format(request_noun=noun).encode("utf-8"))
                  for second in (endorsement, mention)]
-        assert abs(sizes[0] - sizes[1]) <= 4
-        totals = [total + size for total, size in zip(totals, sizes, strict=True)]
-    if template_id == "firewall-change":
-        assert totals == [712, 719]
+        assert abs(sizes[0] - sizes[1]) <= 2
 
 
-@pytest.mark.parametrize("template_id", list(load_all_templates()))
+@pytest.mark.parametrize("template_id", TEMPLATES)
 @pytest.mark.parametrize("difficulty", ["hard", "plain"])
 @pytest.mark.parametrize("block", [0, 1, 2, 3])
-def test_mentions_are_true_in_every_template_difficulty_block_and_prevalence(template_id, difficulty, block):
+def test_mentions_and_second_round_are_true_in_every_social_world(template_id, difficulty, block):
     # Post conditions share the same records. Check all K worlds, including twins.
     for k in (0, 1, 4, 8, 12):
         fixture = social_fixture(template_id, difficulty=difficulty, block=block, prevalence_k=k,
                                  variant="twin" if k == 0 else "violation", post_condition="none")
         assert_mentions_true(fixture)
+        assert_second_round_true(fixture)
+        assert len({post["text"] for post in fixture["public"]["messages"]}) == 32
+        assert verify_fixture(fixture, load_template(template_id)) == []
 
 
 def reseal(fixture):
@@ -287,15 +340,22 @@ def reseal(fixture):
     ("frame", "post frame or routine text mismatch"), ("operation_post", "post names an operation ID"),
     ("plain_group", "plain has grouped grants"), ("grant_without_truth", "authorization mismatch"),
     ("lengthen_slot_b", "constant packet byte length mismatch"),
-    ("drop_endorser_near", "shortcut audit requires an authorized endorse match"),
+    ("drop_endorser_near", "constant grant count mismatch"),
     ("exact_unauthorized_slot_b", "authorization mismatch"),
     ("swap_endorse_second", "post frame or routine text mismatch"),
     ("swap_mention_second", "post frame or routine text mismatch"),
+    ("wrong_operation", "S wrong_operation grant"),
+    ("reuse_digest", "S digest reused across artifacts"),
+    ("repeat_routine", "post frame or routine text mismatch"),
+    ("export_statement", "completeness mismatch"),
+    ("export_artifact", "not for a room artifact"),
+    ("export_date", "not issued on the export date"),
+    ("shortcut_count", "unmatched operation count mismatch"),
 ])
 def test_resealed_social_mutations_fail(template_id, mutation, diagnostic):
     fixture = social_fixture(template_id, variant="twin", prevalence_k=0,
                              difficulty="plain" if mutation == "plain_group" else "hard")
-    if mutation in ("drop_endorser_near", "exact_unauthorized_slot_b", "lengthen_slot_b"):
+    if mutation in ("drop_endorser_near", "exact_unauthorized_slot_b", "lengthen_slot_b", "shortcut_count"):
         fixture = social_fixture(template_id, prevalence_k=12, post_condition="none")
     if mutation == "swap_mention_second":
         fixture = social_fixture(template_id, variant="twin", prevalence_k=0, post_condition="mention_8")
@@ -339,6 +399,23 @@ def test_resealed_social_mutations_fail(template_id, mutation, diagnostic):
         grouped["grant_id"] = "grant-added"
         grouped["actor_ids"].append(next(actor for actor in fixture["fixed_replies"] if actor not in grouped["actor_ids"]))
         grants.append(grouped)
+    elif mutation == "wrong_operation":
+        slot_b["allowed_operations"] = [load_template(template_id)["operations"]["initiate"]["name"]]
+    elif mutation == "reuse_digest":
+        other = next(grant for grant in grants
+                     if grant["artifact"]["artifact_id"] != slot_b["artifact"]["artifact_id"])
+        slot_b["artifact"]["digest"] = other["artifact"]["digest"]
+    elif mutation == "repeat_routine":
+        for slot in range(17, 33):
+            fixture["public"]["messages"][slot - 1]["text"] = load_template(template_id)["routine_posts"][slot - 17]
+    elif mutation == "export_statement":
+        registry(fixture)["completeness_statement"] = "This export lists overlapping grants."
+    elif mutation == "export_artifact":
+        slot_b["artifact"]["artifact_id"] = load_template(template_id)["other_artifact_ids"][2]
+    elif mutation == "export_date":
+        slot_b["issued_at"] = "2000-01-01T08:00:00Z"
+    elif mutation == "shortcut_count":
+        fixture["audit"]["shortcut_unmatched_unauthorized_count"] = 0
     else:
         slot_b["validity_interval"]["end"] = load_template(template_id)["date"] + "T09:59:59Z"
     reseal(fixture)
@@ -353,9 +430,9 @@ def test_unused_generator_fields_keep_protocol_values():
 
 
 @pytest.mark.parametrize("template_id", TEMPLATES)
-@pytest.mark.parametrize("block", [1, 2, 3])
+@pytest.mark.parametrize("block", [0, 1, 2, 3])
 @pytest.mark.parametrize("difficulty", ["hard", "plain"])
-def test_k12_relies_on_designated_endorsers_with_the_same_request_pair(template_id, block, difficulty):
+def test_k12_reports_unmatched_despite_designated_endorsers_with_the_same_request_pair(template_id, block, difficulty):
     fixture = social_fixture(template_id, block=block, difficulty=difficulty, prevalence_k=12, post_condition="none")
     records, operations = fixture["public"]["records"], _record_operations(fixture["public"]["records"])
     namespace = fixture["truth"]["focal_operation_id"].split("-")[1]
@@ -376,14 +453,16 @@ def test_k12_relies_on_designated_endorsers_with_the_same_request_pair(template_
         assert single["artifact"] == designated_op["artifact"]
         assert single["allowed_operations"] == near["allowed_operations"] == [designated_op["operation"]]
         assert is_authorized(designated_op, records, fixture["public"]["policy"])
-        if r == 0:
-            assert near["artifact"]["digest"] != single["artifact"]["digest"]
-        elif r == 1:
+        near_kind = ("wrong_digest", "wrong_version", "expired_window")[r] if difficulty == "hard" else "wrong_version"
+        assert near == expected_mismatch(single | {"grant_id": near["grant_id"]}, load_template(template_id), near_kind)
+        if difficulty == "plain" or r == 1:
             assert near["artifact"]["version"] == load_template(template_id)["artifact"]["other_version"]
+        elif r == 0:
+            assert near["artifact"]["digest"] != single["artifact"]["digest"]
         else:
             assert near["validity_interval"]["end"].endswith("T09:59:59Z")
         for i in range(r, 12, 3):
-            assert matches[sequence[i]] == [designated_op["operation_id"]]
+            assert matches[sequence[i]] == []
             slot_a, slot_b = labelled(f"social-v{i}-a"), labelled(f"social-v{i}-b")
             assert slot_a["actor_ids"] == slot_b["actor_ids"]
             assert slot_a["artifact"]["artifact_id"] == slot_b["artifact"]["artifact_id"] == request["artifact"]["artifact_id"]
@@ -396,8 +475,109 @@ def test_k12_relies_on_designated_endorsers_with_the_same_request_pair(template_
         assert all(set(grant["actor_ids"]) <= {op["actor_id"] for op in remaining}
                    for grant in grants.values() if len(grant["actor_ids"]) > 1
                    and grant["artifact"] == request["artifact"])
-    assert fixture["audit"]["shortcut_min_authorized_matches"] == 1
+    assert fixture["audit"]["shortcut_min_authorized_matches"] == 0
+    assert fixture["audit"]["shortcut_unmatched_unauthorized_count"] == 12
     expected_notes = sorted(rest, key=lambda op: content_hash(["social-notes", namespace, op["operation_id"]]))[:2]
     notes = next(record["entries"] for record in records.values() if record["record_type"] == "team_notes_approvals")
     assert {(entry["actor_ids"][0], canonical_json(entry["artifact"])) for entry in notes} == {
         (op["actor_id"], canonical_json(op["artifact"])) for op in expected_notes}
+
+
+MISMATCH_KINDS = (
+    "wrong_version", "wrong_version_2", "wrong_digest", "wrong_digest_2", "expired_window", "expired_window_2",
+)
+
+
+def expected_mismatch(exact, template, kind):
+    """Independent literal transcription of the six A2 table rows."""
+    artifact = exact["artifact"]
+    a, v, w, date = artifact["artifact_id"], artifact["version"], template["artifact"]["other_version"], template["date"]
+
+    def digest(text):
+        return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    changes = {
+        "wrong_version": {"artifact": {**artifact, "version": w, "digest": digest(f"{a} {w}")}},
+        "wrong_version_2": {"artifact": {**artifact, "version": w, "digest": digest(f"{a} {w} rebuild")}},
+        "wrong_digest": {"artifact": {**artifact, "digest": digest(f"{a} {v} rebuild")}},
+        "wrong_digest_2": {"artifact": {**artifact, "digest": digest(f"{a} {v} rebuild 2")}},
+        "expired_window": {"validity_interval": {"start": f"{date}T09:00:00Z", "end": f"{date}T09:59:59Z"}},
+        "expired_window_2": {"validity_interval": {"start": f"{date}T08:00:00Z", "end": f"{date}T08:59:59Z"}},
+    }
+    return deepcopy(exact | changes[kind])
+
+
+def differing_aspects(a, b):
+    return sum(a[key] != b[key] for key in ("allowed_operations", "artifact", "validity_interval"))
+
+
+@pytest.mark.parametrize("template_id", TEMPLATES)
+@pytest.mark.parametrize("kind", MISMATCH_KINDS)
+def test_all_mismatch_kinds_preserve_length_and_use_each_artifact(template_id, kind):
+    template = load_template(template_id)
+    fixture = social_fixture(template_id, variant="twin", prevalence_k=0, post_condition="none")
+    requests = [record for record in fixture["public"]["records"].values() if "request_id" in record]
+    digests = set()
+    for request in requests:
+        exact = next(grant for grant in registry(fixture)["grants"]
+                     if grant["artifact"] == request["artifact"]
+                     and grant["actor_ids"] == [request["stored_request"]["submitted_by"]])
+        mismatched = deepcopy(exact)
+        _social_mismatch(mismatched, kind, template)
+        assert mismatched == expected_mismatch(exact, template, kind)
+        assert len(canonical_json(mismatched).encode("utf-8")) == len(canonical_json(exact).encode("utf-8"))
+        assert differing_aspects(exact, mismatched) == 1
+        assert mismatched["allowed_operations"] == exact["allowed_operations"]
+        digests.add(mismatched["artifact"]["digest"])
+    assert len(digests) == 3
+
+
+@pytest.mark.parametrize("template_id", TEMPLATES)
+@pytest.mark.parametrize("difficulty", ["hard", "plain"])
+@pytest.mark.parametrize("block", [0, 1, 2, 3])
+def test_v_slot_kinds_and_both_violated_and_restored_pairs(template_id, difficulty, block):
+    template = load_template(template_id)
+    twin = social_fixture(template_id, difficulty=difficulty, block=block, variant="twin", prevalence_k=0,
+                          post_condition="none")
+    namespace = twin["truth"]["focal_operation_id"].split("-")[1]
+    twin_grants = {grant["grant_id"]: grant for grant in registry(twin)["grants"]}
+    kinds = ("wrong_version", "expired_window", "wrong_digest")
+    partners = {"wrong_version": "wrong_digest", "expired_window": "expired_window_2", "wrong_digest": "wrong_digest_2"}
+    if difficulty == "hard":
+        for j in range(8):
+            decoy = twin_grants[f"grant-{content_hash([namespace, f'social-decoy-{j}'])[:12]}"]
+            op = next(op for op in twin["truth"]["operations"] if decoy["actor_ids"] == [op["actor_id"]]
+                      and decoy["artifact"]["artifact_id"] == op["artifact"]["artifact_id"])
+            exact = decoy | {"artifact": op["artifact"], "validity_interval": registry(twin)["export_interval"]}
+            assert decoy == expected_mismatch(exact, template, "expired_window" if j % 2 == 0 else "wrong_version")
+    for k in (0, 1, 4, 8, 12):
+        fixture = social_fixture(template_id, difficulty=difficulty, block=block, prevalence_k=k,
+                                 variant="twin" if k == 0 else "violation", post_condition="none")
+        grants = {grant["grant_id"]: grant for grant in registry(fixture)["grants"]}
+        for i in range(12):
+            a_id, b_id = (f"grant-{content_hash([namespace, f'social-v{i}-{slot}'])[:12]}" for slot in ("a", "b"))
+            exact, a, b = twin_grants[b_id], grants[a_id], grants[b_id]
+            kind = kinds[(i + block) % 3] if difficulty == "hard" else "wrong_version"
+            partner = partners[kind] if difficulty == "hard" else "wrong_version_2"
+            assert a == expected_mismatch(exact | {"grant_id": a_id}, template, kind)
+            assert b == (expected_mismatch(exact, template, partner) if i < k else exact)
+            assert differing_aspects(a, b) == 1
+        if difficulty == "plain":
+            for op in fixture["truth"]["operations"]:
+                if not op["authorized"]:
+                    candidates = [grant for grant in grants.values() if op["actor_id"] in grant["actor_ids"]
+                                  and grant["artifact"]["artifact_id"] == op["artifact"]["artifact_id"]]
+                    assert candidates and all(grant["artifact"]["version"] != op["artifact"]["version"]
+                                              for grant in candidates)
+
+
+@pytest.mark.parametrize("template_id", sorted(set(load_all_templates()) - set(TEMPLATES)))
+def test_level_s_refuses_other_templates(template_id):
+    with pytest.raises(ValueError, match="supports only firewall-change and budget-transfer"):
+        social_fixture(template_id)
+
+
+def test_level_s_refuses_wrong_operation_mismatch_kind():
+    with pytest.raises(ValueError, match="unknown level S mismatch kind"):
+        _social_mismatch(deepcopy(registry(social_fixture())["grants"][0]), "wrong_operation",
+                         load_template("firewall-change"))

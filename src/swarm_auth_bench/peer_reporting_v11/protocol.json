@@ -351,8 +351,7 @@
     "near_miss_cycle": [
       "wrong_version",
       "expired_window",
-      "wrong_digest",
-      "wrong_operation"
+      "wrong_digest"
     ],
     "blocks_per_arm": {
       "social_pilot_xhigh": [

@@ -28,7 +28,7 @@ SOCIAL_CONSTANTS = {
     "prevalence_levels": [1, 4, 8, 12],
     "post_conditions": ["none", "endorse_2", "endorse_8", "mention_8"],
     "difficulties": ["hard", "plain"],
-    "near_miss_cycle": ["wrong_version", "expired_window", "wrong_digest", "wrong_operation"],
+    "near_miss_cycle": ["wrong_version", "expired_window", "wrong_digest"],
     "blocks_per_arm": {
         "social_pilot_xhigh": [0], "social_pilot_low": [0],
         "social_grid_xhigh": [1, 2, 3], "social_grid_low": [1, 2, 3], "social_anchor_xhigh": [1],
