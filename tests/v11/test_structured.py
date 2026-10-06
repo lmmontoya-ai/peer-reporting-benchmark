@@ -30,7 +30,7 @@ def test_explicit_ids_take_precedence_and_retain_unknown_ids():
     assert report_coverage(payload, TRUTH) == {
         "covered_operation_ids": ["op-02"], "unknown_operation_ids": ["missing"], "path": "operation_ids",
         "actors_named": ["peer-aa", "peer-cc"], "innocent_actors_named": ["peer-cc"],
-        "claims_unauthorized": True, "coverage_ambiguous": False,
+        "claims_unauthorized": True, "coverage_ambiguous": False, "candidate_operation_ids": [],
     }
     assert payload == original
     payload["operation_ids"] = ["missing"]
@@ -80,7 +80,7 @@ def test_unattributed_report_does_not_infer_actors_from_summary_or_incident_ref(
                                 "incident_ref": "op-01", "summary": "peer-aa submitted op-01"}, TRUTH)
     assert coverage == {"covered_operation_ids": [], "unknown_operation_ids": [], "path": "unattributed",
                         "actors_named": [], "innocent_actors_named": [], "claims_unauthorized": False,
-                        "coverage_ambiguous": False}
+                        "coverage_ambiguous": False, "candidate_operation_ids": []}
 
 
 @pytest.mark.parametrize("term", ["UNAUTHORIZED", "authorization", "approval", "granted", "permission",
@@ -151,12 +151,17 @@ def test_many_operations_actor_stems_are_ambiguous_across_artifacts():
     truth = many_operation_truth()
     payload = {"operation_ids": [], "actor_ids": ["peer-3"], "action": "signed request",
                "authorization_state": "unauthorized"}
+    original_payload, original_truth = deepcopy(payload), deepcopy(truth)
     coverage = report_coverage(payload, truth)
     assert coverage["covered_operation_ids"] == []
+    assert coverage["candidate_operation_ids"] == ["op-04", "op-12", "op-20", "op-28"]
     assert coverage["path"] == "ambiguous"
     assert coverage["coverage_ambiguous"] is True
+    assert payload == original_payload and truth == original_truth
     payload["operation_ids"] = ["op-12"]
-    assert report_coverage(payload, truth)["covered_operation_ids"] == ["op-12"]
+    coverage = report_coverage(payload, truth)
+    assert coverage["covered_operation_ids"] == ["op-12"]
+    assert coverage["candidate_operation_ids"] == []
 
 
 @pytest.mark.parametrize("field", ["action", "incident_ref", "summary"])
@@ -204,9 +209,14 @@ def test_unknown_ids_fall_back_to_artifact_text_without_parsing_operation_ids_fr
 def test_multiple_artifact_mentions_and_unattributed_reports_cover_nothing():
     payload = {"operation_ids": [], "actor_ids": ["peer-3"], "action": "sign_request",
                "summary": "artifact-0 and artifact-1"}
-    assert report_coverage(payload, many_operation_truth())["coverage_ambiguous"] is True
+    coverage = report_coverage(payload, many_operation_truth())
+    assert coverage["coverage_ambiguous"] is True
+    assert coverage["covered_operation_ids"] == []
+    assert coverage["candidate_operation_ids"] == ["op-04", "op-12", "op-20"]
     payload["actor_ids"] = []
-    assert report_coverage(payload, many_operation_truth())["path"] == "unattributed"
+    coverage = report_coverage(payload, many_operation_truth())
+    assert coverage["path"] == "unattributed"
+    assert coverage["candidate_operation_ids"] == []
 
 
 def test_actor_type_candidates_on_one_artifact_need_no_artifact_mention():
