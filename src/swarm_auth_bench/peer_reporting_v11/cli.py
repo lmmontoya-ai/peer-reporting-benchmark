@@ -179,12 +179,14 @@ def _parser() -> argparse.ArgumentParser:
     replay = commands.add_parser("replay", help="authored offline replay through the v1.1 world; no model call")
     source = replay.add_mutually_exclusive_group(required=True)
     source.add_argument("--root", type=Path, help="replay sealed live-plan entries")
-    source.add_argument("--matrix", action="store_true", help="replay every level, variant, F mode, and effort")
+    source.add_argument("--matrix", action="store_true",
+                        help="replay earlier levels, variants, F modes and efforts, plus all five S arms "
+                             "on both calibration templates")
     replay.add_argument("--output", type=Path, required=True)
     replay.add_argument("--assignment", action="append")
-    replay.add_argument("--template", default="release-request")
-    replay.add_argument("--split", default="collection")
-    replay.add_argument("--seed", type=int, default=1101)
+    replay.add_argument("--template", default="release-request", help="template for earlier matrix levels")
+    replay.add_argument("--split", default="collection", help="split for earlier matrix levels")
+    replay.add_argument("--seed", type=int, default=1101, help="seed for earlier matrix levels")
     replay.add_argument("--no-score", action="store_true")
     export = commands.add_parser("export-review", help="export verified attempts in the live review shape")
     export.add_argument("root", type=Path)

@@ -134,9 +134,28 @@ async def test_revision5_offline_study_three_roots_and_root_replay(tmp_path, wp6
                                   study_directory=study, arms=[arm], bundle=bundle)
 
 
-@pytest.mark.xfail(strict=True, reason="runner.matrix_cells/replay --matrix omits revision 5 level S")
 def test_replay_matrix_includes_level_s():
-    assert any(cell["level"] == "S" for cell in runner.matrix_cells())
+    cells = [cell for cell in runner.matrix_cells() if cell["level"] == "S"]
+    keys = ("template_id", "arm", "difficulty", "block", "prevalence_k", "post_condition", "variant", "effort")
+    expected = set()
+    for template in ("firewall-change", "budget-transfer"):
+        for arm in ("social_pilot_xhigh", "social_pilot_low", "social_grid_xhigh", "social_grid_low",
+                    "social_anchor_xhigh"):
+            grid = arm.startswith("social_grid")
+            difficulty = "plain" if arm == "social_anchor_xhigh" else "hard"
+            effort = "low" if arm.endswith("_low") else "xhigh"
+            blocks = (1, 2, 3) if grid else (1,) if difficulty == "plain" else (0,)
+            posts = ("none", "endorse_2", "endorse_8", "mention_8") if grid else ("none", "endorse_8")
+            variants = [(k, post, "violation") for k in ((1, 4, 8) if grid else (1, 8)) for post in posts]
+            variants += [(0, post, "twin") for post in posts]
+            if grid:
+                variants.append((12, "none", "violation"))
+            expected.update((template, arm, difficulty, block, k, post, variant, effort)
+                            for block in blocks for k, post, variant in variants)
+    assert len(cells) == len(expected) == 240
+    assert {tuple(cell[key] for key in keys) for cell in cells} == expected
+    assert all(cell["split"] == "calibration" and cell["seed"] == 1102 and cell["world_mode"] == "normal"
+               and cell["prompt_condition"] == "neutral" and cell["near_miss_type"] is None for cell in cells)
 
 
 OBSERVERS = ("ideal", "focal", "nonfocal", "all32", "poster_and_focal", "silent_seen", "actor_only")
