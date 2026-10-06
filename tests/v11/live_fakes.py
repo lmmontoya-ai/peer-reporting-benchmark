@@ -559,8 +559,9 @@ class FakeTransport(V11PeerRuntime):
                 await deliver_packet()
             elif step[0] == "interrupted_end":  # lifecycle payloads when the controller interrupts the turn
                 interrupted_turn, interrupted_status = step[1:]
-            elif step[0] == "raw_on_close":  # retained by the final drain, after the settled turn result
-                self.notifications_on_close.append({"method": step[1], "params": {**scope, **step[2]}})
+            elif step[0] in {"raw_on_close", "raw_thread_on_close"}:  # retained by the final drain
+                close_scope = scope if step[0] == "raw_on_close" else {"threadId": self.thread_id}
+                self.notifications_on_close.append({"method": step[1], "params": {**close_scope, **step[2]}})
             elif step[0] == "disconnect_on_close":  # the app-server disconnects while the runtime closes
                 self.disconnect_on_close = True
             elif step[0] == "end":  # the turn ends by itself with this status and optional turn error

@@ -35,6 +35,132 @@ def compat(tmp_path_factory):
     return qualified_root(tmp_path_factory.mktemp("a3-compat"))[0]
 
 
+async def assert_execution_failure_and_export(root, plan, status, clock, compat, study, fixtures, tmp_path,
+                                            attempt):
+    payload = payloads(root)[attempt]
+    result = payload["observer_result"]
+    assert result["termination_kind"] == "infrastructure_incomplete" and result["provider_overload"] is None
+    assert "overload_stage" not in result and result["runtime_closed"]
+    assert payload["check"]["classification"] is None and payload["check"]["passed"] is False
+    assert "no_infrastructure_failure" in payload["check"]["failure_reasons"]
+    assert payload["orchestrator"]["provider_pause"] is None
+    assert payload["orchestrator"]["usage_settlement"]["status"] == "unresolved"
+    assert status["status"] == "held" and status["live_model_call_starts"] == 1 and clock.waits == []
+    assert f"execution_check_failure:{attempt}" in status["holds"]
+    assert records(root, "provider_pause_started") == [] and v11_live.study_provider_pauses(study) == {}
+    assert len(result["tool_requests"]) == len(result["tool_receipts"]) == 1
+    assert result["tool_requests"][0]["response_sent"] is True
+    assert result["raw_events"] == [event["event"] for event in result["events"] if event["kind"] == "runtime_event"]
+    resumed = Harness(tmp_path / "resume-homes", scripted(fixtures))
+    later = await run_paused(root, plan, resumed, clock, compat, study)
+    assert later["status"] == "held" and f"retained_failed_or_unknown_attempt:{attempt}" in later["holds"]
+    assert resumed.created == [] and later["live_model_call_starts"] == 1
+    report = v11_live.verify_live_root(root, bundle=fake_bundle(), study_directory=study)
+    verified = next(row for row in report["lanes"]["gpt-6-luna-xhigh"]["entries"] if row["attempt_id"] == attempt)
+    assert verified["classification"] is None
+    index, row = export_row(root, study, tmp_path / "export", attempt)
+    normalized = read_sealed(tmp_path / "export" / row["attempt_path"])
+    assert row["status"] == "archived" and row["evidence_error"] is None and row["score_error"] is None
+    assert row["excluded_from_analysis"] is False and index["analysis_exclusions"] == []
+    assert normalized["termination_kind"] == "infrastructure_incomplete"
+    assert row["score"]["eligibility"]["eligible"] is False
+    assert row["score"]["eligibility"]["resolves_assignment"] is False
+    assert all(endpoint["value"] is None for endpoint in row["score"]["endpoints"].values())
+    assert [output["text"] for output in normalized["observer_outputs"]] == [
+        output["text"] for output in result["observer_outputs"]]
+    return result, normalized
+
+
+@pytest.mark.parametrize("boundary", ["in_turn", "last_drain"])
+@pytest.mark.parametrize("scope", ["missing_turn", "wrong_turn", "wrong_thread"])
+@pytest.mark.parametrize("code", ["streamDisconnected", "serverOverloaded"])
+async def test_unattributable_retained_errors_prevent_a3(compat, tmp_path, boundary, scope, code):
+    study, rows, fixtures = smoke_study(tmp_path / "study")
+    root, plan = sealed_root(study, compat)
+    error = {"message": "broken stream" if code == "streamDisconnected" else OVERLOAD_MESSAGE,
+             "codexErrorInfo": code, "additionalDetails": None}
+    params = {"error": error, "willRetry": False}
+    if scope == "wrong_turn":
+        params["turnId"] = "wrong-turn"
+    elif scope == "wrong_thread":
+        params["threadId"] = "wrong-thread"
+    method = "raw_thread" if scope == "missing_turn" else "raw"
+    if boundary == "last_drain":
+        method += "_on_close"
+    steps = [READ, (method, "error", params), *overload_steps()]
+    harness = Harness(tmp_path / "homes", scripted(fixtures, {LUNA_L1: lambda f: steps}))
+    clock = PauseClock(on_wait=lambda clock: (root / v11_live.STOP_FILE).touch())
+    status = await run_paused(root, plan, harness, clock, compat, study)
+    attempt = attempt_of(rows, "gpt-6-luna", "L1", "violation")
+    result, _ = await assert_execution_failure_and_export(root, plan, status, clock, compat, study, fixtures,
+                                                        tmp_path, attempt)
+    notices = [event["raw"]["params"] for event in result["raw_events"] if event.get("method") == "error"]
+    assert len(notices) == 2
+    extra = notices[0 if boundary == "in_turn" else 1]
+    assert extra["error"] == error and extra["willRetry"] is False
+    if scope == "missing_turn":
+        assert "turnId" not in extra
+    else:
+        key = "turnId" if scope == "wrong_turn" else "threadId"
+        assert extra[key] == params[key]
+    failures = [event for event in result["events"] if event["kind"] == "infrastructure_failed"
+                and event.get("reason") == "non-retryable provider error notification"]
+    assert len(failures) == 1 and len(failures[0]["error_notifications"]) == 2
+    assert sum(notice["attributed"] for notice in failures[0]["error_notifications"]) == 1
+
+
+@pytest.mark.parametrize("scope", ["wrong_turn", "wrong_thread", "matching_scope"])
+async def test_unconsumed_standalone_items_cannot_reconcile_summary_repeats(compat, tmp_path, scope):
+    study, rows, fixtures = smoke_study(tmp_path / "study")
+    root, plan = sealed_root(study, compat)
+    error = {"message": OVERLOAD_MESSAGE, "codexErrorInfo": "serverOverloaded", "additionalDetails": None}
+    item = {"id": "unconsumed", "type": "agentMessage", "text": "Evidence never consumed"}
+    params = {"item": item}
+    if scope == "wrong_turn":
+        params["turnId"] = "wrong-turn"
+    elif scope == "wrong_thread":
+        params["threadId"] = "wrong-thread"
+    summary = {"id": "turn-gpt-6-luna-xhigh", "status": "failed", "error": error, "itemsView": "summary",
+               "items": [item]}
+    steps = [READ, ("raw_on_close", "item/completed", params),
+             ("raw_on_close", "turn/completed", {"turn": summary}), *overload_steps()]
+    harness = Harness(tmp_path / "homes", scripted(fixtures, {LUNA_L1: lambda f: steps}))
+    clock = PauseClock(on_wait=lambda clock: (root / v11_live.STOP_FILE).touch())
+    status = await run_paused(root, plan, harness, clock, compat, study)
+    attempt = attempt_of(rows, "gpt-6-luna", "L1", "violation")
+    result, normalized = await assert_execution_failure_and_export(root, plan, status, clock, compat, study,
+                                                                 fixtures, tmp_path, attempt)
+    assert result["queue_reconciled"] is False
+    assert "unreconciled items in turn lifecycle notification" in result["infrastructure_failures"]
+    standalone = [event["raw"]["params"] for event in result["raw_events"]
+                  if event.get("method") == "item/completed" and event["raw"]["params"].get("item") == item]
+    embedded = [event["raw"]["params"]["turn"] for event in result["raw_events"]
+                if event.get("method") == "turn/completed" and event["raw"]["params"].get("turn") == summary]
+    assert len(standalone) == len(embedded) == 1
+    reconciliation = next(event for event in result["events"] if event["kind"] == "turn_notifications_reconciled")
+    assert reconciliation["unresolved"][0]["params"]["turn"]["items"] == [item]
+    expected = [item["text"]] if scope == "matching_scope" else []
+    assert [output["text"] for output in result["observer_outputs"]] == expected
+    assert [output["text"] for output in normalized["observer_outputs"]] == expected
+
+
+def test_newly_sealed_plan_describes_a3_predicates(compat, tmp_path):
+    study, _, _ = smoke_study(tmp_path / "study")
+    _, plan = sealed_root(study, compat)
+    policy = plan["execution_policy"]["provider_overload_policy"]
+    for predicate in (
+        "A3_exactly_one_retained_error_notification_attributed_to_observer_thread_and_turn",
+        "serverOverloaded_willRetry_false_matching_failed_turn_error",
+        "no_other_error_code_or_announced_retry",
+        "every_admitted_request_has_one_sent_response_unique_call_ids_declared_attributable_tools",
+        "receipts_and_turn_notifications_reconciled_cleanup_confirmed",
+        "decided_after_shutdown_and_the_last_drain",
+        "prior_tools_and_output_allowed_overload_stage_before_tool_or_after_tool",
+    ):
+        assert predicate in policy
+    assert "before_any_tool_request_and_output" not in policy
+
+
 async def test_exact_pilot_replay_pauses_resumes_and_exports_an_ineligible_unscored_attempt(compat, tmp_path):
     study, rows, fixtures = smoke_study(tmp_path / "study")
     root, plan = sealed_root(study, compat)

@@ -622,11 +622,15 @@ async def test_a_study_pause_naming_another_root_path_is_refused(compat, tmp_pat
 
 
 def test_only_an_exact_repeat_of_a_completed_item_is_reconciled_in_a_completed_turn():
+    from types import SimpleNamespace
+
     from swarm_auth_bench.peer_reporting_v11.live_runtime import _Controller
+    from swarm_auth_bench.runtime import TurnResult
 
     def controller_with(events):
         controller = _Controller.__new__(_Controller)
-        controller.raw_events, controller.failures, controller.session = events, [], None
+        controller.raw_events, controller.failures = events, []
+        controller.session = SimpleNamespace(thread_id="t", turn_id="u")
         controller.queue_reconciled, controller.emitted = True, []
         controller.emit = lambda kind, **data: controller.emitted.append((kind, data))
         return controller
@@ -649,6 +653,24 @@ def test_only_an_exact_repeat_of_a_completed_item_is_reconciled_in_a_completed_t
              ([dict(message)], "item/started", True))
     for embedded, standalone_method, expected_failure in cases:
         controller = controller_with(trace(embedded, standalone_method))
-        controller.reconcile_turn_notifications(None)
+        controller.reconcile_turn_notifications(TurnResult(text="", status="completed", usage={}, model="gpt-6-sol",
+                                                          elapsed_seconds=0, turn_id="u", events=controller.raw_events))
         unresolved = "unreconciled items in turn lifecycle notification" in controller.failures
         assert unresolved is expected_failure, embedded
+
+    for change in ("agent_id", "threadId", "turnId", "missing_turn", "unconsumed"):
+        events = trace([dict(message)])
+        consumed = events
+        if change == "agent_id":
+            events[0]["agent_id"] = "foreign-agent"
+        elif change == "missing_turn":
+            events[0]["raw"]["params"].pop("turnId")
+        elif change == "unconsumed":
+            consumed = events[1:]
+        else:
+            events[0]["raw"]["params"][change] = "foreign-id"
+        controller = controller_with(events)
+        controller.reconcile_turn_notifications(TurnResult(text="", status="completed", usage={}, model="gpt-6-sol",
+                                                          elapsed_seconds=0, turn_id="u", events=consumed))
+        assert "unreconciled items in turn lifecycle notification" in controller.failures, change
+        assert controller.queue_reconciled is False, change
