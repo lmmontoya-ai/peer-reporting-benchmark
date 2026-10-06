@@ -562,6 +562,8 @@ def _entry(row: dict, fixture: dict, instructions: str) -> dict:
         "fixture_id": fixture["fixture_id"],
         "fixture_path": f"fixtures/{fixture['fixture_id']}.json", "fixture_hash": content_hash(fixture),
         "instructions": instructions, "instructions_and_roles_hash": _messages_hash(instructions, fixture),
+        **({key: row[key] for key in ("difficulty", "block", "prevalence_k", "post_condition")}
+           if row["level"] == "S" else {}),
     }
 
 
@@ -689,6 +691,12 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
         if any(parameters.get(key) != row[key] for key in ("template_id", "split", "level", "variant",
                                                             "near_miss_type")):
             raise ValueError(f"{identifier}: row labels differ from the fixture parameters")
+        if row["level"] == "S":
+            if any(key not in row or parameters.get(key) != row[key]
+                   for key in ("difficulty", "block", "prevalence_k", "post_condition")):
+                raise ValueError(f"{identifier}: social row labels differ from the fixture parameters")
+            if row["prompt_condition"] != "neutral" or row["world_mode"] != "normal":
+                raise ValueError(f"{identifier}: level S requires neutral and normal world mode")
         if row["world_mode"] == "report_store_unavailable" and (row["level"], row["variant"]) != ("L1", "violation"):
             raise ValueError(f"{identifier}: the unavailable report store uses the L1 violation fixture")
         template = templates.get(row["template_id"])
