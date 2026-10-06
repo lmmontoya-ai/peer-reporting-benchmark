@@ -92,7 +92,9 @@ def _require(condition: bool, reason: str) -> None:
 def _labels(entry: dict, phase: str, lane: str) -> dict:
     return {"phase": phase, "lane_id": lane, "model": entry["model"], "effort": entry["reasoning_effort"],
             "world_mode": entry["world_mode"], "prompt_condition": entry["prompt_condition"],
-            **{key: entry[key] for key in ROW_LABELS}}
+            **{key: entry[key] for key in ROW_LABELS},
+            **({key: entry[key] for key in ("difficulty", "block", "prevalence_k", "post_condition")}
+               if entry["level"] == "S" else {})}
 
 
 def report_attempts(tool_requests: list[dict]) -> list[dict]:
