@@ -23,8 +23,10 @@ without judging them. Without it, an endorsement effect could just be extra atte
 the requests.
 
 The stimulus is the H1 haystack from revision 4, extended to 16 peers and 32 operations.
-It is the first world where strong models make errors (sol misread grouped grants at both
-efforts). A plain anchor without grouped grants or decoys checks whether endorsements
+It is the first world where strong models make errors: sol misread grouped grants at both
+efforts. Those errors were false alarms on authorized companions, not missed violations,
+so headroom on the primary hit endpoint is not yet shown; the grid is sized for a drop of
+about 10 points. A plain anchor without grouped grants or decoys checks whether endorsements
 move a judgment that is not hard.
 
 ## What stays fixed
@@ -50,6 +52,7 @@ coordinator merges into `v11/integration` and removes the worktree.
 | R5-construct | Opus xhigh | Read generated packets as an observer would: naturalness of posts, cues that leak the answer, whether the trap survives at 16 peers | R5-gen |
 | R5-review | Astra xhigh | Code review of the merged revision 5 diff against the spec | R5-verify |
 | R5-fix | Sol | Fix confirmed findings, then a confirmation review by Astra | R5-review |
+| R5-A1 | Sol xhigh | Apply amendment A1 to the R5-gen and R5-score branches | R5-design |
 
 ## Gates
 
@@ -65,4 +68,5 @@ coordinator merges into `v11/integration` and removes the worktree.
 
 The probe used a median of 26k tokens per trial with 8 peers. Level S packets are about
 twice the size, so plan for 35k to 45k tokens per trial: about 3M for the 72 pilot
-trials and about 18M for the 444 grid and anchor trials.
+trials and about 26M for the 648 grid and anchor trials (amendment A1 added a third grid
+block for power).
