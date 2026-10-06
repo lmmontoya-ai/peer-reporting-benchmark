@@ -561,7 +561,14 @@ async def test_an_overload_first_reported_at_the_last_drain_is_still_provider_un
     attempt = attempt_of(rows, "gpt-6-luna", "L1", "violation")
     payload = payloads(root)[attempt]
     result = payload["observer_result"]
+    if not turn_error:
+        # A3 condition 1 requires the full turn error to match the sole notification, including a non-null error.
+        assert result["termination_kind"] == "infrastructure_incomplete" and result["provider_overload"] is None
+        assert status["status"] == "held" and clock.waits == []
+        assert payload["orchestrator"]["provider_pause"] is None
+        return
     assert result["termination_kind"] == "provider_unavailable" and result["infrastructure_failures"] == []
+    assert result["overload_stage"] == "before_tool"
     assert [notice["code"] for notice in result["provider_overload"]["error_notifications"]] == ["serverOverloaded"]
     assert [event for event in result["events"] if event["kind"] == "provider_overload_observed"]
     assert payload["check"]["classification"] == "provider_unavailable"

@@ -145,7 +145,7 @@ async def test_another_code_or_a_retry_anywhere_in_the_turn_removes_the_overload
     assert row["score"]["eligibility"]["resolves_assignment"] is False
 
 
-async def test_the_recorded_overload_evidence_lists_every_reconciled_error_notification(compat, tmp_path):
+async def test_a_repeated_overload_notification_is_an_execution_failure_under_a3(compat, tmp_path):
     study, rows, fixtures = smoke_study(tmp_path / "study")
     root, plan = sealed_root(study, compat)
     repeated = {"error": {"message": OVERLOAD_MESSAGE, "codexErrorInfo": "serverOverloaded", "additionalDetails": None},
@@ -156,10 +156,11 @@ async def test_the_recorded_overload_evidence_lists_every_reconciled_error_notif
     status = await run_paused(root, plan, harness, clock, compat, study)
     attempt = attempt_of(rows, "gpt-6-luna", "L1", "violation")
     result = payloads(root)[attempt]["observer_result"]
-    # A second capacity refusal while the runtime closes keeps the exception, and the evidence lists both.
-    assert result["termination_kind"] == "provider_unavailable" and status["holds"] == ["soft_stop"]
-    assert [error["code"] for error in result["provider_overload"]["error_notifications"]] == ["serverOverloaded"] * 2
-    assert len(result["provider_overload"]["error_notifications"]) == len(error_notifications(result)) == 2
+    # A3 requires exactly one error notification, even when the second is identical and arrives at the last drain.
+    assert result["termination_kind"] == "infrastructure_incomplete" and result["provider_overload"] is None
+    assert len(error_notifications(result)) == 2
+    assert status["status"] == "held" and clock.waits == []
+    assert payloads(root)[attempt]["orchestrator"]["provider_pause"] is None
 
 
 # M2: a non-retryable error is never masked by a stop or a completion

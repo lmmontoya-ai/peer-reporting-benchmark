@@ -394,17 +394,16 @@ def stop_truncated(result: dict, checks: dict, stop_reasons: list[str] | None) -
 
 
 def provider_unavailable(result: dict, checks: dict, usage_settlement: str | None) -> bool:
-    """Spec 10 (revision 3): the provider refused the turn for capacity before any tool request or output.
+    """A3: the adapter reconciled an explicit capacity refusal, before or after tool work or output.
 
     The adapter's ``provider_unavailable`` termination and its overload evidence,
-    no tool request, no observer output, an exactly configured attempt with a
+    an exactly configured attempt with a
     verified packet receipt and a clean close, and a reservation-bound settlement.
     """
     overload = result.get("provider_overload")
     return (result.get("termination_kind") == live_runtime.PROVIDER_UNAVAILABLE
             and usage_settlement == BOUNDED_USAGE and type(overload) is dict
             and overload.get("code") == live_runtime.PROVIDER_OVERLOAD_CODE
-            and not result.get("tool_requests") and not result.get("observer_outputs")
             and all(checks.get(name) is True for name in PROVIDER_UNAVAILABLE_REQUIRED))
 
 
@@ -445,7 +444,7 @@ def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, p
     settlement leaves the lane unqualified (``usage_unavailable``). Whether that
     holds admission is the admission policy's decision, not this check's. A
     hard stop or the deadline leaves the probe unqualified as ``stop_truncation``,
-    a capacity refusal before any tool request as ``provider_unavailable``, and a
+    a reconciled capacity refusal as ``provider_unavailable``, and a
     silent stall after packet delivery as ``provider_stalled``.
     """
     base = {"kind": "engineering_qualification", "retry_permitted": False, "behavioral_observation": False,
@@ -509,8 +508,8 @@ def evaluate_transport(result: dict | None, *, fixture: dict, entry: dict, prefl
     including the usual close rules, still applies. A truncation by a hard stop
     or the deadline fails the close rules, so the attempt is ineligible, but its
     classification ``stop_truncation`` tells the admission policy it is not an
-    execution failure. A capacity refusal before any tool request is likewise
-    ineligible and classified ``provider_unavailable`` (spec 10, revision 3), and
+    execution failure. A reconciled capacity refusal is likewise
+    ineligible and classified ``provider_unavailable`` (v1.2 section 8.1, A3), and
     so is a silent stall after packet delivery, as ``provider_stalled`` (revision 4).
     """
     base = {"kind": "transport_validity", "behavioral_outcome": "pending_scoring_and_review"}
