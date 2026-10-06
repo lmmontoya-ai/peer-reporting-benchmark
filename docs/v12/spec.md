@@ -534,3 +534,47 @@ pilot checks execution, packet size, token use and that the manipulations render
 written. A new study is built for revision 5, and the revision 3 compatibility root is
 reused under revision-tolerant verification if its fixtures still verify; otherwise
 compatibility is re-run with authorization.
+
+### 8.1 Provider overload after a tool request (amendment A3)
+
+The pilot ([pilot-results.md](pilot-results.md)) held after 65 of 72 starts: a sol-xhigh
+turn answered one tool request, then ended with `serverOverloaded` and `willRetry: false`.
+Under v1.1 section 10 an overload after a tool request or output is an execution
+failure, which holds all new admission. The attempt is excluded either way. The hold only
+adds a successor root and a new authorization, and at the pilot's rate (2 overloads in 65
+attempts) the 612-trial grid would hold several times. The user approved A3 on
+2026-10-06, before any grid data existed.
+
+A3 replaces the last sentence of the v1.1 provider-overload rule ("Any other error, or an
+overload after a tool request or output, is an execution failure as before") for every
+live root built from code that implements A3. Each plan seals its implementation hashes
+and a run refuses changed code, so roots built earlier, including the pilot root, keep the
+earlier rule. No protocol field changes, so the revision 5 study stays valid. An attempt is classified `provider_unavailable`
+when all of these hold, decided after shutdown and the last event drain from all
+reconciled events:
+
+1. The turn ends with exactly one error notification, whose `codexErrorInfo` is
+   `serverOverloaded` and whose `willRetry` is false, and the `turn/completed` error
+   matches it.
+2. No other error code and no announced retry appear anywhere in the turn.
+3. Every admitted tool request received exactly one response, and every pending tool
+   receipt reconciles with the response sent (v1.1 section 10, transport
+   contradictions). No request reuses a call ID, names an undeclared tool, or cannot be
+   attributed.
+4. Turn notifications reconcile (the summary repeat rule of section 10 applies), and
+   cleanup is confirmed.
+
+Tool requests and observer output before the error no longer disqualify the attempt. The
+attempt records `overload_stage`: `before_tool` when no tool request was admitted and no
+observer output exists, otherwise `after_tool`. Everything else follows the existing
+rule: the attempt stays consumed, is behaviorally ineligible and never scored, settles at
+its reservation (`bounded_by_reservation`), pauses admission for 10 minutes, and counts
+toward the study-level three-per-hour hold. An overload that fails any condition above
+stays an execution failure.
+
+Reporting. Section 7's missingness tables list `provider_unavailable` attempts by arm,
+cell, model, effort and `overload_stage`, because an exclusion that depends on how long a
+trial runs is not missing at random.
+
+A3 changes only this classification. The pilot root keeps its revision-time
+classification and stays held; its 63 eligible trials are the pilot result.

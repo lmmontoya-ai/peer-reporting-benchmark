@@ -5,7 +5,9 @@ on 2026-10-05; revision 2 applies the W09 review (`docs/v11/review-w09.md`). No 
 model call has run.
 
 Revision 5 (2026-10-06) adds level S, prevalence and peer endorsement. Its rules are in
-[../v12/spec.md](../v12/spec.md) and change nothing below for earlier levels.
+[../v12/spec.md](../v12/spec.md) and change nothing below for earlier levels, except that
+its amendment A3 (section 8.1 there) extends the provider-overload exception of section 10
+to overloads after a tool request, for live roots built from code that implements A3.
 
 This document is the source of truth for the v1.1 implementation. The machine-readable
 contract is [protocol.json](protocol.json). The incident template format is
