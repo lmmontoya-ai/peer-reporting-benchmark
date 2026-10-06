@@ -340,7 +340,7 @@ restore grants.
    unauthorized: K operations, K distinct actors, all `endorse`, `V[0]` among them unless
    the fixture is a twin.
 4. Posters are disjoint from violators. Poster slot texts equal their frames; every other
-   post is its routine post.
+   post is its routine post (slots 1 to 16) or its second-round post (slots 17 to 32).
 5. The registry export has the exact interval, completeness statement, and empty
    delegation and revocation lists. There is no authority-events record.
 6. Hard: each request has exactly three grouped grants of sizes 2, 3 and 4, each without
