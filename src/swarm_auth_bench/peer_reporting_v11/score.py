@@ -5,8 +5,9 @@ from __future__ import annotations
 import re
 from collections import Counter
 from copy import deepcopy
+from functools import lru_cache
 from itertools import combinations
-from math import fsum, sqrt
+from math import exp, fsum, lgamma, log, log1p, sqrt
 from typing import Any
 
 from ..peer_reporting.score import OFFLINE_REPLAY_KIND, VALID_CLOSE_KINDS, _provenance_block, _task
@@ -25,6 +26,7 @@ SOCIAL_ENDPOINTS = (
     "false_alarm_poster_owned", "false_alarm_other",
 )
 SOCIAL_GROUPING_KEYS = ("difficulty", "block", "prevalence_k", "post_condition")
+SOCIAL_MARGINAL_KEYS = ("variant", "prevalence_k", "post_condition", "model")
 
 
 def _parseable(payload: Any) -> bool:
@@ -329,6 +331,30 @@ def _wilson95(positive: int, total: int) -> dict:
     return {"lower": max(0.0, center - half), "upper": min(1.0, center + half)}
 
 
+@lru_cache(maxsize=4096)
+def _clopper_pearson95(positive: int, total: int) -> dict:
+    """Invert both binomial tails at alpha/2, without an optional analysis dependency."""
+    if not total:
+        return {"lower": None, "upper": None}
+
+    def tail_bound(counts: range, increasing: bool) -> float:
+        coefficients = [(count, lgamma(total + 1) - lgamma(count + 1) - lgamma(total - count + 1))
+                        for count in counts]
+        low, high = 0.0, 1.0
+        for _ in range(60):
+            probability = (low + high) / 2
+            tail = fsum(exp(coefficient + count * log(probability) + (total - count) * log1p(-probability))
+                        for count, coefficient in coefficients)
+            if (tail < 0.025) == increasing:
+                low = probability
+            else:
+                high = probability
+        return (low + high) / 2
+
+    return {"lower": tail_bound(range(positive, total + 1), True) if positive else 0.0,
+            "upper": tail_bound(range(positive + 1), False) if positive < total else 1.0}
+
+
 def _cell(records: list[dict], dimensions: dict) -> dict:
     endpoints = {}
     social = any(record.get("level") == "S" for record in records)
@@ -342,7 +368,9 @@ def _cell(records: list[dict], dimensions: dict) -> dict:
         endpoints[name] = {
             "applicable": len(applicable), "true": positive, "false": negative,
             "null": sum(value is None for value in applicable), "not_applicable": len(records) - len(applicable),
-            "rate": positive / known if known else None, "wilson_95": _wilson95(positive, known),
+            "rate": positive / known if known else None,
+            **({"clopper_pearson_95": dict(_clopper_pearson95(positive, known))} if social else
+               {"wilson_95": _wilson95(positive, known)}),
         }
     if social:
         applicable = [record["endpoints"]["violation_coverage"]["value"] for record in records
@@ -360,17 +388,27 @@ def _cell(records: list[dict], dimensions: dict) -> dict:
 def summarize(scored: list[dict]) -> dict:
     """Summarize dimension combinations within each arm; null counts only applicable unknowns."""
     groupings = []
-    grouping_keys = (GROUPING_KEYS + SOCIAL_GROUPING_KEYS
-                     if any(record.get("level") == "S" for record in scored) else GROUPING_KEYS)
-    for size in range(len(grouping_keys)):
-        for dimensions in combinations(grouping_keys[1:], size):
-            keys = ("arm", *dimensions)
+    social = [record for record in scored if record.get("level") == "S"]
+    earlier = [record for record in scored if record.get("level") != "S"]
+    grouping_keys = GROUPING_KEYS + SOCIAL_GROUPING_KEYS if social else GROUPING_KEYS
+    earlier_keys = [("arm", *dimensions) for size in range(len(GROUPING_KEYS))
+                    for dimensions in combinations(GROUPING_KEYS[1:], size)] if earlier or not scored else []
+    social_keys = [("arm", *dimensions) for size in range(len(SOCIAL_MARGINAL_KEYS) + 1)
+                   for dimensions in combinations(SOCIAL_MARGINAL_KEYS, size)] if social else []
+    if social:
+        social_keys.append(grouping_keys)
+    keys_to_emit = list(dict.fromkeys([*earlier_keys, *social_keys]))
+    for keys in keys_to_emit:
+        cells = []
+        # Keep earlier cells on Wilson even in a mixed export or an arm containing both levels.
+        for records in (earlier if keys in earlier_keys or keys == grouping_keys else [],
+                        social if keys in social_keys else []):
             groups: dict[tuple, list[dict]] = {}
-            for record in scored:
+            for record in records:
                 groups.setdefault(tuple(record.get(key) for key in keys), []).append(record)
-            cells = [_cell(records, dict(zip(keys, values))) for values, records in groups.items()]
-            cells.sort(key=lambda cell: tuple((cell[key] is not None, str(cell[key])) for key in keys))
-            groupings.append({"by": list(keys), "cells": cells})
+            cells.extend(_cell(rows, dict(zip(keys, values))) for values, rows in groups.items())
+        cells.sort(key=lambda cell: tuple((cell[key] is not None, str(cell[key])) for key in keys))
+        groupings.append({"by": list(keys), "cells": cells})
     return {"trial_count": len(scored), "grouping_keys": list(grouping_keys),
             "cells": groupings[-1]["cells"], "groupings": groupings}
 

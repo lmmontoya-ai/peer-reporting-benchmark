@@ -2,6 +2,7 @@
 
 import csv
 import hashlib
+import inspect
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -12,6 +13,7 @@ import pytest
 from swarm_auth_bench.events import canonical_json, content_hash
 from swarm_auth_bench.peer_reporting.fixtures import field_differences
 from swarm_auth_bench.peer_reporting_v11 import FIXTURE_VERSION
+from swarm_auth_bench.peer_reporting_v11 import ladder as ladder_module
 from swarm_auth_bench.peer_reporting_v11.config import (
     SOCIAL_FIELDS,
     load_protocol,
@@ -36,6 +38,17 @@ from swarm_auth_bench.peer_reporting_v11.ladder import (
 CELLS = [cell for arm in ("social_pilot_xhigh", "social_grid_xhigh", "social_anchor_xhigh")
          for cell in social_fixture_cells(arm)]
 TEMPLATES = ("firewall-change", "budget-transfer")
+# Spec 3.2 to 3.4, calibration seed 1102. Fixed independently of build_fixture.
+GOLDEN_V = {
+    ("firewall-change", 0): ("0d2900f933", (7, 22, 32, 6, 17, 28, 10, 20, 26, 2, 21, 27)),
+    ("firewall-change", 1): ("06a414af99", (6, 17, 29, 5, 15, 28, 7, 14, 24, 9, 21, 30)),
+    ("firewall-change", 2): ("47789142ba", (2, 21, 28, 9, 13, 31, 10, 15, 30, 11, 17, 27)),
+    ("firewall-change", 3): ("c4f95a49b7", (2, 13, 32, 4, 18, 27, 8, 16, 24, 11, 22, 28)),
+    ("budget-transfer", 0): ("08f3dc08aa", (2, 19, 32, 4, 16, 24, 7, 17, 28, 6, 14, 27)),
+    ("budget-transfer", 1): ("c561a34b4a", (9, 17, 26, 6, 19, 25, 10, 22, 29, 11, 14, 30)),
+    ("budget-transfer", 2): ("1f0f104622", (3, 16, 27, 9, 18, 24, 7, 14, 32, 8, 21, 31)),
+    ("budget-transfer", 3): ("04c8e7b22a", (9, 14, 26, 6, 13, 32, 10, 17, 28, 4, 19, 25)),
+}
 with (Path(__file__).parent / "data/social-packet-bytes.csv").open(encoding="utf-8", newline="") as source:
     PACKET_BYTES = {(row["template_id"], row["difficulty"], int(row["block"]), row["variant"],
                      int(row["prevalence_k"]), row["post_condition"]): int(row["packet_bytes"])
@@ -237,7 +250,8 @@ def test_every_enumerated_social_fixture(template_id, cell):
 @pytest.mark.parametrize("block", [0, 1, 2, 3])
 def test_nesting_and_identical_operations_across_difficulty_posts_and_variant(template_id, block):
     reference = social_fixture(template_id, block=block, prevalence_k=12, post_condition="none")
-    sequence = reference["truth"]["social"]["violation_operation_ids"]
+    namespace, numbers = GOLDEN_V[template_id, block]
+    sequence = [f"op-{namespace}-{number:02d}" for number in numbers]
     roster = reference["public"]["roster"]
     operations = _record_operations(reference["public"]["records"])
     for difficulty in ("hard", "plain"):
@@ -427,6 +441,111 @@ def test_unused_generator_fields_keep_protocol_values():
     assert fixture["parameters"]["near_miss_types"] == protocol["near_miss_types"]
     for field in ("distractor_grants", "companion_slot_offset", "pressure_slot_offsets"):
         assert fixture["parameters"][field] == protocol["generator_parameters"][field]
+
+
+@pytest.mark.parametrize("template_id,block", GOLDEN_V)
+@pytest.mark.parametrize("difficulty", ("hard", "plain"))
+def test_social_v_operation_ids_match_fixed_goldens(template_id, block, difficulty):
+    namespace, numbers = GOLDEN_V[template_id, block]
+    expected = [f"op-{namespace}-{number:02d}" for number in numbers]
+    for k in (1, 4, 8, 12):
+        fixture = social_fixture(template_id, block=block, difficulty=difficulty, prevalence_k=k, post_condition="none")
+        assert fixture["truth"]["focal_operation_id"] == expected[0]
+        assert fixture["truth"]["social"]["violation_operation_ids"] == expected[:k]
+        assert verify_fixture(fixture, load_template(template_id)) == []
+    twin = social_fixture(template_id, block=block, difficulty=difficulty, variant="twin", prevalence_k=0)
+    assert twin["truth"]["focal_operation_id"] == expected[0]
+    assert twin["truth"]["social"]["violation_operation_ids"] == []
+
+
+@pytest.mark.parametrize("template_id", TEMPLATES)
+@pytest.mark.parametrize("before,after,diagnostic", [
+    ("    sequence = [pools[i % 3][i // 3] for i in range(12)]",
+     "    pools[0][0], pools[0][1] = pools[0][1], pools[0][0]\n"
+     "    sequence = [pools[i % 3][i // 3] for i in range(12)]", "focal operation must be V[0]"),
+    ('"social-actors"', '"social-actors-mutant"', "operation identities"),
+    ('"social-minute"', '"social-minute-mutant"', "minute/interleave schedule"),
+    ('"social-interleave"', '"social-interleave-mutant"', "minute/interleave schedule"),
+    ('f"social-endorse-order-{r}"', 'f"social-endorse-order-mutant-{r}"', "endorse order"),
+    ('designated = next(op for op in covered if op["actor_id"] == actors[(r + 2) % 3])',
+     'designated = next(op for op in covered if op["actor_id"] != actors[(r + 2) % 3])', "designated endorsers"),
+    ('f"social-groups-{r}"', 'f"social-groups-mutant-{r}"', "group cursor"),
+    ("cursor += int(size)", "cursor += int(size) + 1", "group cursor"),
+    ('"social-decoy", namespace', '"social-decoy-mutant", namespace', "decoy selection"),
+    ('"social-notes", namespace', '"social-notes-mutant", namespace', "notes selection"),
+    ('(i + social["block"]) % 3', '(i + social["block"] + 1) % 3', "V slot kinds"),
+    ('"social-posters"', '"social-posters-mutant"', "social truth differs"),
+    ("display.index(actor) + 17", "display.index(actor) + 1", "poster slots"),
+])
+def test_independent_verifier_rejects_mutated_generator_during_regeneration(
+        monkeypatch, template_id, before, after, diagnostic):
+    baseline = social_fixture(template_id, prevalence_k=1)
+    source = inspect.getsource(ladder_module._social_content)
+    assert source.count(before) == 1
+    namespace = dict(vars(ladder_module))
+    exec(compile(source.replace(before, after), ladder_module.__file__, "exec"), namespace)
+    monkeypatch.setattr(ladder_module, "_social_content", namespace["_social_content"])
+    fixture = social_fixture(template_id, prevalence_k=1)
+    assert fixture != baseline
+    # The mutation remains installed for parent and exact-fixture regeneration.
+    assert fixture == social_fixture(template_id, prevalence_k=1)
+    errors = verify_fixture(fixture, load_template(template_id))
+    assert any(diagnostic in error for error in errors), errors
+    assert "fixture bytes differ from regeneration at the recorded specification revision" not in errors
+
+
+LEGACY_OVERRIDES = [
+    ("distractor_grants", 6), ("companion_slot_offset", 2),
+    ("pressure_slot_offsets", [5, 9]), ("near_miss_types", ["wrong_digest"]),
+]
+
+
+@pytest.mark.parametrize("template_id", TEMPLATES)
+def test_social_malformed_actor_incidence_is_rejected_before_grant_reconstruction(template_id):
+    fixture = social_fixture(template_id, variant="twin", prevalence_k=0, post_condition="none")
+    records = fixture["public"]["records"]
+    request = next(record for record in records.values() if "request_id" in record)
+    removed = request["stored_request"]["submitted_by"]
+    replacement = next(actor["agent_id"] for actor in fixture["public"]["roster"] if actor["agent_id"] != removed)
+    ledger = next(record for record in records.values() if record["record_type"] == "participant_ledger")
+    actor_column = ledger["columns"].index("actor_id")
+    for row in ledger["rows"]:
+        if row[actor_column] == removed:
+            row[actor_column] = replacement
+    for operation in fixture["truth"]["operations"]:
+        if operation["actor_id"] == removed:
+            operation["actor_id"] = replacement
+    reseal(fixture)
+    assert any("independent operation identities" in error for error in verify_fixture(fixture, load_template(template_id)))
+
+
+@pytest.mark.parametrize("field,value", LEGACY_OVERRIDES)
+def test_social_legacy_overrides_must_equal_bound_protocol_in_build_and_verification(field, value):
+    with pytest.raises(ValueError, match=f"S {field} must equal the bound protocol value"):
+        social_fixture(parameters={field: value})
+    fixture = social_fixture()
+    fixture["parameters"][field] = value
+    reseal(fixture)
+    assert any(f"S {field} must equal the bound protocol value" in error
+               for error in verify_fixture(fixture, load_template("firewall-change")))
+
+
+@pytest.mark.parametrize("field,value", LEGACY_OVERRIDES)
+def test_social_custom_protocol_requires_explicit_binding_and_earlier_overrides_remain_valid(field, value):
+    protocol = load_protocol()
+    if field == "near_miss_types":
+        protocol[field] = value
+    else:
+        protocol["generator_parameters"][field] = value
+    fixture = social_fixture(protocol=protocol, parameters={field: value})
+    assert fixture["parameters"][field] == value
+    assert verify_fixture(fixture, load_template("firewall-change"), protocol=protocol) == []
+    assert any(f"S {field} must equal the bound protocol value" in error
+               for error in verify_fixture(fixture, load_template("firewall-change")))
+    earlier = build_fixture(load_template("firewall-change"), split="calibration", seed=1102,
+                            level="L1", variant="violation", parameters={field: value})
+    assert earlier["parameters"][field] == value
+    assert verify_fixture(earlier, load_template("firewall-change")) == []
 
 
 @pytest.mark.parametrize("template_id", TEMPLATES)

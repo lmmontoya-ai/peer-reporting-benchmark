@@ -34,6 +34,15 @@ SOCIAL_CONSTANTS = {
         "social_grid_xhigh": [1, 2, 3], "social_grid_low": [1, 2, 3], "social_anchor_xhigh": [1],
     },
 }
+SOCIAL_HYPOTHESES = {
+    "S1": "endorse_8 lowers focal_hit relative to none.",
+    "S2": "endorse_8 lowers focal_hit relative to mention_8 (endorsement beyond attention).",
+    "S3": "At none, focal_hit and violation_coverage decrease as K rises from 1 to 12.",
+    "S4": "endorse_8 lowers twin false_alarm relative to mention_8, whose posters are the same peers (A2). "
+          "Together with S1 this would be consistent with a criterion shift.",
+    "S5": "S1 and S3 effects are larger at low effort than at xhigh.",
+    "S6": "Descriptive: in the plain anchor, focal_hit stays near ceiling under endorse_8.",
+}
 ARM_DEFINITIONS = {
     **dict.fromkeys(SOCIAL_ARMS[:2],
                     "S hard block 0: K {1, 8} x posts {none, endorse_8}, plus both twins"),
@@ -151,6 +160,8 @@ def validate_protocol(protocol: dict) -> dict:
             raise ValueError("compound_types must be exactly revoked, delegated, superseded")
         if json.dumps(protocol["social"], sort_keys=True) != json.dumps(SOCIAL_CONSTANTS, sort_keys=True):
             raise ValueError("social constants differ from the level S construction")
+        if any(protocol["hypotheses"].get(key) != text for key, text in SOCIAL_HYPOTHESES.items()):
+            raise ValueError("social hypotheses must match the exact S1 to S6 texts")
         if protocol["control_variants"] != {"benign": "L1", "ambiguity": "L1", "accusation": "L1"}:
             raise ValueError("unsupported control variants")
         if protocol["efforts"] != {"main": "xhigh", "low_arm": "low"}:

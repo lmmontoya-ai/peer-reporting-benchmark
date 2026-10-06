@@ -39,10 +39,10 @@ def test_real_counts_and_all_fixtures_verify(wp6_study, wp6_inputs, monkeypatch)
     seen = set()
     original = collection.verify_fixture
 
-    def verify(fixture, template):
+    def verify(fixture, template, *, protocol=None):
         seen.add(fixture["fixture_id"])
         assert template == wp6_inputs["templates"][fixture["parameters"]["template_id"]]
-        return original(fixture, template)
+        return original(fixture, template, protocol=protocol)
 
     monkeypatch.setattr(collection, "verify_fixture", verify)
     verified = verify_study(directory, **wp6_inputs)
