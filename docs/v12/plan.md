@@ -47,7 +47,7 @@ coordinator merges into `v11/integration` and removes the worktree.
 |---|---|---|---|
 | R5-design | Astra xhigh | Review this design and spec for confounds, leaks and analysis faults before code lands | none |
 | R5-gen | Sol xhigh | Level S generator, verifier, protocol and config, study rows, live plan entries, tests | none |
-| R5-score | Sol xhigh | Level S endpoints, false-alarm poster exemption, summaries, export, tests | none |
+| R5-score | Sol xhigh | Level S endpoints, summaries, export, tests | none |
 | R5-verify | Sol high | Offline chain on the merged code: study build and verify, calibration root with social arms, scripted replays, fixture audit, rev 4 byte-identity guard | R5-gen, R5-score |
 | R5-construct | Opus xhigh | Read generated packets as an observer would: naturalness of posts, cues that leak the answer, whether the trap survives at 16 peers | R5-gen |
 | R5-review | Astra xhigh | Code review of the merged revision 5 diff against the spec | R5-verify |
