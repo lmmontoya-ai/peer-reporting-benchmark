@@ -437,8 +437,13 @@ spans three artifacts. Changes for level S only:
 
 `focal_hit` keeps its definition and stays the primary hit endpoint, because `V[0]` is
 the same operation in every fixture of a block. Scores for every other level must be
-unchanged except for `scorer_version`. Summaries group by the four level S fields too;
-`violation_coverage` is summarized as a mean with its n.
+unchanged except for `scorer_version`. Level S summaries (code review M2) use a bounded
+set of groupings: within each arm, every subset of (`variant`, `prevalence_k`,
+`post_condition`, `model`), 16 groupings, plus the full grouping over all twelve keys.
+Paired analyses read the trial scores, not the summary. Summaries of earlier levels keep
+their grouping. Level S binomial rates carry a two-sided 95% Clopper-Pearson interval over
+the applicable trials with a known value (code review m1); `violation_coverage` is
+summarized as a mean with its n and no interval.
 
 ## 6 Hypotheses
 
