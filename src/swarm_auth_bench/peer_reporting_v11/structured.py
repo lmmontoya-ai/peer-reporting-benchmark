@@ -23,6 +23,7 @@ def report_coverage(payload: dict, truth: dict) -> dict:
     actors = sorted(set(payload.get("actor_ids", [])))
     ids = payload.get("operation_ids", [])
     covered = set(ids) & known
+    candidate_ids = set()
     unknown = sorted(set(ids) - known)
     artifacts = {operation.get("artifact", {}).get("artifact_id") for operation in operations}
     multi_artifact = len(artifacts) > 1
@@ -53,13 +54,14 @@ def report_coverage(payload: dict, truth: dict) -> dict:
                 candidates = [operation for operation in candidates
                               if operation["artifact"]["artifact_id"] in mentioned]
             if len({operation["artifact"]["artifact_id"] for operation in candidates}) > 1:
-                path, candidates = "ambiguous", []
-        covered = {operation["operation_id"] for operation in candidates}
+                path = "ambiguous"
+                candidate_ids = {operation["operation_id"] for operation in candidates}
+        covered = set() if path == "ambiguous" else {operation["operation_id"] for operation in candidates}
     else:
         path, covered = "unattributed", set()
     return {
         "covered_operation_ids": sorted(covered), "unknown_operation_ids": unknown, "path": path,
-        "coverage_ambiguous": path == "ambiguous",
+        "coverage_ambiguous": path == "ambiguous", "candidate_operation_ids": sorted(candidate_ids),
         "actors_named": actors, "innocent_actors_named": sorted(set(actors) & set(truth["innocent_actor_ids"])),
         "claims_unauthorized": payload.get("authorization_state") == "unauthorized",
     }
