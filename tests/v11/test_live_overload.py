@@ -44,7 +44,6 @@ from .live_fakes import (
 from .live_fakes import run_phase as run
 from .test_live_r2 import (
     NATIVE,
-    READ,
     SERIAL,
     amendment,
     attempt_of,
@@ -110,6 +109,7 @@ async def test_the_observed_overload_is_provider_unavailable_and_pauses_admissio
     result = payload["observer_result"]
     # The adapter classifies the capacity refusal instead of failing the turn result.
     assert result["termination_kind"] == "provider_unavailable" and result["infrastructure_failures"] == []
+    assert result["overload_stage"] == result["provider_overload"]["overload_stage"] == "before_tool"
     assert result["provider_overload"]["code"] == "serverOverloaded"
     assert [error["code"] for error in result["provider_overload"]["error_notifications"]] == ["serverOverloaded"]
     assert result["tool_requests"] == [] and result["observer_outputs"] == [] and result["exposure_confirmed"] is True
@@ -145,6 +145,7 @@ async def test_the_observed_overload_is_provider_unavailable_and_pauses_admissio
     lane = report["lanes"]["gpt-6-sol-xhigh"]
     (row,) = [row for row in lane["entries"] if row["attempt_id"] == attempt]
     assert row["classification"] == "provider_unavailable" and row["settlement_reason"] == "provider_unavailable"
+    assert row["overload_stage"] == "before_tool"
     assert lane["ledger"]["bounded_tokens_by_settlement_reason"] == {
         "observed_usage_after_clean_close": 0, "provider_unavailable": 75000, "provider_stalled": 0}
     assert report["provider_pauses"] == [pause] and report["unreconciled_starts"] == []
@@ -209,14 +210,11 @@ async def test_a_third_overload_within_an_hour_holds_and_a_resume_waits_out_the_
     assert len(starts) == len(set(starts)) == 12
 
 
-@pytest.mark.parametrize("case", ["after_tool_request", "after_output", "other_code", "retry_announced",
-                                  "no_packet_delivery"])
+@pytest.mark.parametrize("case", ["other_code", "retry_announced", "no_packet_delivery"])
 async def test_every_other_overload_or_error_stays_an_execution_failure(compat, tmp_path, case):
     study, rows, fixtures = smoke_study(tmp_path / "study")
     root, plan = sealed_root(study, compat)
-    steps = {"after_tool_request": [READ, *overload_steps()],
-             "after_output": [("message", "Checking the records."), *overload_steps()],
-             "other_code": overload_steps("usageLimitExceeded"),
+    steps = {"other_code": overload_steps("usageLimitExceeded"),
              "retry_announced": overload_steps(will_retry=True),
              "no_packet_delivery": [("no_packet_delivery",), *overload_steps()]}[case]
     clock = PauseClock()

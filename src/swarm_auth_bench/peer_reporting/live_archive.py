@@ -17,6 +17,7 @@ def attempt_summary(payload: dict) -> dict:
     return {
         "attempt_hash": content_hash(payload),
         "termination_kind": result.get("termination_kind", "infrastructure_incomplete"),
+        **({"overload_stage": result["overload_stage"]} if "overload_stage" in result else {}),
         "check_passed": check["passed"], "classification": check.get("classification"),
         "failure_reasons": deepcopy(check["failure_reasons"]),
         "world_checkpoint": deepcopy(result.get("world_checkpoint")),

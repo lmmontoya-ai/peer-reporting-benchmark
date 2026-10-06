@@ -15,15 +15,12 @@ phase plans, so the P1 module is not edited. The differences are:
 - at close, every pending tool receipt is reconciled with the response prepared
   for its call; a contradiction is an execution failure, and a missing receipt
   is recorded in ``tool_receipt_reconciliation`` (spec 10);
-- a turn that ends with an explicit provider capacity error (``serverOverloaded``)
-  after packet delivery, before any tool request and with no observer output, and
-  that otherwise closes cleanly, terminates as ``provider_unavailable`` instead of
-  an invalid turn result (spec 10, revision 3). Eligibility is decided after
-  shutdown and the last event drain, from every reconciled event: an error with
-  another code, or an announced retry, anywhere in the turn removes it, and an
-  overload notification that first arrives at the last drain still counts. Any
-  other error, or an overload after a tool request or output, is an execution
-  failure;
+- a turn that ends with exactly one explicit provider capacity error
+  (``serverOverloaded``, ``willRetry: false``), with a matching turn error and
+  reconciled requests, receipts, notifications and cleanup, terminates as
+  ``provider_unavailable`` (v1.2 section 8.1, A3). Eligibility is decided after
+  shutdown and the last event drain. Prior tool requests and observer output
+  determine ``overload_stage`` and do not disqualify the attempt;
 - outside that exception, a non-retryable ``error`` notification is an execution
   failure whatever the final turn status, including an interrupted turn after a
   stop and a completed one (spec 10, revision 3);
@@ -677,37 +674,51 @@ class _Controller:
                   unresolved=unresolved)
 
     def provider_overload(self, result: TurnResult | None, requested_model: str, *,
-                          awaiting_notification: bool = False) -> dict | None:
-        """Spec 10 (revision 3): evidence that the provider refused the turn for capacity, or None.
+                          awaiting_notification: bool = False,
+                          observer_outputs: list[dict] | None = None) -> dict | None:
+        """A3: capacity-error evidence, subject to final receipt, notification and cleanup reconciliation.
 
-        The attributed turn ended by itself (``failed``) after the exact packet
-        was delivered, every scoped ``error`` notification carries the
-        ``serverOverloaded`` code and none announces a retry, a turn error, if
-        any, carries the same code, no tool request arrived, no assistant output
-        appeared, no usage notification lacked a total, and no failure was
-        recorded. Anything else is an invalid turn result. The adapter decides
-        with this check again after shutdown and the last drain, so the evidence
-        it records lists every reconciled error notification. With
-        ``awaiting_notification``, a turn that meets every other condition but has
-        no error notification yet also qualifies, so its decision can wait for
-        the last drain (Astra R2).
+        Exactly one non-retrying overload notification must match the failed
+        turn's entire error object. Every admitted request must have a sent
+        response, and no request may reuse a call ID. Prior output and usage
+        are allowed. ``awaiting_notification`` only defers rejection while the
+        sole notification might still arrive at the last drain.
         """
         session, errors = self.session, self.provider_errors
         if (result is None or session is None or result.model != requested_model or result.turn_id is None
                 or result.turn_id != session.turn_id or result.status != "failed"
                 or result.termination_reason is not None):
             return None
-        if (self.failures or self.requests or self.receipts or self.pending_receipts or self.assistant_items
-                or self.assistant_deltas or result.text or self.exposure_receipt is None or self.usage_missing
-                or self.hard_stop.is_set() or (self.boundary or {}).get("reason") != "turn_completed"):
+        if (self.failures or self.exposure_receipt is None
+                or self.hard_stop.is_set() or (self.boundary or {}).get("termination_kind") != "natural_end"):
             return None
-        if ((not errors and not awaiting_notification)
-                or any(error["code"] != PROVIDER_OVERLOAD_CODE for error in errors)
-                or any(error["will_retry"] is True for error in errors)
-                or (result.error is not None and provider_error_code(result.error) != PROVIDER_OVERLOAD_CODE)):
+        # A3 condition 2 includes lifecycle payloads, not only standalone error notifications.
+        for event in self.raw_events:
+            if event.get("kind") != "codex_event":
+                continue
+            raw = event.get("raw") or {}
+            params = raw.get("params") or {}
+            if params.get("willRetry") is True:
+                return None
+            if raw.get("method") in {"turn/started", "turn/completed"}:
+                turn = params.get("turn") or {}
+                error = turn.get("error")
+                if (turn.get("willRetry") is True
+                        or (error is not None and provider_error_code(error) != PROVIDER_OVERLOAD_CODE)):
+                    return None
+        if (provider_error_code(result.error) != PROVIDER_OVERLOAD_CODE
+                or (not errors and not awaiting_notification) or len(errors) > 1
+                or any(error["code"] != PROVIDER_OVERLOAD_CODE or error["will_retry"] is not False
+                       or error["error"] != result.error for error in errors)
+                or any(request.get("protocol_rejected") or "duplicate_of_arrival_seq" in request
+                       or (request["admitted"] and not request["response_sent"]) for request in self.requests)):
             return None
+        admitted = sum(request["admitted"] for request in self.requests)
+        output_count = (len(observer_outputs) if observer_outputs is not None
+                        else len(self.assistant_items) + len(self.assistant_deltas) + bool(result.text))
         return {"code": PROVIDER_OVERLOAD_CODE, "turn_status": result.status, "turn_error": deepcopy(result.error),
-                "error_notifications": deepcopy(errors), "tool_requests": 0, "observer_outputs": 0}
+                "error_notifications": deepcopy(errors), "tool_requests": admitted, "observer_outputs": output_count,
+                "overload_stage": "after_tool" if admitted or output_count else "before_tool"}
 
     def _non_model_event(self, event: dict) -> str | None:
         """A method whose retained payload proves silence, or None for any other event."""
@@ -909,18 +920,10 @@ async def run_live_observer(
         await controller.drain_runtime_events()
     except (Exception, asyncio.CancelledError) as error:
         await controller.fail(f"bounded drain incomplete: {type(error).__name__}: {error}")
-    # Spec 10 (revision 3): a capacity refusal before any tool request is classified, not failed, if the
-    # rest of the close stays clean; it is decided again below, after shutdown, the last drain, receipts, and
-    # the world audit.
-    overload = controller.provider_overload(result, requested_model)
-    # Astra R2: a failed turn that meets every other condition of the exception, but whose overload notification has
-    # not arrived yet, is decided after the last drain instead of rejected now; if no qualifying notification
-    # arrives by then, it fails exactly as before.
-    deferred = overload is None and controller.provider_overload(result, requested_model,
-                                                                 awaiting_notification=True) is not None
-    if overload is not None:
-        controller.emit("provider_overload_observed", **overload)
-    elif result is not None:
+    # A3: defer a possible capacity error until shutdown and the last drain; do not classify it yet.
+    overload = None
+    deferred = controller.provider_overload(result, requested_model, awaiting_notification=True) is not None
+    if result is not None:
         if (result.model != requested_model or not controller.session or result.turn_id != controller.session.turn_id
                 or result.status not in {"completed", "interrupted"} or result.error) and not deferred:
             await controller.fail(INVALID_TURN_RESULT)
@@ -1005,19 +1008,16 @@ async def run_live_observer(
     acknowledged_replies = sorted({message["event_id"] for receipt in controller.receipts
                                    if receipt["tool"] == "read_channel" and receipt["result"].get("status") == "ok"
                                    for message in receipt["result"]["messages"] if message["event_id"] in reply_ids})
-    if overload is not None or deferred:
-        # Spec 10 (revision 3): eligibility is decided from every reconciled event, after shutdown and the last
-        # drain, and the recorded evidence is recomputed from them. A late error with another code, a late retry
-        # announcement, or anything else that contradicts a clean refusal makes the failed turn an execution
-        # failure again. A deferred turn qualifies only now, if its first overload notification arrived late.
-        final = controller.provider_overload(result, requested_model)
-        if (final is None or not controller.queue_reconciled or not runtime_closed or checkpoint is None or outputs
-                or controller.requests):
+    if deferred:
+        # A3 conditions 1 to 4, from all reconciled events. Missing receipts alone are allowed by spec 10.
+        final = controller.provider_overload(result, requested_model, observer_outputs=outputs)
+        if (final is None or not controller.queue_reconciled or not runtime_closed or checkpoint is None
+                or controller.pending_receipts or receipt_reconciliation["unresolved"]):
             controller.failures.append(INVALID_TURN_RESULT)
             controller.emit("infrastructure_failed", reason=INVALID_TURN_RESULT, provider_overload=overload,
                             error_notifications=controller.provider_errors)
             final = None
-        elif deferred:
+        else:
             controller.emit("provider_overload_observed", **final)
         overload = final
     terminal_errors = [error for error in controller.provider_errors if error["will_retry"] is not True]
@@ -1054,6 +1054,7 @@ async def run_live_observer(
         "exposure_issue": None if controller.exposure_receipt is not None else "initial exposure unverified",
         "initial_receipt": controller.exposure_receipt, "termination_kind": termination, "boundary": boundary,
         "provider_overload": overload, "provider_stall": stall,
+        **({"overload_stage": overload["overload_stage"]} if overload is not None else {}),
         "infrastructure_failures": controller.failures, "queue_reconciled": controller.queue_reconciled,
         "runtime_closed": runtime_closed, "elapsed_seconds": controller.elapsed(),
         "drain_elapsed_seconds": clock() - drain_started, "usage": usage,

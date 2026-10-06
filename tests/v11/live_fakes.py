@@ -422,6 +422,20 @@ def overload_steps(code: str = "serverOverloaded", *, will_retry: bool = False, 
             ("disconnect_on_close",), ("end", "failed", error if turn_error else None)]
 
 
+def pilot_overload_steps(model: str = "gpt-6-sol", effort: str = "xhigh") -> list:
+    """A3's held pilot attempt, including reasoning, one answered tool request and both usage updates."""
+    turn = {"id": f"turn-{model}-{effort}", "status": "inProgress", "items": [], "error": None}
+    reasoning = {"id": "reasoning-1", "type": "reasoning", "summary": [], "content": []}
+    error = {"message": OVERLOAD_MESSAGE, "codexErrorInfo": "serverOverloaded", "additionalDetails": None,
+             "misalignment": None}
+    return [("raw_thread", "turn/started", {"turn": turn}), ("packet_delivery",),
+            ("raw", "item/started", {"item": reasoning}), ("raw", "item/completed", {"item": reasoning}),
+            ("tool", "read_channel", {"after_event_id": None, "limit": 8}, {"started": True}),
+            ("usage", 15838), ("usage", 15838), ("thread_status", {"type": "systemError"}),
+            ("raw", "error", {"error": error, "willRetry": False}),
+            ("disconnect_on_close",), ("end", "failed", error)]
+
+
 class FakeTransport(V11PeerRuntime):
     """Only process launch, the version and probe subprocesses, and the JSON-RPC wire are replaced."""
 
@@ -499,25 +513,36 @@ class FakeTransport(V11PeerRuntime):
             if self.interrupt.is_set():
                 break
             if step[0] == "tool":
-                _, name, arguments = step
-                call_id = f"call-{number}"
+                _, name, arguments, *settings = step
+                options = settings[0] if settings else {}
+                call_id = options.get("call_id", f"call-{number}")
+                item = {"type": "dynamicToolCall", "id": call_id, "callId": call_id, "tool": name,
+                        "arguments": arguments}
+                if options.get("started"):
+                    await self._push("item/started", {**scope, "item": {**item, "status": "inProgress"}})
                 waiter = asyncio.get_running_loop().create_future()
                 self.waiters[number] = waiter
                 request = {"id": number, "method": "item/tool/call",
-                           "params": {**scope, "callId": call_id, "tool": name, "arguments": arguments}}
+                           "params": {**scope, "callId": call_id, "tool": name, "arguments": arguments,
+                                      **options.get("params", {})}}
                 task = asyncio.create_task(self._server_request(request))
                 self._background.add(task)
                 task.add_done_callback(self._background.discard)
+                if options.get("await_response") is False:
+                    # The provider can report an overload without waiting for an unanswered request.
+                    await task
+                    self.waiters.pop(number, None)
+                    continue
                 stop = asyncio.create_task(self.interrupt.wait())
                 await asyncio.wait({waiter, stop}, return_when=asyncio.FIRST_COMPLETED)
                 stop.cancel()
                 if not waiter.done():
                     break
                 response = waiter.result()
-                await self._push("item/completed", {**scope, "item": {
-                    "type": "dynamicToolCall", "id": call_id, "callId": call_id, "tool": name,
-                    "arguments": arguments, "status": "completed", "success": response["success"],
-                    "contentItems": response["contentItems"]}})
+                if options.get("receipt") is not False:
+                    await self._push("item/completed", {**scope, "item": {
+                        **item, "status": "completed", "success": response["success"],
+                        "contentItems": response["contentItems"], **options.get("receipt", {})}})
             elif step[0] == "usage":
                 await self._push("thread/tokenUsage/updated", {**scope, "tokenUsage": {"total": {
                     "totalTokens": step[1], "inputTokens": 0, "outputTokens": 0}}})

@@ -16,7 +16,7 @@ Each archived primary attempt becomes one attempt in the shape produced by P1's
   ``bounded_by_reservation``) and ``elapsed_seconds``;
 - ``excluded_from_analysis``: true for a failed attempt that an approved
   amendment accepted, for a ``provider_unavailable`` attempt (a capacity
-  refusal before any tool request, spec 10, revision 3), and for a
+  refusal with reconciled tool work and cleanup, v1.2 section 8.1, A3), and for a
   ``provider_stalled`` attempt (packet delivery confirmed, then no model event
   until the trial wall, revision 4); such an attempt is also not ``eligible``. It is consumed and exported, not quarantined, and its index
   row names the ``exclusion_reason``. Its score stays on its row, but the
@@ -211,6 +211,7 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
         outputs.append(output)
     outputs.sort(key=lambda output: (output["controller_sequence"], output["elapsed_seconds"]))
     return {**base, "eligible": eligible, "exposure_confirmed": exposure, "termination_kind": termination,
+            **({"overload_stage": result["overload_stage"]} if "overload_stage" in result else {}),
             "accepted_reports": [{"report_id": report["report_id"], "payload": deepcopy(report["report"])}
                                  for report in world["reports"]],
             "report_attempts": report_attempts(result["tool_requests"]),
@@ -346,6 +347,8 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
                 if row["attempt"] is not None and row["attempt"]["excluded_from_analysis"]:
                     # A pause classification requires the same termination kind, so it names the reason.
                     row.update(excluded_from_analysis=True, exclusion_reason=row["attempt"]["termination_kind"])
+                if row["attempt"] is not None and "overload_stage" in row["attempt"]:
+                    row["overload_stage"] = row["attempt"]["overload_stage"]
                 if entry["attempt_id"] in accepted:
                     _exclude(row, entry, state, sorted(accepted[entry["attempt_id"]]), amendment_errors)
                 if row["attempt"] is not None and scorer is not None:

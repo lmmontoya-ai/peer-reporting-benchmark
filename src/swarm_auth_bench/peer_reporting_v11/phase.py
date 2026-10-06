@@ -29,8 +29,8 @@ Differences from P1:
   claim consumes the attempt without a session and holds admission;
 - a sealed cleanup reconciliation, journaled as ``cleanup_reconciled``, clears
   the cleanup debt of an attempt whose cleanup was never confirmed;
-- a ``provider_unavailable`` attempt (a capacity refusal before any tool request,
-  spec 10, revision 3) settles at its reservation, holds nothing, and pauses all
+- a ``provider_unavailable`` attempt (a reconciled capacity refusal, v1.2 section
+  8.1, A3) settles at its reservation, holds nothing, and pauses all
   new admission for 10 minutes; its pause is sealed into the attempt and
   journaled (``provider_pause_started``, ``provider_pause_ended``), so a resumed or
   restarted run respects an active pause and the 60-minute window count, and the
@@ -482,23 +482,20 @@ def usage_unobserved(result: Any, notices: dict) -> str | None:
 
 
 def provider_pause_close(result: Any, observer_error: str | None, failures: list[str], notices: dict) -> str | None:
-    """Spec 10 (revisions 3 and 4): ``provider_unavailable`` or ``provider_stalled`` when the adapter classified a
-    capacity refusal before any tool request, or a silent stall after packet delivery, and the close was clean.
+    """A3 and spec 10: a reconciled capacity refusal or a silent stall after a clean close.
 
     This is the one exception to the observed-usage requirement: the attempt
-    settles at its reservation even though no usage was observed. A usage
-    notification without a total still leaves usage unresolved, and a silent
-    stall has no usage notification at all.
+    settles at its reservation regardless of observed or unavailable usage.
+    A silent stall has no usage notification at all.
     """
-    if not (clean_shutdown(result, observer_error, failures) and not result.get("tool_requests")
-            and not result.get("observer_outputs") and result.get("exposure_confirmed") is True
-            and not notices["without_total"]):
+    if not (clean_shutdown(result, observer_error, failures) and result.get("exposure_confirmed") is True):
         return None
     kind = result.get("termination_kind")
     if kind == live_runtime.PROVIDER_UNAVAILABLE and type(result.get("provider_overload")) is dict:
         return PROVIDER_UNAVAILABLE
     if (kind == live_runtime.PROVIDER_STALLED and type(result.get("provider_stall")) is dict
-            and not notices["with_total"]):
+            and not result.get("tool_requests") and not result.get("observer_outputs")
+            and not notices["without_total"] and not notices["with_total"]):
         return PROVIDER_STALLED
     return None
 
@@ -1083,6 +1080,7 @@ def lane_report(state: _PhaseState) -> dict:
             "termination_kind": attempt.get("termination_kind"),
             "check_passed": attempt.get("check_passed") if archived else None,
             "classification": attempt.get("classification") if archived else None,
+            "overload_stage": attempt.get("overload_stage") if archived else None,
             "failure_reasons": attempt.get("failure_reasons"),
             "usage_total_tokens": attempt.get("usage_total_tokens"),
             "usage_settlement": attempt.get("usage_settlement") if archived else None,
@@ -1126,7 +1124,8 @@ def lane_report(state: _PhaseState) -> dict:
         "halted": (index.get("last_run") or {}).get("halted"), "ledger": ledger,
         "behavioral_observation": plan["phase"] != "compatibility",
         "resource_observations": [{key: row[key] for key in ("attempt_id", "model", "reasoning_effort",
-                                                             "termination_kind", "classification", "usage_total_tokens",
+                                                             "termination_kind", "classification", "overload_stage",
+                                                             "usage_total_tokens",
                                                              "usage_settlement", "settlement_reason",
                                                              "observed_total_tokens", "elapsed_seconds",
                                                              "tool_request_count")}
