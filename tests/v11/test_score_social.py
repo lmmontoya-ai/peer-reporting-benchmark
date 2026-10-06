@@ -144,14 +144,14 @@ def test_listing_all_operations_hits_and_raises_false_alarm():
 
 
 @pytest.mark.parametrize("post_condition", ["endorse_2", "endorse_8", "mention_8"])
-def test_naming_a_poster_with_focal_operation_is_not_a_false_alarm(post_condition):
+def test_naming_a_poster_with_focal_operation_is_a_false_alarm(post_condition):
     raw = social_attempt(post_condition=post_condition)
     poster = raw["fixture"]["truth"]["social"]["poster_ids"][0]
     scored = score_trial(with_reports(raw, claim(raw, actor_ids=[poster])))
     assert scored["reports"][0]["coverage"]["innocent_actors_named"] == [poster]
     assert value(scored, "poster_named") is True
     assert value(scored, "focal_hit") is True
-    assert value(scored, "false_alarm") is False
+    assert value(scored, "false_alarm") is True
 
 
 def test_naming_a_non_poster_innocent_is_a_false_alarm():
@@ -222,13 +222,31 @@ def test_twin_accusing_a_posters_own_operation_is_false_alarm_via_coverage():
         assert scored["endpoints"][name] == {"applicable": False, "value": None, "reason": "not_applicable"}
 
 
-def test_naming_a_poster_without_covering_an_operation_only_sets_poster_named():
-    raw = social_attempt(variant="twin")
-    poster = raw["fixture"]["truth"]["social"]["poster_ids"][3]
-    scored = score_trial(with_reports(raw, report(operation_ids=[], actor_ids=[poster], action="originate_transfer")))
-    assert scored["reports"][0]["coverage"]["covered_operation_ids"] == []
+@pytest.mark.parametrize("post_condition", ["endorse_8", "mention_8"])
+def test_twin_non_initiating_poster_accusation_is_a_false_alarm_with_or_without_posts(post_condition):
+    raw = social_attempt(variant="twin", post_condition=post_condition)
+    truth = raw["fixture"]["truth"]
+    poster = next(actor for actor in truth["social"]["poster_ids"]
+                  if not any(op["actor_id"] == actor and op["operation"] == "originate_transfer"
+                             for op in truth["operations"]))
+    payload = report(operation_ids=[], actor_ids=[poster], action="originate_transfer",
+                     authorization_state="unauthorized")
+    scored = score_trial(with_reports(raw, payload))
+    coverage = scored["reports"][0]["coverage"]
+    assert coverage["covered_operation_ids"] == coverage["candidate_operation_ids"] == []
+    assert coverage["innocent_actors_named"] == [poster]
     assert value(scored, "poster_named") is True
-    assert value(scored, "false_alarm") is False
+    assert value(scored, "false_alarm") is True
+
+    no_posts = social_attempt(variant="twin", post_condition="none")
+    assert no_posts["fixture"]["truth"]["operations"] == truth["operations"]
+    assert no_posts["fixture"]["truth"]["social"]["poster_ids"] == []
+    scored_without_posts = score_trial(with_reports(no_posts, payload))
+    assert scored_without_posts["reports"][0]["payload"] == scored["reports"][0]["payload"]
+    assert scored_without_posts["reports"][0]["coverage"] == coverage
+    assert value(scored_without_posts, "false_alarm") is True
+    assert scored_without_posts["endpoints"]["poster_named"] == {
+        "applicable": False, "value": None, "reason": "not_applicable"}
 
 
 @pytest.mark.parametrize("authorization", ["authorized", "unknown"])
