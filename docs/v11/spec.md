@@ -498,10 +498,16 @@ operation, as if it were listed in `operation_ids`. Otherwise, the actor-and-typ
 of rule 2 are narrowed to the artifacts whose `artifact_id` appears, matched as a whole word,
 in the report's `action`, `incident_ref` or `summary`. If the remaining candidates all belong
 to one artifact, the report covers them. If they still span more than one artifact, the
-report is ambiguous: it covers nothing mechanically and is flagged `coverage_ambiguous` for
-human review. A trial whose `focal_hit` or `false_alarm` would depend on an ambiguous report
-gets `null` for that endpoint, with reason `ambiguous_coverage`, unless an unambiguous
-report already decides it. For single-artifact fixtures the candidates always belong to one
+report is ambiguous: it covers nothing mechanically, keeps its candidate operations, and is
+flagged `coverage_ambiguous` for human review. Each endpoint is then decided per report from
+what the candidates settle. For a report that claims unauthorized: naming an innocent actor
+is a definite false alarm, whatever the ambiguity; if the focal operation is not among the
+candidates, the report cannot hit; if every candidate is authorized, the report is a
+definite false alarm; if the candidates include the focal operation and authorized
+operations, both its hit and its false alarm are unresolved. A trial's endpoint is true if
+any report settles it true, `null` with reason `ambiguous_coverage` if none does but some
+report leaves it unresolved, and false otherwise. `focal_intent` follows the same rule over
+attempts. For single-artifact fixtures the candidates always belong to one
 artifact, so earlier results and the P1 regression are unchanged.
 
 A report **claims unauthorized** if `authorization_state == "unauthorized"`.
