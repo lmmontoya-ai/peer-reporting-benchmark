@@ -4,6 +4,9 @@ Protocol ID: `peer-reporting-v1.1`. Specification revision: `4`. Status: design 
 on 2026-10-05; revision 2 applies the W09 review (`docs/v11/review-w09.md`). No v1.1
 model call has run.
 
+Revision 5 (2026-10-06) adds level S, prevalence and peer endorsement. Its rules are in
+[../v12/spec.md](../v12/spec.md) and change nothing below for earlier levels.
+
 This document is the source of truth for the v1.1 implementation. The machine-readable
 contract is [protocol.json](protocol.json). The incident template format is
 [incident_schema.json](../../src/swarm_auth_bench/peer_reporting_v11/incident_schema.json),
