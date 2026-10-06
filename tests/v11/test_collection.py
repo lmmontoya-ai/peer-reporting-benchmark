@@ -16,8 +16,10 @@ from swarm_auth_bench.peer_reporting_v11.collection import STUDY_MANIFEST, build
 from swarm_auth_bench.peer_reporting_v11.config import (
     CALIBRATION_EXTENSION_ARMS,
     HARD_PROBE_ARMS,
+    SOCIAL_ARMS,
     SPLITS,
     arm_fixture_cells,
+    social_fixture_cells,
 )
 from swarm_auth_bench.peer_reporting_v11.ladder import calibration_near_miss_types
 from swarm_auth_bench.peer_reporting_v11.live import load_study, validate_assignment_rows
@@ -30,10 +32,10 @@ PAIRED_ARMS = ("collection", "calibration", "low_effort", *CALIBRATION_EXTENSION
 def test_real_counts_and_all_fixtures_verify(wp6_study, wp6_inputs, monkeypatch):
     directory, manifest, result = wp6_study
     assert result["counts"] == COUNTS
-    assert result["total_trials"] == len(manifest["assignments"]) == 1446
+    assert result["total_trials"] == len(manifest["assignments"]) == 1962
     assert Counter(row["arm"] for row in manifest["assignments"]) == COUNTS
-    assert result["split_counts"] == {"collection": 1128, "calibration": 306, "smoke": 12}
-    assert result["fixtures"] == len(manifest["fixtures"]) == 153
+    assert result["split_counts"] == {"collection": 1128, "calibration": 822, "smoke": 12}
+    assert result["fixtures"] == len(manifest["fixtures"]) == 245
     seen = set()
     original = collection.verify_fixture
 
@@ -100,14 +102,14 @@ def test_existing_assignments_keep_their_content_and_relative_order(split, expec
     _, manifest, _ = wp6_study
     rows = [{key: value for key, value in row.items() if key != "planned_order"}
             for row in manifest["assignments"]
-            if row["split"] == split and row["arm"] not in (*CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS)]
+            if row["split"] == split and row["arm"] not in (*CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS, *SOCIAL_ARMS)]
     assert content_hash(rows) == expected_hash
 
 
 def test_identities_bind_all_inputs_and_stay_bounded(wp6_study):
     _, manifest, _ = wp6_study
     rows = manifest["assignments"]
-    assert len({row["assignment_id"] for row in rows}) == 1446
+    assert len({row["assignment_id"] for row in rows}) == 1962
     assert all(len(row["assignment_id"]) <= 90 for row in rows)
     bindings = {"protocol_id": manifest["protocol_id"], "caps_hash": manifest["caps_hash"],
                 "tool_manifest_hash": manifest["tool_manifest_hash"]}
@@ -167,6 +169,9 @@ def test_every_fixture_model_prompt_effort_world_cell_appears_once(wp6_study):
                 continue
             if (arm in CALIBRATION_EXTENSION_ARMS and parameters["variant"] != "ambiguity"
                     and parameters["near_miss_type"] != calibration_types[parameters["template_id"]][0]):
+                continue
+            if arm in SOCIAL_ARMS and not any(all(parameters[key] == value for key, value in cell.items())
+                                                 for cell in social_fixture_cells(arm)):
                 continue
             if arm == "smoke":
                 cells = [cell for cell in definition["cells"]
@@ -260,7 +265,9 @@ def _assert_protocol_round_sequence(manifest, protocol, split):
             continue
         blocks = defaultdict(list)
         for row in chunk:
-            if arm == "channel_failure" or row["variant"] not in ("violation", "twin"):
+            if row["level"] == "S":
+                key = (row["template_id"], row["difficulty"], row["block"], row["post_condition"])
+            elif arm == "channel_failure" or row["variant"] not in ("violation", "twin"):
                 key = (row["fixture_id"],)
             else:
                 key = (row["template_id"], row["level"], row["near_miss_type"], row.get("compound_type"))
@@ -309,6 +316,9 @@ def test_per_arm_and_round_model_and_prompt_row_counts_differ_by_at_most_two(spl
     _, manifest, _ = wp6_study
     protocol = wp6_inputs["protocol"]
     for round_index, arm, chunk in _round_chunks(manifest, split, protocol):
+        if arm in SOCIAL_ARMS:
+            # Revision 5 post groups can be larger than the inherited <=2 row spread.
+            continue
         model_counts = Counter(row["model"] for row in chunk)
         prompt_counts = Counter(row["prompt_condition"] for row in chunk)
         prompts = protocol["arms"][arm].get("prompts", protocol["prompt_conditions"])

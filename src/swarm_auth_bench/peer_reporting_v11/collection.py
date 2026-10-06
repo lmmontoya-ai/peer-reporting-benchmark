@@ -17,7 +17,15 @@ from ..events import content_hash
 from ..peer_reporting.config import read_json
 from ..peer_reporting.storage import atomic_json, check_seal, safe_child, seal
 from .bundle import load_bundle
-from .config import CALIBRATION_EXTENSION_ARMS, SPLITS, arm_fixture_cells, validate_protocol
+from .config import (
+    CALIBRATION_EXTENSION_ARMS,
+    SOCIAL_ARMS,
+    SOCIAL_FIELDS,
+    SPLITS,
+    arm_fixture_cells,
+    social_fixture_cells,
+    validate_protocol,
+)
 from .incidents import validate_template
 from .ladder import build_split_fixtures, calibration_near_miss_types, verify_fixture
 from .lanes import trial_policy, validate_caps_record
@@ -73,7 +81,11 @@ def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
             continue
         groups: dict[tuple, list[str]] = defaultdict(list)
         for fixture_id, row in fixtures.items():
-            if arm != "channel_failure" and row["variant"] in ("violation", "twin"):
+            if row["level"] == "S":
+                # Revision 5 section 4 keeps post groups intact. Their sizes can
+                # make the inherited section 9 <=2 row spread infeasible.
+                block_key = (row["template_id"], row["difficulty"], row["block"], row["post_condition"])
+            elif arm != "channel_failure" and row["variant"] in ("violation", "twin"):
                 block_key = ("pair", row["template_id"], row["level"], row["near_miss_type"],
                              row.get("compound_type"))
             else:
@@ -138,9 +150,13 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, ins
             if definition["split"] != split:
                 continue
             selected_cells = None if arm == "smoke" else set(arm_fixture_cells(protocol, arm))
+            social_cells = social_fixture_cells(arm) if arm in SOCIAL_ARMS else []
             for fixture in split_fixtures:
                 parameters = fixture["parameters"]
                 level, variant = parameters["level"], parameters["variant"]
+                if arm in SOCIAL_ARMS and not any(all(parameters[key] == value for key, value in cell.items())
+                                                 for cell in social_cells):
+                    continue
                 if (arm in CALIBRATION_EXTENSION_ARMS and variant != "ambiguity"
                         and parameters["near_miss_type"] != calibration_types[parameters["template_id"]][0]):
                     continue
@@ -159,6 +175,8 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, ins
                                                                 "near_miss_type")}
                         if "compound_type" in parameters:
                             row["compound_type"] = parameters["compound_type"]
+                        if level == "S":
+                            row.update({key: parameters[key] for key in SOCIAL_FIELDS})
                         row.update(arm=arm, model=model, effort=cell["effort"], prompt_condition=cell["prompt"],
                                    world_mode=cell["world_mode"], fixture_id=fixture["fixture_id"],
                                    instructions=instructions)

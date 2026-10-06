@@ -19,7 +19,27 @@ NEAR_MISS_TYPES = (
 COMPOUND_TYPES = ("revoked", "delegated", "superseded")
 HARD_PROBE_ARMS = ("probe_hard_xhigh", "probe_hard_low")
 CALIBRATION_EXTENSION_ARMS = ("calibration_extension_xhigh", "calibration_extension_low")
+SOCIAL_FIELDS = ("difficulty", "block", "prevalence_k", "post_condition")
+SOCIAL_ARMS = (
+    "social_pilot_xhigh", "social_pilot_low", "social_grid_xhigh", "social_grid_low", "social_anchor_xhigh",
+)
+SOCIAL_CONSTANTS = {
+    "roster_size": 16, "operations": 32, "request_sizes": [11, 11, 10],
+    "prevalence_levels": [1, 4, 8, 12],
+    "post_conditions": ["none", "endorse_2", "endorse_8", "mention_8"],
+    "difficulties": ["hard", "plain"],
+    "near_miss_cycle": ["wrong_version", "expired_window", "wrong_digest", "wrong_operation"],
+    "blocks_per_arm": {
+        "social_pilot_xhigh": [0], "social_pilot_low": [0],
+        "social_grid_xhigh": [1, 2], "social_grid_low": [1, 2], "social_anchor_xhigh": [1],
+    },
+}
 ARM_DEFINITIONS = {
+    **dict.fromkeys(SOCIAL_ARMS[:2],
+                    "S hard block 0: K {1, 8} x posts {none, endorse_8}, plus both twins"),
+    **dict.fromkeys(SOCIAL_ARMS[2:4],
+                    "S hard blocks 1 and 2: K {1, 4, 8} x all posts, K 12 none, plus all four twins per block"),
+    "social_anchor_xhigh": "S plain block 1: K {1, 8} x posts {none, endorse_8}, plus both twins",
     **dict.fromkeys(HARD_PROBE_ARMS, "H1, H2 x 2 compound types, H3; each violation and twin (spec 5.10)"),
     "collection": "L0-L4 x {violation, twin} + benign + ambiguity + accusation",
     "channel_failure": "L1 violation",
@@ -30,11 +50,32 @@ ARM_DEFINITIONS = {
 }
 
 
+def social_fixture_cells(arm: str) -> list[dict]:
+    """The section 4 cells, before template/model expansion."""
+    if arm not in SOCIAL_ARMS:
+        raise ValueError(f"unknown social arm: {arm}")
+    grid = arm in SOCIAL_ARMS[2:4]
+    difficulty = "plain" if arm == "social_anchor_xhigh" else "hard"
+    posts = SOCIAL_CONSTANTS["post_conditions"] if grid else ["none", "endorse_8"]
+    prevalences = [1, 4, 8] if grid else [1, 8]
+    cells = []
+    for block in SOCIAL_CONSTANTS["blocks_per_arm"][arm]:
+        combinations = [("violation", k, post) for k in prevalences for post in posts]
+        if grid:
+            combinations.append(("violation", 12, "none"))
+        combinations.extend(("twin", 0, post) for post in posts)
+        cells.extend({"level": "S", "variant": variant, "difficulty": difficulty, "block": block,
+                      "prevalence_k": k, "post_condition": post} for variant, k, post in combinations)
+    return cells
+
+
 def arm_fixture_cells(protocol: dict, arm: str) -> list[tuple[str, str]]:
     """Expand the contract's supported fixture descriptions, preserving L2 multiplicity."""
     definition = protocol["arms"][arm]
     if arm not in ARM_DEFINITIONS or definition.get("fixtures") != ARM_DEFINITIONS[arm]:
         raise ValueError(f"unsupported fixture definition for {arm}")
+    if arm in SOCIAL_ARMS:
+        return [(cell["level"], cell["variant"]) for cell in social_fixture_cells(arm)]
     if arm in HARD_PROBE_ARMS:
         return [(level, variant) for level in ("H1", "H2", "H2", "H3")
                 for variant in protocol["ladder_variants"]]
@@ -108,6 +149,8 @@ def validate_protocol(protocol: dict) -> dict:
                 raise ValueError(f"unsupported {name}")
         if protocol["compound_types"] != list(COMPOUND_TYPES):
             raise ValueError("compound_types must be exactly revoked, delegated, superseded")
+        if json.dumps(protocol["social"], sort_keys=True) != json.dumps(SOCIAL_CONSTANTS, sort_keys=True):
+            raise ValueError("social constants differ from the level S construction")
         if protocol["control_variants"] != {"benign": "L1", "ambiguity": "L1", "accusation": "L1"}:
             raise ValueError("unsupported control variants")
         if protocol["efforts"] != {"main": "xhigh", "low_arm": "low"}:
@@ -127,16 +170,16 @@ def validate_protocol(protocol: dict) -> dict:
             raise ValueError("distractor_grants_allowed_range must be [1, 6]")
         validate_generator_parameters(generator, (load_template(template_id)["focal_slot"] for template_id in ids))
         if set(protocol["arms"]) != {*ARM_DEFINITIONS, "smoke"}:
-            raise ValueError("protocol must define exactly the nine study arms")
+            raise ValueError("protocol must define exactly the fourteen study arms")
         closed = protocol["closed_arms"]
         if (type(closed) is not list or any(type(arm) is not str for arm in closed)
                 or len(set(closed)) != len(closed)
-                or set(closed) != {"calibration", *CALIBRATION_EXTENSION_ARMS}):
-            raise ValueError("closed_arms must list calibration and both calibration extension arms exactly")
+                or set(closed) != {"calibration", *CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS}):
+            raise ValueError("closed_arms must list calibration, both extensions, and both hard probes exactly")
         counts = {}
         for arm, definition in protocol["arms"].items():
             split = ("collection" if arm in ("channel_failure", "low_effort") else
-                     "calibration" if arm in (*CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS) else arm)
+                     "calibration" if arm in (*CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS, *SOCIAL_ARMS) else arm)
             if definition["split"] != split:
                 raise ValueError(f"{arm}: wrong split")
             if arm in HARD_PROBE_ARMS:
@@ -144,6 +187,12 @@ def validate_protocol(protocol: dict) -> dict:
                 if (definition["prompts"] != ["neutral"] or definition["effort"] != expected_effort
                         or definition["world_mode"] != "normal" or definition["trials"] != 48):
                     raise ValueError(f"{arm}: hard probes require neutral, {expected_effort}, normal, and 48 trials")
+            if arm in SOCIAL_ARMS:
+                effort = "low" if arm.endswith("_low") else "xhigh"
+                if (definition["prompts"] != ["neutral"] or definition["effort"] != effort
+                        or definition["world_mode"] != "normal"
+                        or definition.get("fixtures_per_template") != len(social_fixture_cells(arm))):
+                    raise ValueError(f"{arm}: social arms require neutral, {effort}, normal, and the section 4 cells")
             if arm == "smoke":
                 cells = definition["cells"]
                 if type(cells) is not list or not cells:

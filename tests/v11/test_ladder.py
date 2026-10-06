@@ -459,7 +459,7 @@ def synthetic_templates(template, ids):
     return result
 
 
-@pytest.mark.parametrize("split,count", [("collection", 13), ("calibration", 23), ("smoke", 3)])
+@pytest.mark.parametrize("split,count", [("collection", 13), ("calibration", 69), ("smoke", 3)])
 def test_split_enumeration_in_protocol_order_with_all_synthetic_templates(template, protocol, split, count):
     ids = protocol["templates"][split]
     templates = synthetic_templates(template, ids)

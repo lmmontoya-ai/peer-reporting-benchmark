@@ -13,7 +13,9 @@ from swarm_auth_bench.peer_reporting_v11.config import (
 from swarm_auth_bench.peer_reporting_v11.incidents import load_template
 
 COUNTS = {"collection": 936, "channel_failure": 72, "low_effort": 120, "calibration": 84,
-          "calibration_extension_xhigh": 84, "calibration_extension_low": 42, "probe_hard_xhigh": 48, "probe_hard_low": 48, "smoke": 12}
+          "calibration_extension_xhigh": 84, "calibration_extension_low": 42, "probe_hard_xhigh": 48, "probe_hard_low": 48, "smoke": 12,
+          "social_pilot_xhigh": 36, "social_pilot_low": 36, "social_grid_xhigh": 204,
+          "social_grid_low": 204, "social_anchor_xhigh": 36}
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -25,7 +27,7 @@ def test_protocol_copy_is_byte_identical():
 def test_real_protocol_counts():
     result = validate_protocol(load_protocol())
     assert result["counts"] == COUNTS
-    assert result["total_trials"] == 1446
+    assert result["total_trials"] == 1962
 
 
 @pytest.mark.parametrize("arm", list(COUNTS))
