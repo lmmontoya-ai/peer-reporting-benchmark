@@ -578,3 +578,48 @@ trial runs is not missing at random.
 
 A3 changes only this classification. The pilot root keeps its revision-time
 classification and stays held; its 63 eligible trials are the pilot result.
+
+### 8.2 Single-bit ledger repair (amendment A4)
+
+The grid root `social-grid-v1` stopped after 577 of 648 starts. The last write of the
+gpt-6-luna-xhigh budget ledger stored a key `notiFications` instead of `notifications`:
+one bit (0x20) changed between sealing and the bytes on disk, at byte 36,834 of 45,323.
+Restoring that bit makes the stored seal verify, and the restored attempts agree with the
+lane journal. No other of the 1,575 sealed files in the study fails. The ledger code
+refuses to recreate a corrupt ledger, so verify and export refuse the whole root. The
+user approved A4 on 2026-10-06, before any grid outcome was examined.
+
+A4 adds one offline command, `repair-ledger ROOT --study STUDY --lane LANE --reason TEXT
+--approval-text TEXT`. It makes no model call. It runs under the root coordinator lock,
+the lane lock and the ledger lock, and repairs the lane's `budget-ledger.json` only when
+all of these hold:
+
+1. The ledger file fails its seal, and its identity record verifies and still binds the
+   lane's plan hash and caps.
+2. Among all single-bit changes of the ledger file's bytes (8 per byte), exactly one
+   yields bytes that decode as UTF-8 JSON, equal the canonical serialization of the
+   decoded value plus a newline, carry a verifying seal, and pass every structural and
+   identity check that opening the ledger applies. Zero or several such candidates
+   refuse the repair.
+3. The restored ledger's attempts equal a reconstruction from the lane journal: every
+   `reservation_admitted` reservation, each `usage_observed` notification ID and
+   cumulative value, the maximum observed value, and each settlement from
+   `usage_settled`. Any difference refuses the repair.
+
+The command then retains the corrupt bytes as
+`ledger-repairs/<sha256 of the corrupt bytes>.corrupt`, writes the restored bytes in
+place atomically, and seals a record `ledger-repairs/repair-<n>.json` (kind
+`peer_reporting_v11_ledger_repair`) with the plan hash, lane, the SHA-256 of the corrupt
+and restored bytes, the byte offset, the bit mask, the original and restored byte, the
+hash of the journal reconstruction, the reason and the approval text. The lane journal
+records `ledger_repaired`. A repair never applies to attempt archives, journals, plans,
+indexes or any other file.
+
+Verify reports every repair and checks each record: the retained corrupt bytes match
+their hash, and they differ from the recorded restored bytes in exactly the recorded bit.
+Attempts in a repaired lane stay eligible, because the changed bit lay in budget
+bookkeeping and no trial evidence. Results state the repair as a declared deviation.
+
+The attempt that was running when the lane stopped keeps its existing handling: its start
+is reconciled by `reconcile-cleanup`, it stays consumed and ineligible, and a successor
+root excludes it with the other 576 consumed assignments.
