@@ -459,7 +459,7 @@ def synthetic_templates(template, ids):
     return result
 
 
-@pytest.mark.parametrize("split,count", [("collection", 13), ("calibration", 86), ("smoke", 3)])
+@pytest.mark.parametrize("split,count", [("collection", 13), ("calibration", 149), ("smoke", 3)])
 def test_split_enumeration_in_protocol_order_with_all_synthetic_templates(template, protocol, split, count):
     ids = protocol["templates"][split]
     templates = synthetic_templates(template, ids)
@@ -584,7 +584,7 @@ def test_namespace_identifiers_and_grant_actor_rotation(template):
 
 
 def test_byte_ranges_use_utf8_offsets_for_non_ascii_text(template):
-    template["routine_posts"][0] += " Café."
+    template["routine_posts"][0] += " CafÃ©."
     fixture = build(template, "L2", near="wrong_digest")
     assert verify(fixture, template) == []
     assert fixture["audit"]["packet_bytes"] > len(fixture["packet"])

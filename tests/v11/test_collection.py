@@ -17,6 +17,8 @@ from swarm_auth_bench.peer_reporting_v11.config import (
     CALIBRATION_EXTENSION_ARMS,
     HARD_PROBE_ARMS,
     SOCIAL_ARMS,
+    PRESSURE_ARMS,
+    pressure_fixture_cells,
     SPLITS,
     arm_fixture_cells,
     social_fixture_cells,
@@ -32,10 +34,10 @@ PAIRED_ARMS = ("collection", "calibration", "low_effort", *CALIBRATION_EXTENSION
 def test_real_counts_and_all_fixtures_verify(wp6_study, wp6_inputs, monkeypatch):
     directory, manifest, result = wp6_study
     assert result["counts"] == COUNTS
-    assert result["total_trials"] == len(manifest["assignments"]) == 2166
+    assert result["total_trials"] == len(manifest["assignments"]) == 2922
     assert Counter(row["arm"] for row in manifest["assignments"]) == COUNTS
-    assert result["split_counts"] == {"collection": 1128, "calibration": 1026, "smoke": 12}
-    assert result["fixtures"] == len(manifest["fixtures"]) == 279
+    assert result["split_counts"] == {"collection": 1128, "calibration": 1782, "smoke": 12}
+    assert result["fixtures"] == len(manifest["fixtures"]) == 405
     seen = set()
     original = collection.verify_fixture
 
@@ -102,14 +104,14 @@ def test_existing_assignments_keep_their_content_and_relative_order(split, expec
     _, manifest, _ = wp6_study
     rows = [{key: value for key, value in row.items() if key != "planned_order"}
             for row in manifest["assignments"]
-            if row["split"] == split and row["arm"] not in (*CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS, *SOCIAL_ARMS)]
+            if row["split"] == split and row["arm"] not in (*CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS, *SOCIAL_ARMS, *PRESSURE_ARMS)]
     assert content_hash(rows) == expected_hash
 
 
 def test_identities_bind_all_inputs_and_stay_bounded(wp6_study):
     _, manifest, _ = wp6_study
     rows = manifest["assignments"]
-    assert len({row["assignment_id"] for row in rows}) == 2166
+    assert len({row["assignment_id"] for row in rows}) == 2922
     assert all(len(row["assignment_id"]) <= 90 for row in rows)
     bindings = {"protocol_id": manifest["protocol_id"], "caps_hash": manifest["caps_hash"],
                 "tool_manifest_hash": manifest["tool_manifest_hash"]}
@@ -136,6 +138,13 @@ def _round_chunks(manifest, split, protocol):
                 continue
             if arm == "smoke":
                 size = len(definition["cells"]) * len(protocol["templates"][split])
+            elif arm in PRESSURE_ARMS:
+                sizes = (1,) if arm in PRESSURE_ARMS[:2] else (4, 4, 3) if arm in PRESSURE_ARMS[2:4] else (4, 4, 2)
+                if round_index >= len(sizes):
+                    continue
+                worlds = len(protocol["templates"][split]) * len(protocol["pressure"]["blocks_per_arm"][arm])
+                size = sum(sizes[(round_index + m + w) % len(sizes)]
+                           for w in range(worlds) for m in range(len(protocol["models"])))
             elif arm in SOCIAL_ARMS:
                 grid = arm in ("social_grid_xhigh", "social_grid_low")
                 sizes = (4, 4, 4, 5) if grid else (2, 2, 2)
@@ -180,6 +189,9 @@ def test_every_fixture_model_prompt_effort_world_cell_appears_once(wp6_study):
                 continue
             if arm in SOCIAL_ARMS and not any(all(parameters[key] == value for key, value in cell.items())
                                                  for cell in social_fixture_cells(arm)):
+                continue
+            if arm in PRESSURE_ARMS and not any(all(parameters[key] == value for key, value in cell.items())
+                                                   for cell in pressure_fixture_cells(arm)):
                 continue
             if arm == "smoke":
                 cells = [cell for cell in definition["cells"]
@@ -270,6 +282,10 @@ def _assert_protocol_round_sequence(manifest, protocol, split):
                         for template_id in protocol["templates"][split]]
             assert [tuple(row[key] for key in ("template_id", "level", "variant", "model", "prompt_condition",
                                               "effort", "world_mode")) for row in chunk] == expected
+            continue
+        if arm in PRESSURE_ARMS:
+            # Exact P group/rotation/lane checks live in test_pressure_protocol.py.
+            collection._verify_pressure_order([row for row in manifest["assignments"] if row["arm"] == arm], protocol)
             continue
         if arm in SOCIAL_ARMS:
             grid = arm in ("social_grid_xhigh", "social_grid_low")
@@ -442,8 +458,10 @@ def test_verify_rejects_resealed_extension_row_tampering(tmp_path, wp6_study, wp
 def test_wp1_live_reader_accepts_real_manifest(split, wp6_study, wp6_inputs):
     directory, manifest, _ = wp6_study
     rows, fixtures, source = load_study(directory, split)
+    # R6-world owns P live instruction/tool validation. Keep the inherited v1 check.
+    rows = [row for row in rows if row["level"] != "P"]
     entries = validate_assignment_rows(split, rows, fixtures, wp6_inputs["caps_record"], load_bundle())
-    assert len(entries) == manifest["split_counts"][split]
+    assert len(entries) == sum(row["split"] == split and row["level"] != "P" for row in manifest["assignments"])
     assert source["study_manifest_hash"] == manifest["seal_hash"]
     assert all(entry["instructions"] == row["instructions"] for entry, row in zip(entries, rows, strict=True))
 

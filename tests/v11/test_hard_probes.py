@@ -240,7 +240,7 @@ def test_revision_three_ladder_and_controls_keep_all_473_fixtures_byte_identical
     assert content_hash(fixtures) == "57378c85efbb976c7b7c6d1d5e634808b7f7bfec3d60593630ceabc4395b22b8"
 
 
-@pytest.mark.parametrize("revision", [0, 6, True, None])
+@pytest.mark.parametrize("revision", [0, 7, True, None])
 def test_unrecordable_revisions_are_rejected(revision):
     with pytest.raises(ValueError, match="revision"):
         build_fixture(load_template("token-issuance"), split="smoke", seed=1100, level="L1", variant="violation",
