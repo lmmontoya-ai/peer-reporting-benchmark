@@ -1,0 +1,21 @@
+{
+  "kind": "peer_reporting_v11_ledger_repair_binding",
+  "protocol_id": "peer-reporting-v1.1",
+  "study": "study-social-r5-grid-v1",
+  "root": "social-grid-v1",
+  "lane_id": "gpt-6-luna-xhigh",
+  "plan_hash": "e2503b454f9787aceeae4401225e7176823242a970ee9279c32f12d3215c383c",
+  "commit": "8cbe359fef80a26d79ffd1d7733e3116b47958f8",
+  "approval_text": "User chose 'Approve, push, and repair (Recommended)' on 2026-10-06: push v11/integration so evidence commit 8cbe359 is public before the repair; build this binding from that committed evidence; repair the gpt-6-luna-xhigh budget ledger of root social-grid-v1; reconcile the interrupted attempt; verify and export the archived trials.",
+  "corrupt_sha256": "c36e197e5fe087106cb926f4056fbcb7cd154c38d7c173b820744c5a83ca524e",
+  "restored_sha256": "3a2f1ac6c96b8cabddf19a4620f6ba7317719042de69546bf07028a4e7f4f235",
+  "byte_offset": 36838,
+  "bit_mask": 32,
+  "identity_seal_hash": "fbc5a63a727670a07d9c5011ab2d1c5a1d8eef4346e2f20b3c3fff70553b2b30",
+  "journal": {
+    "count": 837,
+    "final_hash": "1da94371017eab2d8d71689875ef6de93ef4047d505e7c0cecb11dd6870df970",
+    "sha256": "a56ccce6049ae9878198cffa7c70523717311bae0e4091cd427c0ec81b2af5f8"
+  },
+  "seal_hash": "6b56396742c7f52528f71ddf7e9d86a9fa0be033fffe47c491de8feb1bec898a"
+}
