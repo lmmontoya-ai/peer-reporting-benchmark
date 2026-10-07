@@ -106,7 +106,7 @@ async def test_revision5_offline_study_three_roots_and_root_replay(tmp_path, wp6
                                           revision="offline-r5-" + name, source=source,
                                           gate_evidence={"test_only": True}, bundle=bundle,
                                           consumed_attempts=ledger, selected_arms=sorted(arms))
-        live.prepare_live_root(root, plan, study_directory=study, bundle=bundle)
+        live.prepare_live_root(root, plan, study_directory=study, prior_roots=roots, bundle=bundle)
         top = live.read_live_plan(root)
         assert top["maximum_live_calls"] == expected and top["selected_arms"] == sorted(arms)
         entries = [entry for lane in top["lanes"] for entry in
