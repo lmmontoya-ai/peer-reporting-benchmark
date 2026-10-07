@@ -211,6 +211,7 @@ def test_live_export_serializes_pressure_events_scores_summary_and_selection(tmp
     final(raw, f"{focal(raw)['operation_id']} was authorized.")
     raw["pressure_events"] = [room_event("public_message_stored", "system_notice")]
     plan = {"phase": "calibration", "seal_hash": "plan", "lanes": []}
+    monkeypatch.setattr(live_review, "_tool_set_for_plan", lambda plan, bundle: bundle)
     for name, result in {
         "read_live_plan": plan, "root_registration": {}, "check_abandoned_root": None,
         "lane_journals": {}, "check_start_claims": [], "verify_consumed_ledger": [],

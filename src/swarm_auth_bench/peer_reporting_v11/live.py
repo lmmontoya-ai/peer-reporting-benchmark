@@ -117,6 +117,7 @@ from ..peer_reporting.storage import atomic_json, check_seal, read_sealed, safe_
 from ..runtime import SUPPORTED_CODEX_VERSION
 from . import PROTOCOL_ID, SPECIFICATION_REVISION, live_runtime
 from .bundle import ProtocolBundle, load_bundle, require_v11_tools, tools_for_levels
+from .schemas import TOOL_SCHEMA_VERSION_P
 from .lanes import (
     BOUNDED_USAGE,
     PROMPT_CONDITIONS,
@@ -196,6 +197,9 @@ REVIEW_PLAN_KIND = "peer_reporting_v11_review_plan"
 LEDGER_POLICY = "exclude_every_journaled_attempt_start_in_prior_roots_of_the_same_study_and_phase"
 COMPATIBILITY_FIXTURE = {"template_id": "token-issuance", "split": "smoke", "seed": 1100, "level": "L1",
                          "variant": "violation", "near_miss_type": None}
+COMPATIBILITY_FIXTURE_P = {"template_id": "firewall-change", "split": "smoke", "seed": 1100, "level": "P",
+                           "variant": "violation", "near_miss_type": None, "block": 0, "prevalence_k": 1,
+                           "visibility": "visible", "pressure": "neutral"}
 QUALIFIER_VERSION = "peer-reporting-v11-qualifier-v1"
 QUALIFIER_BLOCK = (
     "Engineering compatibility check. This session tests the benchmark's tool interface. It is not a "
@@ -648,19 +652,21 @@ def _assemble(phase: str, revision: str, caps_record: dict, bundle: ProtocolBund
     return plain_json(top), lane_plans, plain_json(fixtures)
 
 
-def build_compatibility_plan(caps_record: dict, *, revision: str, bundle: ProtocolBundle | None = None
-                             ) -> tuple[dict, dict, dict]:
+def build_compatibility_plan(caps_record: dict, *, revision: str, bundle: ProtocolBundle | None = None,
+                             tool_schema_version: str | None = None) -> tuple[dict, dict, dict]:
     """One engineering tool-exercise call per model and effort (six lanes). Nothing is written or called."""
     bundle = require_v11_tools(bundle or load_bundle())
     caps_record = validate_caps_record(caps_record, require_frozen=False)
-    spec = COMPATIBILITY_FIXTURE
+    bundle = bundle.tool_set(tool_schema_version or bundle.schema_version)
+    pressure = bundle.schema_version == TOOL_SCHEMA_VERSION_P
+    spec = COMPATIBILITY_FIXTURE_P if pressure else COMPATIBILITY_FIXTURE
     template = bundle.load_template(spec["template_id"])
-    fixture = bundle.build_fixture(template, split=spec["split"], seed=spec["seed"], level=spec["level"],
-                                   variant=spec["variant"], near_miss_type=spec["near_miss_type"])
+    fixture = bundle.build_fixture(template, **{key: value for key, value in spec.items() if key != "template_id"})
     errors = bundle.verify_fixture(fixture, template)
     if errors:
         raise ValueError(f"compatibility fixture failed verification: {errors}")
-    instructions = (bundle.build_instructions("neutral", template, trial_policy(caps_record))
+    instructions = (bundle.build_instructions("neutral", template, trial_policy(caps_record),
+                                              **({"visibility": "visible"} if pressure else {}))
                     + "\n\n" + QUALIFIER_BLOCK)
     entries = []
     for position, (model, effort) in enumerate(lane_order()):
@@ -669,6 +675,9 @@ def build_compatibility_plan(caps_record: dict, *, revision: str, bundle: Protoc
                "world_mode": "normal", "template_id": spec["template_id"], "level": spec["level"],
                "variant": spec["variant"], "near_miss_type": spec["near_miss_type"],
                "fixture_id": fixture["fixture_id"], "planned_order": position, "round": 0}
+        if pressure:
+            row.update({key: fixture["parameters"][key] for key in
+                        ("difficulty", "block", "prevalence_k", "post_condition", "visibility", "pressure")})
         entries.append(_entry(row, fixture, instructions))
     source = {"kind": "compatibility_probe", "fixture": dict(spec), "instructions_version": QUALIFIER_VERSION,
               "pass_criteria": list(QUALIFICATION_CRITERIA), "behavioral_observation": False,
@@ -711,18 +720,23 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
         if any(parameters.get(key) != row[key] for key in ("template_id", "split", "level", "variant",
                                                             "near_miss_type")):
             raise ValueError(f"{identifier}: row labels differ from the fixture parameters")
-        if row["level"] == "S":
+        if row["level"] in ("S", "P"):
+            fields = ("difficulty", "block", "prevalence_k", "post_condition")
+            if row["level"] == "P":
+                fields += ("visibility", "pressure")
             if any(key not in row or parameters.get(key) != row[key]
-                   for key in ("difficulty", "block", "prevalence_k", "post_condition")):
+                   for key in fields):
                 raise ValueError(f"{identifier}: social row labels differ from the fixture parameters")
             if row["prompt_condition"] != "neutral" or row["world_mode"] != "normal":
-                raise ValueError(f"{identifier}: level S requires neutral and normal world mode")
+                raise ValueError(f"{identifier}: level {row['level']} requires neutral and normal world mode")
         if row["world_mode"] == "report_store_unavailable" and (row["level"], row["variant"]) != ("L1", "violation"):
             raise ValueError(f"{identifier}: the unavailable report store uses the L1 violation fixture")
         template = templates.get(row["template_id"])
         if template is None:
             template = templates[row["template_id"]] = bundle.load_template(row["template_id"])
-        instructions = bundle.build_instructions(row["prompt_condition"], template, policy)
+        routing = ({"visibility": parameters["visibility"], "held_submissions": parameters["pressure"] == "P4"}
+                   if row["level"] == "P" else {})
+        instructions = bundle.build_instructions(row["prompt_condition"], template, policy, **routing)
         if "instructions" in row and row["instructions"] != instructions:
             raise ValueError(f"{identifier}: sealed instructions differ from the frozen prompt builder")
         entries.append(_entry(row, fixture, instructions))
@@ -1919,8 +1933,21 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
         arms |= {entry["arm"] for entry in lane_plan["planned_order"]}
         for entry in lane_plan["planned_order"]:
             fixture = read_root_fixture(directory, plan, entry["fixture_id"])
-            if entry["level"] != fixture["parameters"]["level"]:
+            parameters = fixture["parameters"]
+            if entry["level"] != parameters["level"]:
                 raise EvidenceError(f"{entry['entry_id']}: tool-set level differs from its fixture")
+            if entry["level"] == "P":
+                fields = ("difficulty", "block", "prevalence_k", "post_condition", "visibility", "pressure")
+                if any(entry.get(key) != parameters[key] for key in fields):
+                    raise EvidenceError(f"{entry['entry_id']}: pressure labels differ from its fixture")
+                expected = bundle.build_instructions("neutral", bundle.load_template(entry["template_id"]),
+                                                     trial_policy(plan["caps"]), visibility=parameters["visibility"],
+                                                     held_submissions=parameters["pressure"] == "P4")
+                if plan["phase"] == "compatibility":
+                    expected += "\n\n" + QUALIFIER_BLOCK
+                if (entry["prompt_condition"] != "neutral" or entry["world_mode"] != "normal"
+                        or entry["instructions"] != expected):
+                    raise EvidenceError(f"{entry['entry_id']}: pressure instructions differ from the frozen builder")
             if (content_hash(fixture) != entry["fixture_hash"]
                     or _messages_hash(entry["instructions"], fixture) != entry["instructions_and_roles_hash"]):
                 raise EvidenceError(f"{entry['entry_id']}: lane input differs from its sealed identity")
@@ -2101,8 +2128,8 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
                      compatibility_directories: list[Path] | tuple = (), smoke_directory: Path | None = None,
                      prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None,
                      study_verifier: Callable[[Path, dict], Any] | None = None,
-                     review_plan: dict | None = None, arms: list[str] | tuple | None = None
-                     ) -> tuple[dict, dict, dict]:
+                     review_plan: dict | None = None, arms: list[str] | tuple | None = None,
+                     tool_schema_version: str | None = None) -> tuple[dict, dict, dict]:
     """Build a phase plan; behavioral phases bind their study, its consumed-attempt ledger, and their gates.
 
     A behavioral plan requires the study manifest's caps hash, tool manifest hash,
@@ -2125,7 +2152,10 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
     if validate_phase(phase) == "compatibility":
         if prior_roots:
             raise ValueError("compatibility roots have no consumed-attempt ledger or prior roots")
-        return build_compatibility_plan(caps_record, revision=revision, bundle=bundle)
+        return build_compatibility_plan(caps_record, revision=revision, bundle=bundle,
+                                        tool_schema_version=tool_schema_version)
+    if tool_schema_version is not None:
+        raise ValueError("tool_schema_version applies only to compatibility; behavioral roots select tools by level")
     if study_directory is None:
         raise ValueError(f"{phase} requires a sealed study directory")
     caps_record = validate_caps_record(caps_record, require_frozen=False)
