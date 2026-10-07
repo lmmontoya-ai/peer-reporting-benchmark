@@ -674,7 +674,7 @@ def non_social_golden():
 def test_non_social_scores_match_pre_revision_five_golden_except_version(non_social_golden):
     assert non_social_golden["scorer_version"] == "peer-reporting-v11-score-v1"
     assert len(non_social_golden["scores"]) == 239
-    assert SCORER_VERSION == "peer-reporting-v11-score-v3"
+    assert SCORER_VERSION == "peer-reporting-v11-score-v4"
     for index, capture in enumerate(non_social_golden["scores"]):
         actual = score_trial(capture["attempt"], **capture["options"])
         assert actual["scorer_version"] == SCORER_VERSION
