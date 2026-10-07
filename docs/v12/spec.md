@@ -583,7 +583,8 @@ classification and stays held; its 63 eligible trials are the pilot result.
 
 The grid root `social-grid-v1` stopped after 577 of 648 starts. The last write of the
 gpt-6-luna-xhigh budget ledger stored a key `notiFications` instead of `notifications`:
-one bit (0x20) changed between sealing and the bytes on disk, at byte 36,834 of 45,323.
+one bit (0x20) changed between sealing and the bytes on disk, at zero-based byte 36,838
+of 45,323 (the key starts at byte 36,834).
 Restoring that bit makes the stored seal verify, and the restored attempts agree with the
 lane journal. No other of the 1,575 sealed files in the study fails. The ledger code
 refuses to recreate a corrupt ledger, so verify and export refuse the whole root. The
