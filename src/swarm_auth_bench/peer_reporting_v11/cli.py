@@ -354,10 +354,12 @@ def _run(args: argparse.Namespace) -> dict:
                                 scorer=scorer)
     if args.command == "export-review":
         from .live_review import export_live_review
+        from .review_plan import pressure_review_selection
 
         scorer, summarize = _scorer(not args.no_score)
         return export_live_review(args.root, args.output, study_directory=args.study, prior_roots=args.prior_roots,
-                                  bundle=load_bundle(), scorer=scorer, summarize=summarize)
+                                  bundle=load_bundle(), scorer=scorer, summarize=summarize,
+                                  pressure_review_selector=pressure_review_selection)
     from .live import read_live_plan, reviewed_runtime_factory, run_live_phase
 
     plan = read_live_plan(args.root)
