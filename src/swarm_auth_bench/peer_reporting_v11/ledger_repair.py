@@ -625,6 +625,11 @@ def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reaso
             atomic_json(ledger_path, candidate["state"])
         if tail != intended:
             journal.append_prepared(event)
+        else:
+            # A recovered full declaration may never have been synced. Make it durable before
+            # completion; if the sync fails, the record stays prepared and a rerun retries.
+            with journal_path.open("r+b") as stream:
+                os.fsync(stream.fileno())
         atomic_json(path, complete)
     return {"directory": str(directory), "status": "repaired", "repair_record": f"{lane['path']}/{relative}",
             "repair": complete, "live_model_calls": 0}

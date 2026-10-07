@@ -589,10 +589,11 @@ def interrupted_declaration_write(lane, capsys, monkeypatch, length=17, *, short
             assert prepared["status"] == "prepared"
             assert bytes.fromhex(prepared["declaration_bytes"]) == intended
             size = {"half": len(intended) // 2, "without_newline": len(intended) - 1,
-                    "full": len(intended)}.get(length, length)
+                    "full": len(intended), "full_unsynced": len(intended)}.get(length, length)
             self.stream.write(intended[:size].decode("utf-8"))
             self.stream.flush()
-            os.fsync(self.stream.fileno())
+            if length != "full_unsynced":  # the unsynced case is cut after the write, before fsync
+                os.fsync(self.stream.fileno())
             if short_return:
                 return size
             raise OSError("interrupted inside declaration write")
@@ -617,14 +618,15 @@ def interrupted_declaration_write(lane, capsys, monkeypatch, length=17, *, short
 
 
 @pytest.mark.parametrize("length,short_return", [(17, True), (17, False), (1, False), ("half", False),
-                                               ("without_newline", False), ("full", False)])
+                                               ("without_newline", False), ("full", False),
+                                               ("full_unsynced", False)])
 def test_interrupted_declaration_write_resumes_verifies_and_exports(lane, capsys, monkeypatch, tmp_path,
                                                                    length, short_return):
     corrupt_lane(lane)
     checkpoint, intended = interrupted_declaration_write(lane, capsys, monkeypatch, length,
                                                          short_return=short_return)
     journal_path = lane["directory"] / "journal.jsonl"
-    if length != "full":
+    if length not in ("full", "full_unsynced"):
         with pytest.raises(ValueError, match="unterminated event"):
             list(iter_events(journal_path))
         with pytest.raises(ValueError, match="unterminated event"):
@@ -652,8 +654,11 @@ def test_interrupted_declaration_write_resumes_verifies_and_exports(lane, capsys
     assert code == 0 and report["repair"]["status"] == "complete"
     assert "declaration_bytes" not in report["repair"]
     assert journal_path.read_bytes() == checkpoint + intended
-    if length != "full":
+    if length not in ("full", "full_unsynced"):
         assert fsync_sizes[:2] == [len(checkpoint), len(checkpoint) + len(intended)]
+    else:
+        # A full visible declaration is synced again before completion (Astra A4 round 3).
+        assert fsync_sizes[0] == len(checkpoint) + len(intended)
     assert len([event for event in iter_events(journal_path) if event["kind"] == "ledger_repaired"]) == 1
     assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 0
     capsys.readouterr()
@@ -834,3 +839,29 @@ def test_second_repair_resumes_and_rechecks_first_repair(lane, capsys, tmp_path,
     (lane["directory"] / "ledger-repairs" / f"{first['corrupt_sha256']}.corrupt").unlink()
     with pytest.raises(OSError):
         live.verify_live_root(lane["root"], study_directory=lane["study"], bundle=fake_bundle())
+
+
+@pytest.mark.parametrize("length", ["full", "full_unsynced"])
+def test_failed_sync_of_a_recovered_declaration_leaves_the_repair_prepared(lane, capsys, monkeypatch, length):
+    corrupt_lane(lane)
+    checkpoint, intended = interrupted_declaration_write(lane, capsys, monkeypatch, length)
+    journal_path = lane["directory"] / "journal.jsonl"
+    journal_identity = os.stat(journal_path)
+    real_fsync = os.fsync
+    journal_syncs = []
+    with monkeypatch.context() as patch:
+        def failing_journal_fsync(fd):
+            status = os.fstat(fd)
+            if (status.st_dev, status.st_ino) == (journal_identity.st_dev, journal_identity.st_ino):
+                journal_syncs.append(fd)
+                raise OSError("sync failed")
+            real_fsync(fd)
+        patch.setattr(ledger_repair.os, "fsync", failing_journal_fsync)
+        code, report = command(lane, capsys)
+    assert journal_syncs, "the recovered declaration must be synced before completion"
+    assert code == 2 and report["error"] == "OSError: sync failed"
+    assert read_sealed(lane["directory"] / "ledger-repairs" / "repair-1.json")["status"] == "prepared"
+    assert journal_path.read_bytes() == checkpoint + intended
+    code, report = command(lane, capsys)
+    assert code == 0 and report["repair"]["status"] == "complete"
+    assert journal_path.read_bytes() == checkpoint + intended

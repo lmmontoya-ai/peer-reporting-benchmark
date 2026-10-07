@@ -679,3 +679,11 @@ declaration append stops partway, a rerun may remove a trailing partial line onl
 those bytes are a strict prefix of the stored intended record and everything before them
 equals the approved journal checkpoint; it then appends the full record. Any other
 unexpected journal tail refuses the rerun.
+
+Durability and the prepared record (after the third Astra review). A rerun that finds the
+complete intended declaration already in the journal syncs the journal before it marks
+the repair complete, and leaves the record prepared if the sync fails. The prepared record
+is a local, unauthenticated envelope: someone with write access could change declaration
+metadata such as its wall time and reseal it, and recovery would accept the changed
+declaration. That cannot change the approved ledger bytes, the identity record, or the
+journal checkpoint, which the binding pins, so it is a stated limit rather than a defect.
