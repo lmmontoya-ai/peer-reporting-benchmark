@@ -77,7 +77,6 @@ from .live import (
     verify_consumed_ledger,
 )
 from .phase import _PhaseState
-from .review_plan import pressure_review_selection
 
 ADAPTER_VERSION = "peer-reporting-v11-live-review-v1"
 EXPORT_KIND = "peer_reporting_v11_live_review_export"
@@ -387,7 +386,8 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
 def export_live_review(directory: Path, output: Path, *, study_directory: Path | None = None,
                        prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None,
                        scorer: Callable[[dict], dict] | None = None,
-                       summarize: Callable[[list[dict]], dict] | None = None) -> dict:
+                       summarize: Callable[[list[dict]], dict] | None = None,
+                       pressure_review_selector: Callable[[list[dict]], dict] | None = None) -> dict:
     """Write a fresh researcher export: one sealed attempt per archived row and a sealed index.
 
     ``study_directory`` is the study directory in which the root is registered,
@@ -396,6 +396,8 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     plan's consumed-attempt ledger; the export refuses if an assignment ran in
     two roots. The index carries the study's registry listing and amendments,
     every journaled authorization with its evidence check, and ``review_plan_hash``.
+    Post-hoc scoring, summaries and level P review selection are injected callbacks;
+    this archive module never imports their implementation into the execution layer.
     """
     directory, output = Path(directory), Path(output)
     _require(not output.resolve().is_relative_to(directory.resolve())
@@ -434,7 +436,8 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     # Spec 12: rows excluded from analysis keep their scores but stay out of the summary's counts and cells.
     scored = [row["score"] for row in data["rows"] if row["score"] is not None and not row["excluded_from_analysis"]]
     summary = summarize(scored) if summarize is not None else None
-    pressure_selection = pressure_review_selection(scored) if any(record.get("level") == "P" for record in scored) else None
+    pressure_selection = (pressure_review_selector(scored) if pressure_review_selector is not None
+                          and any(record.get("level") == "P" for record in scored) else None)
     exclusions = sorted(row["assignment_id"] for row in data["rows"] if row["excluded_from_analysis"])
     atomic_json(output / "index.json", seal({
         "kind": EXPORT_KIND, "adapter_version": ADAPTER_VERSION, "phase": data["phase"],

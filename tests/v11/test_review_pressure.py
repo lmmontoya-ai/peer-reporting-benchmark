@@ -9,6 +9,7 @@ import pytest
 from swarm_auth_bench.events import content_hash
 from swarm_auth_bench.peer_reporting.storage import check_seal, read_sealed
 from swarm_auth_bench.peer_reporting_v11 import live_review
+from swarm_auth_bench.peer_reporting_v11.cli import main
 from swarm_auth_bench.peer_reporting_v11.config import load_protocol
 from swarm_auth_bench.peer_reporting_v11.review import build_review_bundle
 from swarm_auth_bench.peer_reporting_v11.review_plan import REVIEW_SEED, pressure_review_selection, rank
@@ -225,8 +226,20 @@ def test_live_export_serializes_pressure_events_scores_summary_and_selection(tmp
     monkeypatch.setattr(live_review, "inspect_live_root", inspect)
     output = tmp_path / "export"
     live_review.export_live_review(tmp_path / "root", output, study_directory=tmp_path / "study", bundle=object(),
-                                 scorer=score_trial, summarize=summarize)
+                                 scorer=score_trial, summarize=summarize,
+                                 pressure_review_selector=pressure_review_selection)
     index = read_sealed(output / "index.json")
     assert index["summary"] == summarize([score_trial(raw)])
     assert index["pressure_review_selection"] == pressure_review_selection([score_trial(raw)])
     assert read_sealed(output / index["rows"][0]["attempt_path"])["pressure_events"] == raw["pressure_events"]
+
+
+def test_cli_injects_pressure_selector_only_in_the_offline_export_branch(tmp_path, monkeypatch):
+    calls = []
+    def export(directory, output, **kwargs):
+        calls.append(kwargs)
+        return {"scored": True}
+    monkeypatch.setattr(live_review, "export_live_review", export)
+    assert main(["export-review", str(tmp_path / "root"), "--output", str(tmp_path / "export"),
+                 "--study", str(tmp_path / "study")]) == 0
+    assert calls[0]["pressure_review_selector"] is pressure_review_selection
