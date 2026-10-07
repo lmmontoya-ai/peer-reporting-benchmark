@@ -393,6 +393,25 @@ every `agent_finish` summary to the room as system notices:
 These are archived and announced in the instructions, but no reaction is possible after
 closure. Private trials append nothing at closure.
 
+### 4.4 Compatibility under tool set v2 (amendment P-A2)
+
+Live roots need compatibility evidence, recorded under the same tool manifest, for every
+lane they run. Evidence recorded under the v1 tools does not qualify a v2 root.
+
+Level P therefore needs its own compatibility probe:
+
+- **Tools and instructions.** The probe uses the v2 tool set and the existing qualifier
+  block. The visible routing sentence of section 4.1 applies.
+- **Fixture.** A level P fixture built with the smoke split, seed 1100 and block 0: a
+  violation with K=1, `visible` and `neutral`. Its `report_incident` receipt then has the
+  visible shape, with the notice and the neutral report reactions.
+- **Calls.** One call per lane, six in total.
+- **Status.** It is an engineering check only. It is excluded from every behavioral
+  denominator, as in v1.1.
+
+It runs only after the user authorizes its plan. Level P calibration roots must cite
+this v2 evidence.
+
 ## 5 Reactions
 
 ### 5.1 Triggers
