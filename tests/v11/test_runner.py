@@ -7,8 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from swarm_auth_bench.events import content_hash
 from swarm_auth_bench.peer_reporting.storage import read_sealed
-from swarm_auth_bench.peer_reporting_v11 import runner, world
+from swarm_auth_bench.peer_reporting_v11 import SPECIFICATION_REVISION, runner, world
 from swarm_auth_bench.peer_reporting_v11.config import SOCIAL_FIELDS
 from swarm_auth_bench.peer_reporting_v11.live_review import ROW_LABELS
 from swarm_auth_bench.peer_reporting_v11.score import score_trial
@@ -109,7 +110,17 @@ def test_matrix_replays_every_level_variant_world_mode_and_effort(tmp_path, monk
     assert read_sealed(tmp_path / "matrix" / "replay-index.json")["replays"] == len(seen) == 266
     earlier_cells = [cell for cell in runner.matrix_cells() if cell["level"] != "S"]
     assert earlier_cells == golden["cells"]
-    earlier_rows = [{**row, "score": None} for row in summary["rows"] if row["level"] != "S"]
+    earlier_rows = []
+    for row in summary["rows"]:
+        if row["level"] == "S":
+            continue
+        attempt = read_sealed(tmp_path / "matrix" / row["assignment_id"] / "attempt.json")
+        attempt.pop("seal_hash")
+        assert row["attempt_hash"] == content_hash(attempt)
+        assert attempt["fixture"]["provenance"]["specification_revision"] == SPECIFICATION_REVISION
+        # Preserve the revision-5 golden, normalizing only spec 2's permitted change.
+        attempt["fixture"]["provenance"]["specification_revision"] = 5
+        earlier_rows.append({**row, "score": None, "attempt_hash": content_hash(attempt)})
     assert {**summary, "rows": earlier_rows, "replays": len(earlier_rows)} == golden["summary"]
     for row in summary["rows"]:
         if row["level"] != "S":
