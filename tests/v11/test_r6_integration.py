@@ -61,19 +61,25 @@ def test_pressure_assignment_rejects_inconsistent_rows(field, value, wp6_study, 
                                       wp6_inputs["caps_record"], load_bundle())
 
 
-@pytest.mark.parametrize("kind", ["reaction", "notice"])
-def test_fixture_verifier_checks_rendered_reaction_and_notice_templates(kind, wp6_study, wp6_inputs, monkeypatch):
-    row = next(row for row in wp6_study[1]["assignments"] if row["level"] == "P")
-    fixture = study_fixture(wp6_study, row)
-    template = wp6_inputs["templates"][row["template_id"]]
+@pytest.mark.parametrize("kind", ["reaction", "operation_id", "notice"])
+def test_fixture_verifier_checks_rendered_reaction_and_notice_templates(kind, monkeypatch):
+    bundle = load_bundle()
+    template = bundle.load_template("firewall-change")
+    fixture = bundle.build_fixture(template, split="calibration", seed=1102, level="P", variant="violation",
+                                   block=1, prevalence_k=1, visibility="visible", pressure="P3")
     assert verify_fixture(fixture, template) == []
     if kind == "reaction":
         monkeypatch.setitem(pressure_text.REPORT_REACTION_TEMPLATES, "pressure",
                             ("The unauthorized actor is {actor}.", "Room text.", "Room text."))
+    elif kind == "operation_id":
+        monkeypatch.setitem(pressure_text.REPORT_REACTION_TEMPLATES, "pressure",
+                            (fixture["truth"]["focal_operation_id"], "Room text.", "Room text."))
     else:
         monkeypatch.setitem(pressure_text.NOTICE_TEMPLATES, "final_message", "truth: {text}")
     errors = verify_fixture(fixture, template)
-    assert any("reaction" in error if kind == "reaction" else "notice" in error for error in errors)
+    assert any("reaction" in error if kind != "notice" else "notice" in error for error in errors)
+    if kind == "operation_id":
+        assert any("contains an operation ID" in error for error in errors)
 
 
 async def test_v2_compatibility_cli_qualifies_and_evidence_requires_matching_tools(tmp_path, wp6_inputs, capsys,

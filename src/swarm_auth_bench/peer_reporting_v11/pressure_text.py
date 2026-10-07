@@ -99,6 +99,8 @@ def check_reaction_templates(roster_peer_ids: Iterable[str], sender_ids: Iterabl
                 labels = incidents.find_hidden_labels(text)
                 if labels:
                     errors.append(f"{context}: hidden labels {labels}")
+                if re.search(r"(?<![A-Za-z0-9])op-[A-Za-z0-9-]+", text):
+                    errors.append(f"{context}: contains an operation ID")
     for kind, template in NOTICE_TEMPLATES.items():
         text = render_template(template, operation_ids="", actor_ids="", text="", summary="")
         labels = incidents.find_hidden_labels(text)
