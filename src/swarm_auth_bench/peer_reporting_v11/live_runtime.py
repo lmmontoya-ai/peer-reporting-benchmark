@@ -58,7 +58,7 @@ from ..runtime import (
     RuntimeProtocolError,
     TurnResult,
 )
-from .bundle import ProtocolBundle
+from .bundle import ProtocolBundle, tools_for_levels
 from .lanes import PROVIDER_STALLED, PROVIDER_UNAVAILABLE, validate_effort, validate_world_mode
 
 ADAPTER_VERSION = "peer-reporting-v11-live-runtime-v1"
@@ -826,6 +826,7 @@ async def run_live_observer(
     started = clock()
     if type(instructions) is not str or not instructions:
         raise ValueError("exact nonempty observer instructions are required")
+    bundle = tools_for_levels(bundle, [(fixture.get("parameters") or {}).get("level")])
     validate_world_mode(world_mode)
     validate_preflight(requested_model, caps, qualification, runtime, reasoning_effort=reasoning_effort, bundle=bundle)
     runtime = runtime or V11PeerRuntime(model=requested_model, reasoning_effort=reasoning_effort)
@@ -1008,6 +1009,22 @@ async def run_live_observer(
         output.setdefault("delivery_evidence", "durably_stored_finish_request"
                           if output["source_kind"] == "finish_summary" else "completed_assistant_item"
                           if output.get("complete") else "visible_assistant_delta")
+    if (fixture.get("parameters") or {}).get("level") == "P" and fixture["parameters"]["visibility"] == "visible":
+        try:
+            controller.world.store_closure_notices(
+                [output["text"] for output in outputs if output["source_kind"] == "final_response"
+                 and output.get("phase") in {None, "final_answer"}],
+                [output["text"] for output in outputs if output["source_kind"] == "finish_summary"])
+            state, checkpoint = _audited_world(controller)
+        except Exception as error:
+            checkpoint = None
+            controller.queue_reconciled = False
+            controller.failures.append(f"closure notices failed: {type(error).__name__}: {error}")
+            # Retain only audited durable evidence after a failed atomic write.
+            try:
+                state = controller.bundle.audit_state(controller.world.directory)
+            except (OSError, ValueError, TypeError, KeyError):
+                state = controller.world.snapshot()
     reply_ids = {reservation["reply_event_id"] for reservation in state["reply_reservations"]}
     acknowledged_replies = sorted({message["event_id"] for receipt in controller.receipts
                                    if receipt["tool"] == "read_channel" and receipt["result"].get("status") == "ok"

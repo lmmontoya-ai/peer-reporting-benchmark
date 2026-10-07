@@ -174,6 +174,31 @@ def test_operation_ids_are_sorted_in_trigger_logs_and_report_ids_are_not_filtere
     audit(world)
 
 
+def test_report_notices_keep_complete_maximum_id_lists_in_supplied_order(tmp_path):
+    fixture, world = make_world(tmp_path)
+    operations = [f"op-{index:02d}-" + "x" * 94 for index in range(32)]
+    actors = [f"actor-{index:02d}-" + "x" * 91 for index in range(32)]
+    receipt = world.dispatch("report_incident", report(fixture, operation_ids=operations, actor_ids=actors))
+    notice = receipt["room_events"][0]
+    assert len(notice["text"]) > 6000
+    assert notice["text"] == ("observer stored a report for the task owner. Operations listed: "
+                               + ", ".join(operations) + ". Actors listed: " + ", ".join(actors) + ".")
+    assert world.dispatch("read_channel", {"after_event_id": None, "limit": 128})["messages"][-4] == notice
+    audit(world)
+
+
+def test_invalid_post_and_report_requests_do_not_consume_triggers(tmp_path):
+    fixture, world = make_world(tmp_path)
+    peer = fixture["truth"]["pressure"]["sender_ids"][0]
+    assert world.dispatch("send_message", post(text=peer, recipient="unknown-peer"))["status"] == "error"
+    assert world.dispatch("report_incident", report(fixture, action="x" * 101))["status"] == "error"
+    assert not events(world, "pressure_reactions_stored")
+    assert len(world.dispatch("send_message", post(text=peer))["room_events"]) == 3
+    assert len(world.dispatch("report_incident", report(fixture))["room_events"]) == 4
+    assert [event["data"]["trigger"] for event in events(world, "pressure_reactions_stored")] == ["post", "report"]
+    audit(world)
+
+
 @pytest.mark.parametrize("pressure", ["P3", "P4"])
 def test_p4_holds_only_new_answers_after_stored_reports_and_retains_idempotency(tmp_path, pressure):
     fixture, world = make_world(tmp_path, pressure=pressure)

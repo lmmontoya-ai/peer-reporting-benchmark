@@ -116,7 +116,7 @@ from ..peer_reporting.score import VALID_CLOSE_KINDS
 from ..peer_reporting.storage import atomic_json, check_seal, read_sealed, safe_child, seal
 from ..runtime import SUPPORTED_CODEX_VERSION
 from . import PROTOCOL_ID, SPECIFICATION_REVISION, live_runtime
-from .bundle import ProtocolBundle, load_bundle, require_v11_tools
+from .bundle import ProtocolBundle, load_bundle, require_v11_tools, tools_for_levels
 from .lanes import (
     BOUNDED_USAGE,
     PROMPT_CONDITIONS,
@@ -367,7 +367,8 @@ def _transport_checks(result: dict, *, fixture: dict, entry: dict, preflight: di
                              and world.get("world_mode") == entry["world_mode"]
                              and world.get("max_tool_requests") == TOOL_REQUEST_CAP),
         "reviewed_catalog": catalog.get("catalog_sha256") == reviewed_catalog(model)[1]["catalog_sha256"],
-        "exact_tool_manifest": (result.get("tool_manifest_hash") == bundle.tool_manifest_hash
+        "exact_tool_manifest": (result.get("tool_schema_version") == bundle.schema_version
+                                and result.get("tool_manifest_hash") == bundle.tool_manifest_hash
                                 and result.get("tool_descriptors_hash") == bundle.tool_descriptors_hash
                                 and result.get("wire_tool_specs_hash") == bundle.wire_tool_specs_hash),
         "world_bound_to_attempt": (world.get("trial_id") == attempt_id and world.get("packet_sha256")
@@ -552,6 +553,18 @@ def _binding_fields(bundle: ProtocolBundle, models: list[str]) -> dict:
     }
 
 
+def _tool_set_for_plan(plan: dict, bundle: ProtocolBundle) -> ProtocolBundle:
+    """Select the sealed tool version and verify every tools-only binding."""
+    selected = bundle.tool_set(plan["tool_schema_version"])
+    expected = {"tool_manifest_hash": selected.tool_manifest_hash,
+                "tool_descriptors_hash": selected.tool_descriptors_hash,
+                "wire_tool_specs_hash": selected.wire_tool_specs_hash}
+    changed = sorted(key for key, value in expected.items() if plan.get(key) != value)
+    if changed:
+        raise LivePhaseError(f"sealed tool set differs from its version; changed bindings: {changed}")
+    return selected
+
+
 def _messages_hash(instructions: str, fixture: dict) -> str:
     return content_hash([{"role": "system", "content": instructions}, {"role": "user", "content": fixture["packet"]}])
 
@@ -580,6 +593,7 @@ def _assemble(phase: str, revision: str, caps_record: dict, bundle: ProtocolBund
               smoke_assignment_ids: list[str] | None = None, review_plan_hash: str | None = None,
               selected_arms: list[str] | None = None) -> tuple[dict, dict, dict]:
     """Group entries into lanes, derive lane caps, and return (top plan, lane plans, fixtures)."""
+    bundle = tools_for_levels(bundle, [entry["level"] for entry in entries])
     validate_identifier(revision, "revision")
     if selected_arms is not None:
         selected_arms = validate_arm_selection(phase, selected_arms)
@@ -727,7 +741,7 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
                           review_plan_hash: str | None = None, selected_arms: list[str] | None = None
                           ) -> tuple[dict, dict, dict]:
     """Seal calibration, smoke, or collection rows into lanes. Nothing is written or called."""
-    bundle = require_v11_tools(bundle or load_bundle())
+    bundle = tools_for_levels(require_v11_tools(bundle or load_bundle()), [row.get("level") for row in rows])
     caps_record = validate_caps_record(caps_record, require_frozen=False)
     entries = validate_assignment_rows(phase, rows, fixtures, caps_record, bundle)
     used = {entry["fixture_id"]: fixtures[entry["fixture_id"]] for entry in entries}
@@ -1520,6 +1534,8 @@ def consumed_attempts_in_root(directory: Path, *, bundle: ProtocolBundle | None 
     """
     directory = Path(directory)
     plan = read_live_plan(directory)
+    if bundle is not None:
+        bundle = _tool_set_for_plan(plan, bundle)
     consumed: set[str] = set()
     journals = {}
     for lane in plan["lanes"]:
@@ -1866,6 +1882,7 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
     bundle = bundle or load_bundle()
     directory = Path(directory)
     plan = read_live_plan(directory)
+    bundle = _tool_set_for_plan(plan, bundle)
     if plan.get("consumed_attempts") is None:
         if study_directory is not None:
             raise ValueError("compatibility roots have no study registration")
@@ -1876,13 +1893,17 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
         abandoned = {entry["plan_hash"] for entry in registered_roots(study_directory)
                      if entry["state"] == "abandoned"}
     templates: dict[str, dict] = {}
+    levels = set()
     for fixture_id in plan["fixtures"]:
         fixture = read_root_fixture(directory, plan, fixture_id)
+        levels.add(fixture["parameters"]["level"])
         template_id = fixture["parameters"]["template_id"]
         template = templates.get(template_id) or templates.setdefault(template_id, bundle.load_template(template_id))
         errors = bundle.verify_fixture(fixture, template)
         if errors:
             raise EvidenceError(f"fixture {fixture_id} failed verification: {errors}")
+    if tools_for_levels(bundle, levels).schema_version != bundle.schema_version:
+        raise EvidenceError("root fixture levels differ from its sealed tool version")
     reports, counts, unreconciled, arms = {}, {}, [], set()
     for lane in plan["lanes"]:
         lane_dir = safe_child(directory, lane["path"])
@@ -1896,6 +1917,8 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
         arms |= {entry["arm"] for entry in lane_plan["planned_order"]}
         for entry in lane_plan["planned_order"]:
             fixture = read_root_fixture(directory, plan, entry["fixture_id"])
+            if entry["level"] != fixture["parameters"]["level"]:
+                raise EvidenceError(f"{entry['entry_id']}: tool-set level differs from its fixture")
             if (content_hash(fixture) != entry["fixture_hash"]
                     or _messages_hash(entry["instructions"], fixture) != entry["instructions_and_roles_hash"]):
                 raise EvidenceError(f"{entry['entry_id']}: lane input differs from its sealed identity")
@@ -2130,6 +2153,7 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
         if unknown:
             raise ValueError(f"the study has no {phase} rows of arms {unknown}; its {phase} arms are {available}")
         rows = [row for row in rows if row["arm"] in selected_arms]
+    bundle = tools_for_levels(bundle, [row["level"] for row in rows])
     ledger = prior_root_ledger(prior_roots, phase=phase, source=source, study_directory=study_directory,
                                bundle=bundle)
     consumed = set(ledger["consumed_attempt_ids"])
@@ -2214,6 +2238,7 @@ async def run_live_phase(
     bundle = require_v11_tools(bundle or load_bundle())
     directory = Path(directory)
     plan = read_live_plan(directory)
+    bundle = _tool_set_for_plan(plan, bundle)
     record = validate_caps_record(caps_record, require_frozen=True)
     if content_hash(record) != plan["caps_hash"] or record != plan["caps"]:
         raise LivePhaseError("supplied caps differ from the sealed live plan; no model session was created")
@@ -2395,6 +2420,7 @@ async def reconcile_cleanup(directory: Path, attempt_ids: list[str] | tuple, *, 
     bundle = require_v11_tools(bundle or load_bundle())
     directory = Path(directory)
     plan = read_live_plan(directory)
+    bundle = _tool_set_for_plan(plan, bundle)
     check = environment_check or verify_live_environment
     with ExitStack() as stack:
         stack.enter_context(_exclusive(directory / COORDINATOR_LOCK))  # a running root refuses
