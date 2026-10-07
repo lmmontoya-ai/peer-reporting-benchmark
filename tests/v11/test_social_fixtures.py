@@ -480,11 +480,16 @@ def test_social_v_operation_ids_match_fixed_goldens(template_id, block, difficul
 def test_independent_verifier_rejects_mutated_generator_during_regeneration(
         monkeypatch, template_id, before, after, diagnostic):
     baseline = social_fixture(template_id, prevalence_k=1)
-    source = inspect.getsource(ladder_module._social_content)
+    name = "_social_content"
+    source = inspect.getsource(getattr(ladder_module, name))
+    if before not in source:
+        # S and P now share this operation constructor. Mutate the same rule there.
+        name = "_social_operations"
+        source = inspect.getsource(getattr(ladder_module, name))
     assert source.count(before) == 1
     namespace = dict(vars(ladder_module))
     exec(compile(source.replace(before, after), ladder_module.__file__, "exec"), namespace)
-    monkeypatch.setattr(ladder_module, "_social_content", namespace["_social_content"])
+    monkeypatch.setattr(ladder_module, name, namespace[name])
     fixture = social_fixture(template_id, prevalence_k=1)
     assert fixture != baseline
     # The mutation remains installed for parent and exact-fixture regeneration.

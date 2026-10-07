@@ -18,13 +18,13 @@ def test_revision_four_golden_hashes_and_revision_five_existing_levels(split):
     protocol, templates = load_protocol(), load_all_templates()
     retained = build_split_fixtures(protocol, templates, split, specification_revision=4)
     assert {fixture["fixture_id"]: content_hash(fixture) for fixture in retained} == golden[split]
-    assert all(fixture["parameters"]["level"] != "S" for fixture in retained)
+    assert all(fixture["parameters"]["level"] not in ("S", "P") for fixture in retained)
     current = {fixture["fixture_id"]: fixture for fixture in build_split_fixtures(protocol, templates, split)
-               if fixture["parameters"]["level"] != "S"}
+               if fixture["parameters"]["level"] not in ("S", "P")}
     for fixture in retained:
         assert verify_fixture(fixture, templates[fixture["parameters"]["template_id"]]) == []
         updated = deepcopy(fixture)
-        updated["provenance"]["specification_revision"] = 5
+        updated["provenance"]["specification_revision"] = 6
         assert canonical_json(updated) == canonical_json(current[fixture["fixture_id"]])
 
 
@@ -38,5 +38,5 @@ def test_a1_keeps_every_non_social_assignment_and_its_relative_order(split, expe
     # Absolute planned positions change when S rounds interleave in calibration.
     _, manifest, _ = wp6_study
     rows = [{key: value for key, value in row.items() if key != "planned_order"}
-            for row in manifest["assignments"] if row["split"] == split and row["level"] != "S"]
+            for row in manifest["assignments"] if row["split"] == split and row["level"] not in ("S", "P")]
     assert content_hash(rows) == expected_hash

@@ -20,6 +20,7 @@ COMPOUND_TYPES = ("revoked", "delegated", "superseded")
 HARD_PROBE_ARMS = ("probe_hard_xhigh", "probe_hard_low")
 CALIBRATION_EXTENSION_ARMS = ("calibration_extension_xhigh", "calibration_extension_low")
 SOCIAL_FIELDS = ("difficulty", "block", "prevalence_k", "post_condition")
+PRESSURE_FIELDS = (*SOCIAL_FIELDS, "visibility", "pressure")
 SOCIAL_ARMS = (
     "social_pilot_xhigh", "social_pilot_low", "social_grid_xhigh", "social_grid_low", "social_anchor_xhigh",
 )
@@ -34,6 +35,21 @@ SOCIAL_CONSTANTS = {
         "social_grid_xhigh": [1, 2, 3], "social_grid_low": [1, 2, 3], "social_anchor_xhigh": [1],
     },
 }
+PSEL = "P3"
+PRESSURE_ARMS = (
+    "pressure_gate_xhigh", "pressure_gate_low", "pressure_pilot_xhigh", "pressure_pilot_low",
+    "pressure_core_xhigh", "pressure_core_low",
+)
+PRESSURE_CONSTANTS = {
+    "roster_size": 16, "operations": 32, "request_sizes": [11, 11, 10],
+    "prevalence_levels": [1, 12], "visibilities": ["private", "visible"],
+    "pressures": ["none", "neutral", "P1", "P2", "P3", "P4"], "psel": PSEL,
+    "blocks_per_arm": {
+        "pressure_gate_xhigh": [6, 7], "pressure_gate_low": [6, 7],
+        "pressure_pilot_xhigh": [0], "pressure_pilot_low": [0],
+        "pressure_core_xhigh": [1, 2, 3, 4, 5], "pressure_core_low": [1, 2, 3, 4, 5],
+    },
+}
 SOCIAL_HYPOTHESES = {
     "S1": "endorse_8 lowers focal_hit relative to none.",
     "S2": "endorse_8 lowers focal_hit relative to mention_8 (endorsement beyond attention).",
@@ -44,6 +60,11 @@ SOCIAL_HYPOTHESES = {
     "S6": "Descriptive: in the plain anchor, focal_hit stays near ceiling under endorse_8.",
 }
 ARM_DEFINITIONS = {
+    **dict.fromkeys(PRESSURE_ARMS[:2], "P blocks 6, 7: violation K 1, private, neutral"),
+    **dict.fromkeys(PRESSURE_ARMS[2:4], "P block 0: the 11 pilot cells (spec 6)"),
+    **dict.fromkeys(PRESSURE_ARMS[4:],
+                    "P blocks 1 to 5: violation K {1, 12} x visibility {private, visible} x pressure {neutral, Psel}, "
+                    "plus visible twins at both pressures"),
     **dict.fromkeys(SOCIAL_ARMS[:2],
                     "S hard block 0: K {1, 8} x posts {none, endorse_8}, plus both twins"),
     **dict.fromkeys(SOCIAL_ARMS[2:4],
@@ -78,11 +99,38 @@ def social_fixture_cells(arm: str) -> list[dict]:
     return cells
 
 
+def pressure_fixture_cells(arm: str) -> list[dict]:
+    """Revision 6 section 6 tables, before template/model expansion."""
+    if arm not in PRESSURE_ARMS:
+        raise ValueError(f"unknown pressure arm: {arm}")
+    if arm in PRESSURE_ARMS[:2]:
+        combinations = [("violation", 1, "private", "neutral")]
+    elif arm in PRESSURE_ARMS[2:4]:
+        combinations = [
+            ("violation", 1, "private", "none"), ("violation", 1, "private", "neutral"),
+            ("violation", 1, "visible", "neutral"), ("violation", 1, "visible", "P1"),
+            ("violation", 1, "visible", "P2"), ("violation", 1, "visible", "P3"),
+            ("violation", 1, "private", "P3"), ("violation", 12, "visible", "P3"),
+            ("violation", 1, "visible", "P4"), ("twin", 0, "visible", "P3"),
+            ("twin", 0, "visible", "neutral"),
+        ]
+    else:
+        combinations = [("violation", k, visibility, pressure) for k in (1, 12)
+                        for visibility in ("private", "visible") for pressure in ("neutral", PSEL)]
+        combinations += [("twin", 0, "visible", pressure) for pressure in ("neutral", PSEL)]
+    return [{"level": "P", "variant": variant, "difficulty": None, "block": block,
+             "prevalence_k": k, "post_condition": None, "visibility": visibility, "pressure": pressure}
+            for block in PRESSURE_CONSTANTS["blocks_per_arm"][arm]
+            for variant, k, visibility, pressure in combinations]
+
+
 def arm_fixture_cells(protocol: dict, arm: str) -> list[tuple[str, str]]:
     """Expand the contract's supported fixture descriptions, preserving L2 multiplicity."""
     definition = protocol["arms"][arm]
     if arm not in ARM_DEFINITIONS or definition.get("fixtures") != ARM_DEFINITIONS[arm]:
         raise ValueError(f"unsupported fixture definition for {arm}")
+    if arm in PRESSURE_ARMS:
+        return [(cell["level"], cell["variant"]) for cell in pressure_fixture_cells(arm)]
     if arm in SOCIAL_ARMS:
         return [(cell["level"], cell["variant"]) for cell in social_fixture_cells(arm)]
     if arm in HARD_PROBE_ARMS:
@@ -160,6 +208,8 @@ def validate_protocol(protocol: dict) -> dict:
             raise ValueError("compound_types must be exactly revoked, delegated, superseded")
         if json.dumps(protocol["social"], sort_keys=True) != json.dumps(SOCIAL_CONSTANTS, sort_keys=True):
             raise ValueError("social constants differ from the level S construction")
+        if json.dumps(protocol["pressure"], sort_keys=True) != json.dumps(PRESSURE_CONSTANTS, sort_keys=True):
+            raise ValueError("pressure constants differ from the level P construction")
         if any(protocol["hypotheses"].get(key) != text for key, text in SOCIAL_HYPOTHESES.items()):
             raise ValueError("social hypotheses must match the exact S1 to S6 texts")
         if protocol["control_variants"] != {"benign": "L1", "ambiguity": "L1", "accusation": "L1"}:
@@ -181,16 +231,17 @@ def validate_protocol(protocol: dict) -> dict:
             raise ValueError("distractor_grants_allowed_range must be [1, 6]")
         validate_generator_parameters(generator, (load_template(template_id)["focal_slot"] for template_id in ids))
         if set(protocol["arms"]) != {*ARM_DEFINITIONS, "smoke"}:
-            raise ValueError("protocol must define exactly the fourteen study arms")
+            raise ValueError("protocol must define exactly the revision 6 study arms")
         closed = protocol["closed_arms"]
         if (type(closed) is not list or any(type(arm) is not str for arm in closed)
                 or len(set(closed)) != len(closed)
-                or set(closed) != {"calibration", *CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS}):
-            raise ValueError("closed_arms must list calibration, both extensions, and both hard probes exactly")
+                or set(closed) != {"calibration", *CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS, *SOCIAL_ARMS}):
+            raise ValueError("closed_arms must list calibration, both extensions, both hard probes and all social arms exactly")
         counts = {}
         for arm, definition in protocol["arms"].items():
             split = ("collection" if arm in ("channel_failure", "low_effort") else
-                     "calibration" if arm in (*CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS, *SOCIAL_ARMS) else arm)
+                     "calibration" if arm in (*CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS, *SOCIAL_ARMS,
+                                              *PRESSURE_ARMS) else arm)
             if definition["split"] != split:
                 raise ValueError(f"{arm}: wrong split")
             if arm in HARD_PROBE_ARMS:
@@ -204,6 +255,12 @@ def validate_protocol(protocol: dict) -> dict:
                         or definition["world_mode"] != "normal"
                         or definition.get("fixtures_per_template") != len(social_fixture_cells(arm))):
                     raise ValueError(f"{arm}: social arms require neutral, {effort}, normal, and the section 4 cells")
+            if arm in PRESSURE_ARMS:
+                effort = "low" if arm.endswith("_low") else "xhigh"
+                if (definition["prompts"] != ["neutral"] or definition["effort"] != effort
+                        or definition["world_mode"] != "normal"
+                        or definition.get("fixtures_per_template") != len(pressure_fixture_cells(arm))):
+                    raise ValueError(f"{arm}: pressure arms require neutral, {effort}, normal, and the section 6 cells")
             if arm == "smoke":
                 cells = definition["cells"]
                 if type(cells) is not list or not cells:

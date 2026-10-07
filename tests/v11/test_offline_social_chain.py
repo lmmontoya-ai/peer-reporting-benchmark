@@ -72,11 +72,11 @@ async def test_revision5_offline_study_three_roots_and_root_replay(tmp_path, wp6
     study = tmp_path / "study"
     assert main(["build-study", str(study), "--caps", str(caps_path)]) == 0
     built = json.loads(capsys.readouterr().out)
-    assert built["total_trials"] == 2166 and built["fixtures"] == 279 and built["live_model_calls"] == 0
+    assert built["total_trials"] == 2922 and built["fixtures"] == 405 and built["live_model_calls"] == 0
     assert main(["verify-study", str(study), "--caps", str(caps_path)]) == 0
     assert json.loads(capsys.readouterr().out)["valid"]
     manifest = read_sealed(study / STUDY_MANIFEST)
-    assert manifest["protocol"]["specification_revision"] == 5
+    assert manifest["protocol"]["specification_revision"] == 6
 
     # Six simulated compatibility lanes use the existing in-memory transport.
     # They do not launch a model process or run a behavioral phase.
@@ -96,14 +96,17 @@ async def test_revision5_offline_study_three_roots_and_root_replay(tmp_path, wp6
         ("anchor", ["social_anchor_xhigh"], 36),
     ):
         root = study / "roots" / name
-        arguments = ["build", str(root), "--phase", "calibration", "--caps", str(caps_path),
-                     "--study", str(study), "--revision", "offline-r5-" + name, "--compatibility", str(compat)]
-        for prior in roots:
-            arguments += ["--prior-root", str(prior)]
-        for arm in arms:
-            arguments += ["--arm", arm]
-        assert main(arguments) == 0
-        assert json.loads(capsys.readouterr().out)["maximum_live_calls"] == expected
+        # These consumed arms cannot be selected for another behavioral plan.
+        # Exercise their retained archive format through the offline row builder.
+        rows, fixtures, source = live.load_study(study, "calibration")
+        rows = [row for row in rows if row["arm"] in arms]
+        ledger = live.prior_root_ledger(roots, phase="calibration", source=source,
+                                       study_directory=study, bundle=bundle)
+        plan = live.build_assignment_plan("calibration", rows, fixtures, wp6_inputs["caps_record"],
+                                          revision="offline-r5-" + name, source=source,
+                                          gate_evidence={"test_only": True}, bundle=bundle,
+                                          consumed_attempts=ledger, selected_arms=sorted(arms))
+        live.prepare_live_root(root, plan, study_directory=study, prior_roots=roots, bundle=bundle)
         top = live.read_live_plan(root)
         assert top["maximum_live_calls"] == expected and top["selected_arms"] == sorted(arms)
         entries = [entry for lane in top["lanes"] for entry in

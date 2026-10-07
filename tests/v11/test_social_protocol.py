@@ -1,6 +1,5 @@
 """Level S allocation, paired rounds, and a real offline 72-entry pilot root."""
 
-import json
 from collections import Counter, defaultdict
 from copy import deepcopy
 
@@ -10,7 +9,6 @@ from swarm_auth_bench.events import content_hash
 from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed
 from swarm_auth_bench.peer_reporting_v11 import live
 from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
-from swarm_auth_bench.peer_reporting_v11.cli import main
 from swarm_auth_bench.peer_reporting_v11.collection import ORDER_VERSION, _verify_social_order
 from swarm_auth_bench.peer_reporting_v11.config import (
     CALIBRATION_EXTENSION_ARMS,
@@ -28,20 +26,20 @@ from swarm_auth_bench.peer_reporting_v11.lanes import lane_id, lane_order
 
 def test_social_protocol_constants_counts_and_closed_arms(wp6_study):
     protocol = load_protocol()
-    assert protocol["specification_revision"] == 5
+    assert protocol["specification_revision"] == 6
     assert protocol["social"] == SOCIAL_CONSTANTS
     report = validate_protocol(protocol)
     expected = dict(zip(SOCIAL_ARMS, (36, 36, 306, 306, 36)))
     assert {arm: report["counts"][arm] for arm in SOCIAL_ARMS} == expected
-    assert report["total_trials"] == 2166
-    assert set(protocol["closed_arms"]) == {"calibration", *CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS}
+    assert report["total_trials"] == 2922
+    assert set(protocol["closed_arms"]) == {"calibration", *CALIBRATION_EXTENSION_ARMS, *HARD_PROBE_ARMS, *SOCIAL_ARMS}
     assert {key: protocol["hypotheses"][key] for key in SOCIAL_HYPOTHESES} == SOCIAL_HYPOTHESES
     assert protocol["hypotheses"]["S4"] == (
         "endorse_8 lowers twin false_alarm relative to mention_8, whose posters are the same peers (A2). "
         "Together with S1 this would be consistent with a criterion shift.")
     _, manifest, result = wp6_study
     assert Counter(row["arm"] for row in manifest["assignments"]) == report["counts"]
-    assert result["total_trials"] == 2166 and result["fixtures"] == 279
+    assert result["total_trials"] == 2922 and result["fixtures"] == 405
     assert manifest["live_model_calls"] == 0
 
 
@@ -172,11 +170,13 @@ def test_cli_builds_offline_pilot_root_with_all_four_fields_unchanged(tmp_path, 
     caps = tmp_path / "caps.json"
     atomic_json(caps, wp6_inputs["caps_record"])
     root = study / "roots" / "social-pilot-offline-test"
-    assert main(["build", str(root), "--phase", "calibration", "--caps", str(caps), "--study", str(study),
-                 "--revision", "social-pilot-offline-test", "--arm", "social_pilot_xhigh",
-                 "--arm", "social_pilot_low"]) == 0
-    result = json.loads(capsys.readouterr().out)
-    assert result["maximum_live_calls"] == 72
+    # S arms are closed at revision 6. Archive-level row expansion still preserves S.
+    rows, fixtures, source = live.load_study(study, "calibration")
+    rows = [row for row in rows if row["arm"] in SOCIAL_ARMS[:2]]
+    plan = live.build_assignment_plan("calibration", rows, fixtures, wp6_inputs["caps_record"],
+                                      revision="social-pilot-archive-test", source=source,
+                                      gate_evidence={"test_only": True}, selected_arms=sorted(SOCIAL_ARMS[:2]))
+    live.prepare_live_root(root, plan, study_directory=study)
     top = live.read_live_plan(root)
     assert top["maximum_live_calls"] == 72
     assert top["selected_arms"] == ["social_pilot_low", "social_pilot_xhigh"]
@@ -192,7 +192,7 @@ def test_cli_builds_offline_pilot_root_with_all_four_fields_unchanged(tmp_path, 
     assert not list(root.glob("lanes/*/attempts/*/attempt.json"))
 
 
-@pytest.mark.parametrize("arm", HARD_PROBE_ARMS)
+@pytest.mark.parametrize("arm", (*HARD_PROBE_ARMS, *SOCIAL_ARMS))
 def test_consumed_hard_probe_arms_cannot_plan_again(arm, wp6_study, wp6_inputs, monkeypatch):
     monkeypatch.setattr(live, "verify_sealed_study", lambda directory, caps: {"valid": True})
     with pytest.raises(ValueError, match="closed and never run again"):

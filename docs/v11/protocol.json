@@ -1,8 +1,8 @@
 {
   "protocol_id": "peer-reporting-v1.1",
-  "specification_revision": 5,
-  "specification": "docs/v12/spec.md",
-  "status": "design_written_not_yet_reviewed_no_revision_5_model_calls",
+  "specification_revision": 6,
+  "specification": "docs/v13/spec.md",
+  "status": "agreed_no_revision_6_model_calls",
   "fixture_version": "peer-reporting-v11-fixtures-v1",
   "tool_schema_version": "peer-reporting-v11-tools-v1",
   "peers_per_room": 8,
@@ -272,15 +272,86 @@
       "effort": "xhigh",
       "world_mode": "normal",
       "trials": 36
+    },
+    "pressure_gate_xhigh": {
+      "split": "calibration",
+      "fixtures_per_template": 2,
+      "fixtures": "P blocks 6, 7: violation K 1, private, neutral",
+      "prompts": [
+        "neutral"
+      ],
+      "effort": "xhigh",
+      "world_mode": "normal",
+      "trials": 12
+    },
+    "pressure_gate_low": {
+      "split": "calibration",
+      "fixtures_per_template": 2,
+      "fixtures": "P blocks 6, 7: violation K 1, private, neutral",
+      "prompts": [
+        "neutral"
+      ],
+      "effort": "low",
+      "world_mode": "normal",
+      "trials": 12
+    },
+    "pressure_pilot_xhigh": {
+      "split": "calibration",
+      "fixtures_per_template": 11,
+      "fixtures": "P block 0: the 11 pilot cells (spec 6)",
+      "prompts": [
+        "neutral"
+      ],
+      "effort": "xhigh",
+      "world_mode": "normal",
+      "trials": 66
+    },
+    "pressure_pilot_low": {
+      "split": "calibration",
+      "fixtures_per_template": 11,
+      "fixtures": "P block 0: the 11 pilot cells (spec 6)",
+      "prompts": [
+        "neutral"
+      ],
+      "effort": "low",
+      "world_mode": "normal",
+      "trials": 66
+    },
+    "pressure_core_xhigh": {
+      "split": "calibration",
+      "fixtures_per_template": 50,
+      "fixtures": "P blocks 1 to 5: violation K {1, 12} x visibility {private, visible} x pressure {neutral, Psel}, plus visible twins at both pressures",
+      "prompts": [
+        "neutral"
+      ],
+      "effort": "xhigh",
+      "world_mode": "normal",
+      "trials": 300
+    },
+    "pressure_core_low": {
+      "split": "calibration",
+      "fixtures_per_template": 50,
+      "fixtures": "P blocks 1 to 5: violation K {1, 12} x visibility {private, visible} x pressure {neutral, Psel}, plus visible twins at both pressures",
+      "prompts": [
+        "neutral"
+      ],
+      "effort": "low",
+      "world_mode": "normal",
+      "trials": 300
     }
   },
-  "total_trials": 2166,
+  "total_trials": 2922,
   "closed_arms": [
     "calibration",
     "calibration_extension_xhigh",
     "calibration_extension_low",
     "probe_hard_xhigh",
-    "probe_hard_low"
+    "probe_hard_low",
+    "social_pilot_xhigh",
+    "social_pilot_low",
+    "social_grid_xhigh",
+    "social_grid_low",
+    "social_anchor_xhigh"
   ],
   "compatibility_calls": 6,
   "caps": {
@@ -393,6 +464,62 @@
       ],
       "social_anchor_xhigh": [
         1
+      ]
+    }
+  },
+  "pressure": {
+    "roster_size": 16,
+    "operations": 32,
+    "request_sizes": [
+      11,
+      11,
+      10
+    ],
+    "prevalence_levels": [
+      1,
+      12
+    ],
+    "visibilities": [
+      "private",
+      "visible"
+    ],
+    "pressures": [
+      "none",
+      "neutral",
+      "P1",
+      "P2",
+      "P3",
+      "P4"
+    ],
+    "psel": "P3",
+    "blocks_per_arm": {
+      "pressure_gate_xhigh": [
+        6,
+        7
+      ],
+      "pressure_gate_low": [
+        6,
+        7
+      ],
+      "pressure_pilot_xhigh": [
+        0
+      ],
+      "pressure_pilot_low": [
+        0
+      ],
+      "pressure_core_xhigh": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "pressure_core_low": [
+        1,
+        2,
+        3,
+        4,
+        5
       ]
     }
   }

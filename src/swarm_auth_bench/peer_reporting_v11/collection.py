@@ -19,11 +19,15 @@ from ..peer_reporting.storage import atomic_json, check_seal, safe_child, seal
 from .bundle import load_bundle
 from .config import (
     CALIBRATION_EXTENSION_ARMS,
+    PRESSURE_ARMS,
+    PRESSURE_CONSTANTS,
+    PRESSURE_FIELDS,
     SOCIAL_ARMS,
     SOCIAL_CONSTANTS,
     SOCIAL_FIELDS,
     SPLITS,
     arm_fixture_cells,
+    pressure_fixture_cells,
     social_fixture_cells,
     validate_protocol,
 )
@@ -101,8 +105,73 @@ def _verify_social_order(rows: list[dict], protocol: dict) -> None:
                     raise ValueError(f"{arm}: S within-lane order differs from the content hash order")
 
 
+def _pressure_worlds(protocol: dict, arm: str) -> list[tuple]:
+    return [(template, block) for template in protocol["templates"]["calibration"]
+            for block in PRESSURE_CONSTANTS["blocks_per_arm"][arm]]
+
+
+def _pressure_group(row: dict, arm: str) -> int:
+    if arm in PRESSURE_ARMS[:2]:
+        return 0
+    if arm in PRESSURE_ARMS[4:]:
+        return {1: 0, 12: 1, 0: 2}[row["prevalence_k"]]
+    pilot = pressure_fixture_cells(arm)
+    number = next(i + 1 for i, cell in enumerate(pilot) if all(
+        row[key] == cell[key] for key in ("variant", "prevalence_k", "visibility", "pressure")))
+    return 0 if number in (1, 2, 3, 4) else 1 if number in (5, 6, 7, 9) else 2
+
+
+def _verify_pressure_order(rows: list[dict], protocol: dict) -> None:
+    """Check section 6 coverage, whole groups, rotation and within-K core pairs."""
+    models, seed = protocol["models"], protocol["seeds"]["calibration"]
+    for arm in PRESSURE_ARMS:
+        selected = [row for row in rows if row["arm"] == arm]
+        if not selected:
+            continue
+        group_count = 1 if arm in PRESSURE_ARMS[:2] else 3
+        worlds, cells = _pressure_worlds(protocol, arm), pressure_fixture_cells(arm)
+        expected = Counter((template, model, *(cell[key] for key in ("variant", *PRESSURE_FIELDS)))
+                           for template in protocol["templates"]["calibration"] for model in models for cell in cells)
+        actual = Counter((row["template_id"], row["model"], *(row[key] for key in ("variant", *PRESSURE_FIELDS)))
+                         for row in selected)
+        identities = Counter((row["fixture_id"], row["model"]) for row in selected)
+        if actual != expected or set(identities.values()) != {1}:
+            raise ValueError(f"{arm}: P round order must cover every fixture-model exactly once")
+        if {row["round"] for row in selected} != set(range(group_count)):
+            raise ValueError(f"{arm}: P round indices differ from the group count")
+        groups = defaultdict(list)
+        for row in selected:
+            w = worlds.index((row["template_id"], row["block"]))
+            m = models.index(row["model"])
+            group = _pressure_group(row, arm)
+            if group != (row["round"] + m + w) % group_count:
+                raise ValueError(f"{arm}: P group must run whole with one model in one round under the rotation")
+            groups[w, m, group].append(row)
+        sizes = (1,) if group_count == 1 else (4, 4, 3) if arm in PRESSURE_ARMS[2:4] else (4, 4, 2)
+        if (len(groups) != len(worlds) * len(models) * group_count
+                or any(len(group) != sizes[g] or len({row["round"] for row in group}) != 1
+                       for (_, _, g), group in groups.items())):
+            raise ValueError(f"{arm}: P groups must run whole with one model in one round")
+        # The pilot uses counts, not pairs. Only core within-K contrasts share a group.
+        if arm in PRESSURE_ARMS[4:]:
+            pairs = defaultdict(list)
+            for row in selected:
+                pairs[row["template_id"], row["block"], row["model"], row["variant"], row["prevalence_k"]].append(row)
+            if any(len({row["round"] for row in paired}) != 1 or len({
+                _pressure_group(row, arm) for row in paired}) != 1 for paired in pairs.values()):
+                raise ValueError(f"{arm}: P within-K core pairs must fall within one group")
+        for round_index in range(group_count):
+            for m, model in enumerate(models):
+                lane = [row for row in selected if row["round"] == round_index and row["model"] == model]
+                hashes = [content_hash([ORDER_VERSION, seed, arm,
+                                       worlds.index((row["template_id"], row["block"])), m, row["fixture_id"]])
+                          for row in lane]
+                if hashes != sorted(hashes):
+                    raise ValueError(f"{arm}: P within-lane order differs from the content hash order")
+
+
 def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
-    """Run inherited spec 9 rounds, with the A1 rotation and lane order for S only."""
+    """Run inherited rounds, with the specified S and P rotations and lane order."""
     cells = {}
     arm_fixtures: dict[str, dict[str, dict]] = defaultdict(dict)
     for row in rows:
@@ -130,6 +199,19 @@ def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
                             raise ValueError("smoke cell must select exactly one fixture per template")
                         row = cells[arm, matching[0], model, cell["prompt"], cell["effort"], cell["world_mode"]]
                         scheduled.append((round_index, arm_index, cell_index, template_index, row))
+            continue
+        if arm in PRESSURE_ARMS:
+            worlds = _pressure_worlds(protocol, arm)
+            group_count = 1 if arm in PRESSURE_ARMS[:2] else 3
+            for round_index in range(group_count):
+                for m, model in enumerate(models):
+                    for fixture_id, fixture in fixtures.items():
+                        w = worlds.index((fixture["template_id"], fixture["block"]))
+                        if _pressure_group(fixture, arm) != (round_index + m + w) % group_count:
+                            continue
+                        row = cells[arm, fixture_id, model, "neutral", definition["effort"], definition["world_mode"]]
+                        order_key = content_hash([ORDER_VERSION, seed, arm, w, m, fixture_id])
+                        scheduled.append((round_index, arm_index, m, order_key, row))
             continue
         if arm in SOCIAL_ARMS:
             grid = arm in SOCIAL_ARMS[2:4]
@@ -181,6 +263,7 @@ def _interleave(rows: list[dict], protocol: dict, split: str) -> list[dict]:
     # The round is explicit so the live dispatcher can apply the spec 9 round barrier.
     result = [{**item[-1], "planned_order": position, "round": item[0]} for position, item in enumerate(ordered)]
     _verify_social_order(result, protocol)
+    _verify_pressure_order(result, protocol)
     return result
 
 
@@ -214,11 +297,15 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, ins
                 continue
             selected_cells = None if arm == "smoke" else set(arm_fixture_cells(protocol, arm))
             social_cells = social_fixture_cells(arm) if arm in SOCIAL_ARMS else []
+            pressure_cells = pressure_fixture_cells(arm) if arm in PRESSURE_ARMS else []
             for fixture in split_fixtures:
                 parameters = fixture["parameters"]
                 level, variant = parameters["level"], parameters["variant"]
                 if arm in SOCIAL_ARMS and not any(all(parameters[key] == value for key, value in cell.items())
                                                  for cell in social_cells):
+                    continue
+                if arm in PRESSURE_ARMS and not any(all(parameters[key] == value for key, value in cell.items())
+                                                   for cell in pressure_cells):
                     continue
                 if (arm in CALIBRATION_EXTENSION_ARMS and variant != "ambiguity"
                         and parameters["near_miss_type"] != calibration_types[parameters["template_id"]][0]):
@@ -232,7 +319,10 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, ins
                 else:
                     continue
                 for cell in cells:
-                    instructions = build_instructions(cell["prompt"], templates[parameters["template_id"]], policy)
+                    instruction_fields = ({"visibility": parameters["visibility"],
+                                           "held_submissions": parameters["pressure"] == "P4"} if level == "P" else {})
+                    instructions = build_instructions(cell["prompt"], templates[parameters["template_id"]], policy,
+                                                      **instruction_fields)
                     for model in protocol["models"]:
                         row = {key: parameters[key] for key in ("split", "template_id", "level", "variant",
                                                                 "near_miss_type")}
@@ -240,6 +330,8 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, ins
                             row["compound_type"] = parameters["compound_type"]
                         if level == "S":
                             row.update({key: parameters[key] for key in SOCIAL_FIELDS})
+                        if level == "P":
+                            row.update({key: parameters[key] for key in PRESSURE_FIELDS})
                         row.update(arm=arm, model=model, effort=cell["effort"], prompt_condition=cell["prompt"],
                                    world_mode=cell["world_mode"], fixture_id=fixture["fixture_id"],
                                    instructions=instructions)

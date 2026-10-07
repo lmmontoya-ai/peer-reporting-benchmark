@@ -83,7 +83,7 @@ async def test_real_study_live_export_and_human_review_chain(tmp_path, capsys, m
     study = tmp_path / "study"
     built_study = build_study(study, protocol=protocol, templates=load_all_templates(), caps_record=caps)
     manifest = read_sealed(study / STUDY_MANIFEST)
-    assert built_study["total_trials"] == 2166 and built_study["fixtures"] == 279
+    assert built_study["total_trials"] == 2922 and built_study["fixtures"] == 405
 
     compatibility = tmp_path / "compatibility"
     built = live.build_compatibility_plan(caps, revision="compat-v1", bundle=bundle)
