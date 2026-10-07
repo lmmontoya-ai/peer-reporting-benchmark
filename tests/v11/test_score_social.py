@@ -639,10 +639,10 @@ def test_export_live_review_serializes_social_scores_and_summary(tmp_path, monke
     root, output = tmp_path / "root", tmp_path / "export"
     raw = social_attempt(assignment_id="social-assignment", attempt_id="social-attempt")
     with_reports(raw, claim(raw))
-    plan = {"phase": "calibration", "seal_hash": "plan-hash", "maximum_live_calls": 1}
+    plan = {"phase": "calibration", "seal_hash": "plan-hash", "maximum_live_calls": 1, "lanes": []}
     for name, result in {
         "read_live_plan": plan, "root_registration": {}, "check_abandoned_root": None,
-        "lane_journals": [], "check_start_claims": [], "verify_consumed_ledger": [],
+        "lane_journals": {}, "check_start_claims": [], "verify_consumed_ledger": [],
         "planned_arms": ["social_grid_xhigh"], "check_arm_selection": ["social_grid_xhigh"],
         "journaled_authorizations": [], "study_registry_listing": [], "read_study_manifest": {},
     }.items():

@@ -393,6 +393,9 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     registration = root_registration(study_directory, plan, directory=directory, require_finalized=False)
     check_abandoned_root(directory, registration)
     journals = lane_journals(directory, plan)
+    from .ledger_repair import verify_root_ledger_repairs
+
+    ledger_repairs = verify_root_ledger_repairs(directory, plan, journals)
     start_claims = check_start_claims(study_directory, plan, directory, journals)
     ledger = verify_consumed_ledger(directory, plan, prior_roots, bundle=bundle, study_directory=study_directory)
     selected_arms = check_arm_selection(plan, planned_arms(directory, plan))
@@ -430,8 +433,11 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
         # Review packets recompute the frozen plan against the sealed manifest this root was built from.
         "study_manifest": read_study_manifest(study_directory),
         "analysis_exclusions": exclusions, "analysis_exclusion_count": len(exclusions),
+        "ledger_repairs": ledger_repairs,
+        "declared_deviations": [{"kind": "ledger_repaired", "lane_id": repair["lane_id"],
+                                 "repair_hash": repair["seal_hash"]} for repair in ledger_repairs],
     }))
     return {"output": str(output), "phase": data["phase"], "assignments": len(index),
             "attempts": sum("attempt_path" in row for row in index), "status_counts": data["status_counts"],
             "verified_model_observations": data["verified_model_observations"], "lane_errors": data["lane_errors"],
-            "scored": scorer is not None}
+            "scored": scorer is not None, "ledger_repairs": ledger_repairs}

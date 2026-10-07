@@ -1,7 +1,7 @@
 """v1.1 offline tools and explicitly authorized, capped live phases.
 
 Offline commands (validate, build, verify, replay, export-review, propose-caps,
-freeze-caps, abandon-root, reconcile-cleanup) never start a model session. Live commands (compatibility,
+freeze-caps, abandon-root, reconcile-cleanup, repair-ledger) never start a model session. Live commands (compatibility,
 calibration, smoke, collection)
 refuse to run without frozen caps equal to the sealed plan's caps and a sealed
 user execution authorization that names the exact plan.
@@ -172,6 +172,13 @@ def _parser() -> argparse.ArgumentParser:
                          help="attempt ID with cleanup debt (repeatable)")
     cleanup.add_argument("--reason", required=True)
     _study(cleanup, "study directory in which a behavioral root is registered")
+    repair = commands.add_parser("repair-ledger", help="A4: seal a unique, journal-exact single-bit budget ledger "
+                                                      "repair; no model call")
+    repair.add_argument("root", type=Path, help="the live root at its registered path")
+    repair.add_argument("--study", type=Path, required=True, help="study in which the root is registered")
+    repair.add_argument("--lane", required=True, help="lane ID in the sealed root")
+    repair.add_argument("--reason", required=True)
+    repair.add_argument("--approval-text", required=True)
     for name in ("build-study", "verify-study"):
         study = commands.add_parser(name, help="build or verify the sealed study offline; no model call")
         study.add_argument("directory", type=Path)
@@ -279,6 +286,11 @@ def _run(args: argparse.Namespace) -> dict:
 
         return asyncio.run(reconcile_cleanup(args.root, sorted(set(args.attempts)), reason=args.reason,
                                              study_directory=args.study, bundle=load_bundle()))
+    if args.command == "repair-ledger":
+        from .ledger_repair import repair_ledger
+
+        return repair_ledger(args.root, study_directory=args.study, lane_id=args.lane, reason=args.reason,
+                             approval_text=args.approval_text)
     if args.command == "build":
         from .live import STUDY_MANIFEST, build_phase_plan, prepare_live_root, validate_arm_selection
 
