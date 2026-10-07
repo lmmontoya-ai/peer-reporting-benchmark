@@ -11,6 +11,7 @@ import pytest
 
 from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, seal
 from swarm_auth_bench.peer_reporting_v11 import live_review
+from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
 from swarm_auth_bench.peer_reporting_v11.config import load_protocol, social_fixture_cells
 from swarm_auth_bench.peer_reporting_v11.score import (
     ENDPOINTS,
@@ -639,7 +640,10 @@ def test_export_live_review_serializes_social_scores_and_summary(tmp_path, monke
     root, output = tmp_path / "root", tmp_path / "export"
     raw = social_attempt(assignment_id="social-assignment", attempt_id="social-attempt")
     with_reports(raw, claim(raw))
-    plan = {"phase": "calibration", "seal_hash": "plan-hash", "maximum_live_calls": 1, "lanes": []}
+    bundle = load_bundle()
+    plan = {"phase": "calibration", "seal_hash": "plan-hash", "maximum_live_calls": 1, "lanes": [],
+            "tool_schema_version": bundle.schema_version, "tool_manifest_hash": bundle.tool_manifest_hash,
+            "tool_descriptors_hash": bundle.tool_descriptors_hash, "wire_tool_specs_hash": bundle.wire_tool_specs_hash}
     for name, result in {
         "read_live_plan": plan, "root_registration": {}, "check_abandoned_root": None,
         "lane_journals": {}, "check_start_claims": [], "verify_consumed_ledger": [],
@@ -655,7 +659,7 @@ def test_export_live_review_serializes_social_scores_and_summary(tmp_path, monke
                                               "attempt": raw, "score": scorer(raw), "excluded_from_analysis": False}]}
 
     monkeypatch.setattr(live_review, "inspect_live_root", inspect)
-    result = live_review.export_live_review(root, output, study_directory=tmp_path / "study", bundle=object(),
+    result = live_review.export_live_review(root, output, study_directory=tmp_path / "study", bundle=bundle,
                                            scorer=score_trial, summarize=summarize)
     assert result["attempts"] == 1 and result["scored"] is True
     index = read_sealed(output / "index.json")
