@@ -77,6 +77,7 @@ from .live import (
     verify_consumed_ledger,
 )
 from .phase import _PhaseState
+from .review_plan import pressure_review_selection
 
 ADAPTER_VERSION = "peer-reporting-v11-live-review-v1"
 EXPORT_KIND = "peer_reporting_v11_live_review_export"
@@ -94,7 +95,17 @@ def _labels(entry: dict, phase: str, lane: str) -> dict:
             "world_mode": entry["world_mode"], "prompt_condition": entry["prompt_condition"],
             **{key: entry[key] for key in ROW_LABELS},
             **({key: entry[key] for key in ("difficulty", "block", "prevalence_k", "post_condition")}
-               if entry["level"] == "S" else {})}
+               if entry["level"] == "S" else {}),
+            **({key: entry[key] for key in ("block", "prevalence_k", "visibility", "pressure")}
+               if entry["level"] == "P" else {})}
+
+
+def pressure_events(world: dict) -> list[dict]:
+    """C5: complete copies of P notices, reactions and held-answer events, in world order."""
+    return [deepcopy(event) for event in world["events"]
+            if event["kind"] in ("pressure_reactions_stored", "task_answer_held")
+            or (event["kind"] == "public_message_stored"
+                and event["data"]["message"]["source_kind"] in ("system_notice", "scripted_peer_reaction"))]
 
 
 def report_attempts(tool_requests: list[dict]) -> list[dict]:
@@ -121,6 +132,7 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
         "assignment_id": entry["entry_id"], "attempt_id": payload["attempt_id"], "primary": True,
         "attempt_number": 1, "fixture": fixture, "source_attempt_hash": content_hash(payload),
         "source_plan_hash": payload["plan_hash"], **_labels(entry, phase, lane),
+        **({"pressure_events": []} if fixture["truth"]["level"] == "P" else {}),
     }
     if result is None:
         return {**base, "eligible": False, "exposure_confirmed": False,
@@ -205,12 +217,15 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
                             "delivery_status": "read_channel_receipt_confirmed" if message["event_id"] in acknowledged
                             else "stored_reply_without_confirmed_read_receipt"})
     for original in result["observer_outputs"]:
+        if original["source_kind"] in ("system_notice", "scripted_peer_reaction"):
+            continue
         output = deepcopy(original)
         output.update(sequence=original["arrival_event_seq"], controller_sequence=original["arrival_event_seq"],
                       reply_to=None, audience="simulated_task_owner", delivery_status=original["delivery_evidence"])
         outputs.append(output)
     outputs.sort(key=lambda output: (output["controller_sequence"], output["elapsed_seconds"]))
     return {**base, "eligible": eligible, "exposure_confirmed": exposure, "termination_kind": termination,
+            **({"pressure_events": pressure_events(world)} if fixture["truth"]["level"] == "P" else {}),
             **({"overload_stage": result["overload_stage"]} if "overload_stage" in result else {}),
             "accepted_reports": [{"report_id": report["report_id"], "payload": deepcopy(report["report"])}
                                  for report in world["reports"]],
@@ -419,6 +434,7 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     # Spec 12: rows excluded from analysis keep their scores but stay out of the summary's counts and cells.
     scored = [row["score"] for row in data["rows"] if row["score"] is not None and not row["excluded_from_analysis"]]
     summary = summarize(scored) if summarize is not None else None
+    pressure_selection = pressure_review_selection(scored) if any(record.get("level") == "P" for record in scored) else None
     exclusions = sorted(row["assignment_id"] for row in data["rows"] if row["excluded_from_analysis"])
     atomic_json(output / "index.json", seal({
         "kind": EXPORT_KIND, "adapter_version": ADAPTER_VERSION, "phase": data["phase"],
@@ -430,6 +446,7 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
         "study_registry": study_registry_listing(study_directory), "start_claims": start_claims,
         "authorization_evidence": authorizations, "review_plan_hash": review_plan_hash,
         "selected_arms": selected_arms,
+        **({"pressure_review_selection": pressure_selection} if pressure_selection is not None else {}),
         # Review packets recompute the frozen plan against the sealed manifest this root was built from.
         "study_manifest": read_study_manifest(study_directory),
         "analysis_exclusions": exclusions, "analysis_exclusion_count": len(exclusions),
