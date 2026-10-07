@@ -453,26 +453,47 @@ class _Journal:
 
     def append(self, kind: str, **data: Any) -> dict:
         with self._lock:
-            if self._failure is not None:
-                raise LivePhaseError("phase journal failed; the phase must stop") from self._failure
-            record = {
-                "schema_version": 2, "run_id": self.run_id, "sequence": len(self.records), "kind": kind,
-                "agent_id": None, "wall_time": datetime.now(timezone.utc).isoformat(),
-                "elapsed_seconds": time.monotonic() - self.started, "logical_time": None,
-                "data": deepcopy(data), "previous_hash": self.last_hash,
-            }
-            record["hash"] = content_hash(record)
-            encoded = canonical_json(record) + "\n"
-            try:
-                if self._stream.write(encoded) != len(encoded):
-                    raise OSError("short journal write")
-                self._stream.flush()
-                os.fsync(self._stream.fileno())
-            except BaseException as error:
-                self._failure = error
-                raise
-            self.records.append(record)
-            return record
+            return self._append(self._prepare(kind, data))
+
+    def prepare(self, kind: str, **data: Any) -> dict:
+        """Build an event without writing it, for callers that must seal its bytes first."""
+        with self._lock:
+            return self._prepare(kind, data)
+
+    def _prepare(self, kind: str, data: dict) -> dict:
+        if self._failure is not None:
+            raise LivePhaseError("phase journal failed; the phase must stop") from self._failure
+        record = {
+            "schema_version": 2, "run_id": self.run_id, "sequence": len(self.records), "kind": kind,
+            "agent_id": None, "wall_time": datetime.now(timezone.utc).isoformat(),
+            "elapsed_seconds": time.monotonic() - self.started, "logical_time": None,
+            "data": deepcopy(data), "previous_hash": self.last_hash,
+        }
+        record["hash"] = content_hash(record)
+        return record
+
+    def append_prepared(self, record: dict) -> dict:
+        with self._lock:
+            return self._append(record)
+
+    def _append(self, record: dict) -> dict:
+        if self._failure is not None:
+            raise LivePhaseError("phase journal failed; the phase must stop") from self._failure
+        if (record.get("run_id") != self.run_id or record.get("sequence") != len(self.records)
+                or record.get("previous_hash") != self.last_hash
+                or record.get("hash") != content_hash({k: v for k, v in record.items() if k != "hash"})):
+            raise EvidenceError("prepared journal event differs from the current checkpoint")
+        encoded = canonical_json(record) + "\n"
+        try:
+            if self._stream.write(encoded) != len(encoded):
+                raise OSError("short journal write")
+            self._stream.flush()
+            os.fsync(self._stream.fileno())
+        except BaseException as error:
+            self._failure = error
+            raise
+        self.records.append(record)
+        return record
 
     def close(self) -> None:
         if not self._stream.closed:
