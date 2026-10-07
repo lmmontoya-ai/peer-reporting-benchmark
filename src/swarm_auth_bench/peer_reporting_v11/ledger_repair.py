@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..events import canonical_json, content_hash
-from ..long_events import GENESIS_HASH, iter_events
+from ..long_events import GENESIS_HASH, _iter_event_lines, iter_events
 from ..peer_reporting.budget import _locked, validate_ledger_identity, validate_ledger_state
 from ..peer_reporting.live import (
     INDEX_FILE,
@@ -354,9 +354,10 @@ def _binding_path(lane_dir: Path, binding_hash: str) -> Path:
 
 
 def _completion(record: dict) -> dict:
-    # Completion changes only status, so its seal is known before declaration.
-    # A crash after the append can match that declaration without appending twice.
-    return seal({**{key: value for key, value in record.items() if key != "seal_hash"}, "status": "complete"})
+    # The declaration bytes belong only to the prepared envelope. Excluding them
+    # avoids a circular hash and preserves the completed record's existing format.
+    return seal({**{key: value for key, value in record.items()
+                   if key not in {"seal_hash", "declaration_bytes"}}, "status": "complete"})
 
 
 def _declaration(relative: str, complete: dict) -> dict:
@@ -364,10 +365,56 @@ def _declaration(relative: str, complete: dict) -> dict:
             "corrupt_sha256": complete["corrupt_sha256"], "restored_sha256": complete["restored_sha256"]}
 
 
+def _prepared_declaration(record: dict, relative: str) -> tuple[bytes, dict]:
+    """Decode the sealed exact line and check its declaration and hash-chain fields."""
+    encoded = record.get("declaration_bytes")
+    if type(encoded) is not str or not re.fullmatch(r"(?:[0-9a-f]{2})+", encoded):
+        raise EvidenceError("prepared repair has invalid declaration bytes")
+    raw = bytes.fromhex(encoded)
+    try:
+        event = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeError) as error:
+        raise EvidenceError("prepared repair has invalid declaration bytes") from error
+    fields = {"schema_version", "run_id", "sequence", "kind", "agent_id", "wall_time",
+              "elapsed_seconds", "logical_time", "data", "previous_hash", "hash"}
+    expected = {"schema_version": 2, "run_id": record["lane_plan_hash"],
+                "sequence": record["journal"]["count"], "kind": "ledger_repaired", "agent_id": None,
+                "logical_time": None, "previous_hash": record["journal"]["final_hash"],
+                "data": _declaration(relative, _completion(record))}
+    if (type(event) is not dict or set(event) != fields
+            or raw != (canonical_json(event) + "\n").encode("utf-8")
+            or any(canonical_json(event[key]) != canonical_json(value) for key, value in expected.items())
+            or event["hash"] != content_hash({key: value for key, value in event.items() if key != "hash"})):
+        raise EvidenceError("prepared repair declaration differs from its record or checkpoint")
+    return raw, event
+
+
+def _prepared_journal(binding: dict, path: Path, intended: bytes) -> tuple[list[dict], int, bytes]:
+    """Inspect the approved prefix without opening the full journal's strict reader."""
+    count = binding["journal"]["count"]
+    raw = path.read_bytes()
+    parts = raw.split(b"\n", count)
+    if len(parts) != count + 1:
+        raise EvidenceError("lane journal differs from the approved binding checkpoint")
+    prefix = b"\n".join(parts[:count]) + b"\n"
+    if _sha256(prefix) != binding["journal"]["sha256"]:
+        raise EvidenceError("lane journal differs from the approved binding checkpoint")
+    tail = parts[count]
+    if tail and tail != intended and (b"\n" in tail or not intended.startswith(tail)):
+        raise EvidenceError("lane journal changed after the approved binding checkpoint")
+    # Validate only the approved complete lines; the ordinary reader must still
+    # reject an unterminated tail for every caller other than this repair rerun.
+    records = list(_iter_event_lines(((line + b"\n").decode("utf-8") for line in parts[:count]),
+                                    expected_count=count, expected_hash=binding["journal"]["final_hash"]))
+    _check_journal_binding(binding, path, records)
+    return records, len(prefix), tail
+
+
 def _check_record(record: dict, binding: dict, plan: dict, lane: dict, corrupt: bytes,
                   candidate: dict, reconstruction: dict) -> None:
     check_seal(record)
-    if (set(record) != REPAIR_FIELDS or record["kind"] != REPAIR_KIND
+    fields = REPAIR_FIELDS | {"declaration_bytes"} if record.get("status") == "prepared" else REPAIR_FIELDS
+    if (set(record) != fields or record["kind"] != REPAIR_KIND
             or record["protocol_id"] != PROTOCOL_ID or record["status"] not in {"prepared", "complete"}):
         raise EvidenceError("ledger repair record identity or fields mismatch")
     expected = {"plan_hash": plan["seal_hash"], "lane_id": lane["lane_id"], "lane_plan_hash": lane["plan_hash"],
@@ -488,11 +535,6 @@ def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reaso
                 or lane_plan["maximum_live_calls"] != lane["planned_calls"]
                 or index.get("kind") != INDEX_KIND or index["plan_hash"] != lane["plan_hash"]):
             raise EvidenceError("lane plan or index differs from the sealed root")
-        journal = _Journal(lane_dir / JOURNAL_FILE, lane["plan_hash"], create=False)
-        stack.callback(journal.close)
-        checkpoint = index["journal"]
-        if journal.hash_at(checkpoint["count"]) != checkpoint["final_hash"]:
-            raise EvidenceError("lane journal differs from the retained index checkpoint")
         marker = read_sealed(ledger_path.with_suffix(".json.identity.json"))
         _check_binding_context(binding, directory, plan, lane, marker)
         prior = _repair_records(lane_dir)
@@ -501,23 +543,41 @@ def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reaso
             raise EvidenceError("multiple prepared ledger repairs")
         target = ledger_path.read_bytes()
         retained = safe_child(lane_dir, f"{REPAIR_DIRECTORY}/{binding['corrupt_sha256']}.corrupt")
+        journal_path = lane_dir / JOURNAL_FILE
+        journal = None
         if pending:
             path, record = pending[0]
             if record.get("binding_hash") != binding["seal_hash"] or record.get("reason") != reason:
                 raise EvidenceError("prepared repair differs from the same binding or command")
+            relative = f"{REPAIR_DIRECTORY}/{path.name}"
+            intended, event = _prepared_declaration(record, relative)
+            records, prefix_size, tail = _prepared_journal(binding, journal_path, intended)
             corrupt = retained.read_bytes() if retained.exists() else target
         else:
             if any(record.get("corrupt_sha256") == binding["corrupt_sha256"] for _, record in prior):
                 raise EvidenceError("a repair record for the same corrupt hash already exists")
-            verify_root_ledger_repairs(directory, {**plan, "lanes": [lane]}, {lane_id: journal.records})
+            journal = _Journal(journal_path, lane["plan_hash"], create=False)
+            stack.callback(journal.close)
+            records = journal.records
+            _check_journal_binding(binding, journal_path, records, tail=[])
+            verify_root_ledger_repairs(directory, {**plan, "lanes": [lane]}, {lane_id: records})
             corrupt = target
+            tail = b""
+        checkpoint = index["journal"]
+        checkpoint_count = checkpoint["count"]
+        if (type(checkpoint_count) is not int or not 0 <= checkpoint_count <= len(records)
+                or (records[checkpoint_count - 1]["hash"] if checkpoint_count else GENESIS_HASH)
+                != checkpoint["final_hash"]):
+            raise EvidenceError("lane journal differs from the retained index checkpoint")
+        if records and records[0]["run_id"] != lane["plan_hash"]:
+            raise EvidenceError("phase journal belongs to another plan")
         candidate = _bound_candidate(corrupt, binding, marker, lane_plan["caps"])
         if target not in (corrupt, candidate["bytes"]):
             raise EvidenceError("repair target bytes differ from approved corrupt and restored bytes")
         count = binding["journal"]["count"]
-        reconstruction = _check_attempts(candidate["state"], journal.records[:count], lane_plan["caps"])
+        reconstruction = _check_attempts(candidate["state"], records[:count], lane_plan["caps"])
         if not pending:
-            record = seal({
+            record = {
                 "kind": REPAIR_KIND, "protocol_id": PROTOCOL_ID, "plan_hash": plan["seal_hash"],
                 "lane_id": lane_id, "lane_plan_hash": lane["plan_hash"], "binding_hash": binding["seal_hash"],
                 "corrupt_sha256": binding["corrupt_sha256"], "restored_sha256": binding["restored_sha256"],
@@ -527,26 +587,34 @@ def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reaso
                 "journal_reconstruction_hash": content_hash(reconstruction), "journal": binding["journal"],
                 "reason": reason, "approval_text": approval_text, "recorded_utc": datetime.now(timezone.utc).isoformat(),
                 "status": "prepared",
-            })
+            }
             number = max((int(path.stem.split("-")[1]) for path, _ in prior), default=0) + 1
             path = safe_child(lane_dir, f"{REPAIR_DIRECTORY}/repair-{number}.json")
+            relative = f"{REPAIR_DIRECTORY}/{path.name}"
+            event = journal.prepare("ledger_repaired", **_declaration(relative, _completion(record)))
+            intended = (canonical_json(event) + "\n").encode("utf-8")
+            record = seal({**record, "declaration_bytes": intended.hex()})
         _check_record(record, binding, plan, lane, corrupt, candidate, reconstruction)
         complete = _completion(record)
-        relative = f"{REPAIR_DIRECTORY}/{path.name}"
-        tail = journal.records[count:]
-        if tail and (len(tail) != 1 or tail[0]["kind"] != "ledger_repaired"
-                     or tail[0]["data"] != _declaration(relative, complete)):
-            raise EvidenceError("lane journal changed after the approved binding checkpoint")
-        _check_journal_binding(binding, lane_dir / JOURNAL_FILE, journal.records, tail=tail if pending else [])
         if pending:
             # Other historical repairs must remain intact while this one resumes.
             verify_root_ledger_repairs(directory, {**plan, "lanes": [lane]},
-                                       {lane_id: journal.records[:count]}, _pending_path=path)
+                                       {lane_id: records}, _pending_path=path)
         binding_copy = _binding_path(lane_dir, binding["seal_hash"])
         if binding_copy.exists() and read_sealed(binding_copy) != binding:
             raise EvidenceError("existing retained ledger repair binding differs")
         if tail and (not retained.exists() or target != candidate["bytes"]):
             raise EvidenceError("declared repair is missing its retained or restored bytes")
+        if pending:
+            # All binding, target and retained evidence checks precede this sole
+            # permitted journal mutation, under the root, lane and ledger locks.
+            if tail and tail != intended:
+                with journal_path.open("r+b") as stream:
+                    stream.truncate(prefix_size)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            journal = _Journal(journal_path, lane["plan_hash"], create=False)
+            stack.callback(journal.close)
         path.parent.mkdir(exist_ok=True)
         if not pending:
             atomic_json(path, record)
@@ -555,8 +623,8 @@ def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reaso
         _retain_bytes(retained, corrupt)
         if target == corrupt:
             atomic_json(ledger_path, candidate["state"])
-        if not tail:
-            journal.append("ledger_repaired", **_declaration(relative, complete))
+        if tail != intended:
+            journal.append_prepared(event)
         atomic_json(path, complete)
     return {"directory": str(directory), "status": "repaired", "repair_record": f"{lane['path']}/{relative}",
             "repair": complete, "live_model_calls": 0}

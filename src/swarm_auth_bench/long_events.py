@@ -7,7 +7,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -131,31 +131,37 @@ def iter_events(path: Path, *, expected_count: int | None = None,
     Supply the separately retained close checkpoint to detect whole-line tail
     deletion. A hash chain alone cannot detect removal of its own final records.
     """
+    with Path(path).open("r", encoding="utf-8", newline="") as stream:
+        yield from _iter_event_lines(stream, expected_count=expected_count, expected_hash=expected_hash)
+
+
+def _iter_event_lines(lines: Iterable[str], *, expected_count: int | None = None,
+                      expected_hash: str | None = None) -> Iterator[dict[str, Any]]:
+    """Apply the strict reader to complete lines, including an approved in-memory prefix."""
     previous = GENESIS_HASH
     run_id = None
     count = 0
-    with Path(path).open("r", encoding="utf-8", newline="") as stream:
-        for index, line in enumerate(stream):
-            if not line.endswith("\n"):
-                raise ValueError(f"unterminated event at line {index + 1}")
-            event = json.loads(line)
-            if not isinstance(event, dict) or event.get("sequence") != index:
-                raise ValueError(f"nonconsecutive event sequence at line {index + 1}")
-            if event.get("schema_version") != 2 or event.get("previous_hash") != previous:
-                raise ValueError(f"invalid event chain at line {index + 1}")
-            if index == 0:
-                run_id = event.get("run_id")
-            if event.get("run_id") != run_id:
-                raise ValueError("mixed run identifiers")
-            digest = event.get("hash")
-            body = {key: value for key, value in event.items() if key != "hash"}
-            if not isinstance(digest, str) or digest != hashlib.sha256(
-                canonical_json(body).encode("utf-8")
-            ).hexdigest():
-                raise ValueError(f"event hash mismatch at line {index + 1}")
-            previous = digest
-            count += 1
-            yield event
+    for index, line in enumerate(lines):
+        if not line.endswith("\n"):
+            raise ValueError(f"unterminated event at line {index + 1}")
+        event = json.loads(line)
+        if not isinstance(event, dict) or event.get("sequence") != index:
+            raise ValueError(f"nonconsecutive event sequence at line {index + 1}")
+        if event.get("schema_version") != 2 or event.get("previous_hash") != previous:
+            raise ValueError(f"invalid event chain at line {index + 1}")
+        if index == 0:
+            run_id = event.get("run_id")
+        if event.get("run_id") != run_id:
+            raise ValueError("mixed run identifiers")
+        digest = event.get("hash")
+        body = {key: value for key, value in event.items() if key != "hash"}
+        if not isinstance(digest, str) or digest != hashlib.sha256(
+            canonical_json(body).encode("utf-8")
+        ).hexdigest():
+            raise ValueError(f"event hash mismatch at line {index + 1}")
+        previous = digest
+        count += 1
+        yield event
     if expected_count is not None and count != expected_count:
         raise ValueError("event count differs from checkpoint")
     if expected_hash is not None and previous != expected_hash:

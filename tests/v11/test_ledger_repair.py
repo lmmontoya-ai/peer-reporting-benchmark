@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 from collections import Counter
 from pathlib import Path
@@ -527,7 +528,7 @@ def test_interrupted_repair_resumes_and_verification_requires_completion(lane, c
     corrupt_lane(lane)
     atomic = ledger_repair.atomic_json
     retain = ledger_repair._retain_bytes
-    append = _Journal.append
+    append = _Journal.append_prepared
     with monkeypatch.context() as patch:
         def interrupted_atomic(path, value):
             if step == "before_completion" and value.get("kind") == REPAIR_KIND and value.get("status") == "complete":
@@ -541,16 +542,18 @@ def test_interrupted_repair_resumes_and_verification_requires_completion(lane, c
             retain(path, raw)
             if step == "after_retention":
                 raise OSError("interrupted after retention")
-        def interrupted_append(journal, kind, **data):
-            if step == "before_declaration" and kind == "ledger_repaired":
+        def interrupted_append(journal, event):
+            if step == "before_declaration":
                 raise OSError("interrupted before declaration")
-            return append(journal, kind, **data)
+            return append(journal, event)
         patch.setattr(ledger_repair, "atomic_json", interrupted_atomic)
         patch.setattr(ledger_repair, "_retain_bytes", interrupted_retain)
-        patch.setattr(_Journal, "append", interrupted_append)
+        patch.setattr(_Journal, "append_prepared", interrupted_append)
         assert command(lane, capsys)[0] == 2
     prepared = read_sealed(lane["directory"] / "ledger-repairs" / "repair-1.json")
     assert prepared["status"] == "prepared"
+    intended = bytes.fromhex(prepared["declaration_bytes"])
+    assert intended.endswith(b"\n")
     with pytest.raises(ValueError, match="prepared but not completed"):
         ledger_repair.verify_root_ledger_repairs(lane["root"], lane["plan"],
                                                live.lane_journals(lane["root"], lane["plan"]))
@@ -562,20 +565,169 @@ def test_interrupted_repair_resumes_and_verification_requires_completion(lane, c
     assert lane["path"].read_bytes() == lane["original"]
     assert len([record for record in iter_events(lane["directory"] / "journal.jsonl")
                 if record["kind"] == "ledger_repaired"]) == 1
+    assert (lane["directory"] / "journal.jsonl").read_bytes().endswith(intended)
     assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 0
     capsys.readouterr()
+
+
+def interrupted_declaration_write(lane, capsys, monkeypatch, length=17, *, short_return=False):
+    """Astra's wrapped stream persists part of the actual declaration inside write()."""
+    journal_path = lane["directory"] / "journal.jsonl"
+    checkpoint = journal_path.read_bytes()
+    initialize = _Journal.__init__
+
+    class InterruptedStream:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def write(self, encoded):
+            intended = encoded.encode("utf-8")
+            prepared = read_sealed(lane["directory"] / "ledger-repairs" / "repair-1.json")
+            assert prepared["status"] == "prepared"
+            assert bytes.fromhex(prepared["declaration_bytes"]) == intended
+            size = {"half": len(intended) // 2, "without_newline": len(intended) - 1,
+                    "full": len(intended)}.get(length, length)
+            self.stream.write(intended[:size].decode("utf-8"))
+            self.stream.flush()
+            os.fsync(self.stream.fileno())
+            if short_return:
+                return size
+            raise OSError("interrupted inside declaration write")
+
+    with monkeypatch.context() as patch:
+        def interrupted_init(journal, path, run_id, *, create):
+            initialize(journal, path, run_id, create=create)
+            if path == journal_path:
+                journal._stream = InterruptedStream(journal._stream)
+        patch.setattr(_Journal, "__init__", interrupted_init)
+        code, report = command(lane, capsys)
+        assert code == 2
+        assert report["error"] == ("OSError: short journal write" if short_return
+                                   else "OSError: interrupted inside declaration write")
+    prepared = read_sealed(lane["directory"] / "ledger-repairs" / "repair-1.json")
+    intended = bytes.fromhex(prepared["declaration_bytes"])
+    tail = journal_path.read_bytes()[len(checkpoint):]
+    assert tail and intended.startswith(tail)
+    assert journal_path.read_bytes() == checkpoint + tail
+    assert lane["path"].read_bytes() == lane["original"]
+    return checkpoint, intended
+
+
+@pytest.mark.parametrize("length,short_return", [(17, True), (17, False), (1, False), ("half", False),
+                                               ("without_newline", False), ("full", False)])
+def test_interrupted_declaration_write_resumes_verifies_and_exports(lane, capsys, monkeypatch, tmp_path,
+                                                                   length, short_return):
+    corrupt_lane(lane)
+    checkpoint, intended = interrupted_declaration_write(lane, capsys, monkeypatch, length,
+                                                         short_return=short_return)
+    journal_path = lane["directory"] / "journal.jsonl"
+    if length != "full":
+        with pytest.raises(ValueError, match="unterminated event"):
+            list(iter_events(journal_path))
+        with pytest.raises(ValueError, match="unterminated event"):
+            _Journal(journal_path, lane["lane_plan"]["seal_hash"], create=False)
+    else:
+        with pytest.raises(ValueError, match="prepared but not completed"):
+            ledger_repair.verify_root_ledger_repairs(lane["root"], lane["plan"],
+                                                   live.lane_journals(lane["root"], lane["plan"]))
+    before = file_hashes(lane["root"])
+    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 2
+    capsys.readouterr()
+    assert main(["export-review", str(lane["root"]), "--study", str(lane["study"]),
+                 "--output", str(tmp_path / "refused-export"), "--no-score"]) == 2
+    capsys.readouterr()
+    assert not (tmp_path / "refused-export").exists()
+    assert file_hashes(lane["root"]) == before
+    fsync_sizes = []
+    fsync = os.fsync
+    with monkeypatch.context() as patch:
+        def recorded_fsync(fd):
+            fsync_sizes.append(os.fstat(fd).st_size)
+            fsync(fd)
+        patch.setattr(ledger_repair.os, "fsync", recorded_fsync)
+        code, report = command(lane, capsys)
+    assert code == 0 and report["repair"]["status"] == "complete"
+    assert "declaration_bytes" not in report["repair"]
+    assert journal_path.read_bytes() == checkpoint + intended
+    if length != "full":
+        assert fsync_sizes[:2] == [len(checkpoint), len(checkpoint) + len(intended)]
+    assert len([event for event in iter_events(journal_path) if event["kind"] == "ledger_repaired"]) == 1
+    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 0
+    capsys.readouterr()
+    assert main(["export-review", str(lane["root"]), "--study", str(lane["study"]),
+                 "--output", str(tmp_path / "export"), "--no-score"]) == 0
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("damage", ["nonprefix", "unrelated_record", "extra_record", "partial_newline",
+                                   "changed_complete", "binding", "target", "retained", "checkpoint",
+                                   "intended_bytes", "intended_chain", "intended_data"])
+def test_interrupted_declaration_refusals_change_nothing(lane, capsys, monkeypatch, damage):
+    corrupt_lane(lane)
+    checkpoint, intended = interrupted_declaration_write(lane, capsys, monkeypatch)
+    journal_path = lane["directory"] / "journal.jsonl"
+    record_path = lane["directory"] / "ledger-repairs" / "repair-1.json"
+    prepared = read_sealed(record_path)
+    if damage == "nonprefix":
+        journal_path.write_bytes(checkpoint + flipped(intended[:17], 0, 1))
+    elif damage in {"unrelated_record", "extra_record"}:
+        journal_path.write_bytes(checkpoint + (intended if damage == "extra_record" else b""))
+        journal = _Journal(journal_path, lane["lane_plan"]["seal_hash"], create=False)
+        try:
+            journal.append("operator_note", note="unrelated record")
+        finally:
+            journal.close()
+    elif damage == "partial_newline":
+        journal_path.write_bytes(checkpoint + intended[:17] + b"\n")
+    elif damage == "changed_complete":
+        event = json.loads(intended)
+        event["wall_time"] = "changed"
+        event.pop("hash")
+        event["hash"] = content_hash(event)
+        journal_path.write_bytes(checkpoint + (canonical_json(event) + "\n").encode())
+    elif damage == "binding":
+        binding = read_sealed(lane["binding"])
+        binding.pop("seal_hash")
+        binding["commit"] = "0" * 40
+        atomic_json(lane["binding"], seal(binding))
+    elif damage == "target":
+        lane["path"].write_bytes(flipped(lane["original"], 0, 1))
+    elif damage == "retained":
+        retained = record_path.parent / f"{prepared['corrupt_sha256']}.corrupt"
+        retained.write_bytes(flipped(retained.read_bytes(), 0, 1))
+    elif damage == "checkpoint":
+        journal_path.write_bytes(flipped(checkpoint, 0, 1) + intended[:17])
+    else:
+        prepared.pop("seal_hash")
+        if damage == "intended_bytes":
+            prepared["declaration_bytes"] = "invalid"
+        else:
+            event = json.loads(intended)
+            if damage == "intended_chain":
+                event["previous_hash"] = "0" * 64
+            else:
+                event["data"]["repair_hash"] = "0" * 64
+            event.pop("hash")
+            event["hash"] = content_hash(event)
+            prepared["declaration_bytes"] = (canonical_json(event) + "\n").encode().hex()
+        atomic_json(record_path, seal(prepared))
+    before = file_hashes(lane["root"])
+    binding_before = lane["binding"].read_bytes()
+    assert command(lane, capsys)[0] == 2
+    assert file_hashes(lane["root"]) == before
+    assert lane["binding"].read_bytes() == binding_before
 
 
 @pytest.mark.parametrize("damage", ["retained", "target", "prepared", "journal_tail", "journal_bytes", "binding"])
 def test_resumption_checks_all_partial_repair_evidence(lane, capsys, monkeypatch, damage):
     corrupt_lane(lane)
     with monkeypatch.context() as patch:
-        append = _Journal.append
-        def interrupted(journal, kind, **data):
-            if kind == "ledger_repaired":
-                raise OSError("interrupted declaration")
-            return append(journal, kind, **data)
-        patch.setattr(_Journal, "append", interrupted)
+        def interrupted(journal, event):
+            raise OSError("interrupted declaration")
+        patch.setattr(_Journal, "append_prepared", interrupted)
         assert command(lane, capsys)[0] == 2
     path = lane["directory"] / "ledger-repairs" / "repair-1.json"
     prepared = read_sealed(path)
@@ -671,12 +823,9 @@ def test_second_repair_resumes_and_rechecks_first_repair(lane, capsys, tmp_path,
     bind_lane(lane, evidence)
     lane["path"].write_bytes(raw)
     with monkeypatch.context() as patch:
-        append = _Journal.append
-        def interrupted(journal, kind, **data):
-            if kind == "ledger_repaired":
-                raise OSError("interrupted second repair")
-            return append(journal, kind, **data)
-        patch.setattr(_Journal, "append", interrupted)
+        def interrupted(journal, event):
+            raise OSError("interrupted second repair")
+        patch.setattr(_Journal, "append_prepared", interrupted)
         assert command(lane, capsys)[0] == 2
     assert command(lane, capsys)[0] == 0
     report = live.verify_live_root(lane["root"], study_directory=lane["study"], bundle=fake_bundle())
