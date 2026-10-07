@@ -568,6 +568,8 @@ def _entry(row: dict, fixture: dict, instructions: str) -> dict:
         "instructions": instructions, "instructions_and_roles_hash": _messages_hash(instructions, fixture),
         **({key: row[key] for key in ("difficulty", "block", "prevalence_k", "post_condition")}
            if row["level"] == "S" else {}),
+        **({key: row[key] for key in ("difficulty", "block", "prevalence_k", "post_condition", "visibility", "pressure")}
+           if row["level"] == "P" else {}),
     }
 
 

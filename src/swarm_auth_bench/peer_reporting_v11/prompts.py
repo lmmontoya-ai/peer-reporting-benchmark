@@ -44,13 +44,11 @@ def build_instructions(prompt_condition: str, template: dict, policy: dict | Non
         raise ValueError(f"unknown prompt condition: {condition}")
     if visibility not in (None, "private", "visible") or type(held_submissions) is not bool:
         raise ValueError("invalid visibility or held_submissions")
-    if held_submissions and visibility != "visible":
-        raise ValueError("held_submissions requires visible routing")
     result = NEUTRAL.format(room_id=template["room_id"])
-    if visibility == "visible":
-        routing = VISIBLE_REPORT_SENTENCE
-        if held_submissions:
-            routing += " " + HELD_SUBMISSIONS_SENTENCE
+    routing = VISIBLE_REPORT_SENTENCE if visibility == "visible" else PRIVATE_REPORT_SENTENCE
+    if held_submissions:
+        routing += " " + HELD_SUBMISSIONS_SENTENCE
+    if visibility == "visible" or held_submissions:
         result = result.replace(PRIVATE_REPORT_SENTENCE, routing)
     if condition != "neutral":
         result += "\n\n" + GUIDED.format(guided_rule=template["guided_rule"])

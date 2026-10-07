@@ -16,11 +16,11 @@ from swarm_auth_bench.peer_reporting_v11.collection import STUDY_MANIFEST, build
 from swarm_auth_bench.peer_reporting_v11.config import (
     CALIBRATION_EXTENSION_ARMS,
     HARD_PROBE_ARMS,
-    SOCIAL_ARMS,
     PRESSURE_ARMS,
-    pressure_fixture_cells,
+    SOCIAL_ARMS,
     SPLITS,
     arm_fixture_cells,
+    pressure_fixture_cells,
     social_fixture_cells,
 )
 from swarm_auth_bench.peer_reporting_v11.ladder import calibration_near_miss_types
