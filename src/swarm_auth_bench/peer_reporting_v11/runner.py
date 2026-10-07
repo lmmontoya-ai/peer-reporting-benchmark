@@ -22,7 +22,7 @@ from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
 from .bundle import ProtocolBundle, load_bundle, tools_for_levels
 from .config import SOCIAL_ARMS, SOCIAL_FIELDS, load_protocol, social_fixture_cells
 from .lanes import EFFORTS, PROMPT_CONDITIONS, TOOL_REQUEST_CAP, lane_id, validate_effort, validate_world_mode
-from .live import read_live_plan, read_root_fixture
+from .live import _tool_set_for_plan, read_live_plan, read_root_fixture
 from .live_review import report_attempts
 
 RUNNER_VERSION = "peer-reporting-v11-offline-replay-v1"
@@ -208,13 +208,15 @@ def _score(attempt: dict, directory: Path, scorer: Callable[[dict], dict] | None
 
 
 def replay_live_root(root: Path, output: Path, *, assignment_ids: list[str] | None = None,
-                     bundle: ProtocolBundle | None = None, scorer: Callable[[dict], dict] | None = None) -> dict:
+                     bundle: ProtocolBundle | None = None, scorer: Callable[[dict], dict] | None = None,
+                     script_factory: Callable[[dict, dict], dict] | None = None) -> dict:
     """Replay sealed live-plan entries offline into a fresh output directory. The root is only read."""
     bundle = bundle or load_bundle()
     root, output = Path(root), Path(output)
     if output.resolve().is_relative_to(root.resolve()) or root.resolve().is_relative_to(output.resolve()):
         raise ValueError("replay output must be outside the live root")
     plan = read_live_plan(root)
+    bundle = _tool_set_for_plan(plan, bundle)
     entries = [(lane["lane_id"], entry) for lane in plan["lanes"]
                for entry in read_sealed(safe_child(root, f"{lane['path']}/phase-plan.json"))["planned_order"]]
     if assignment_ids is not None:
@@ -233,7 +235,7 @@ def replay_live_root(root: Path, output: Path, *, assignment_ids: list[str] | No
                                                  "level", "variant", "near_miss_type", "planned_order")}}
         directory = safe_child(output, entry["entry_id"])
         attempt = replay_fixture(fixture, directory, attempt_id=f"{entry['entry_id']}-offline-1", labels=labels,
-                                 bundle=bundle)
+                                 bundle=bundle, script=script_factory(fixture, entry) if script_factory else None)
         rows.append(_row(attempt, _score(attempt, directory, scorer)))
     return _summary(output, plan["seal_hash"], rows)
 
@@ -299,7 +301,10 @@ def replay_matrix(output: Path, *, template_id: str = "release-request", split: 
 def _row(attempt: dict, score: dict | None) -> dict:
     social = ({"arm": attempt["arm"], **{key: attempt["fixture"]["parameters"][key]
                for key in ("template_id", "split", "seed", *SOCIAL_FIELDS)}} if attempt["level"] == "S" else {})
-    return {**social, **{key: attempt[key] for key in ("assignment_id", "attempt_id", "level", "variant", "near_miss_type",
+    pressure = ({"arm": attempt["arm"], **{key: attempt["fixture"]["parameters"][key]
+                 for key in ("template_id", "split", "seed", "block", "prevalence_k", "visibility", "pressure")}}
+                if attempt["level"] == "P" else {})
+    return {**social, **pressure, **{key: attempt[key] for key in ("assignment_id", "attempt_id", "level", "variant", "near_miss_type",
                                              "world_mode", "effort", "prompt_condition", "termination_kind",
                                              "exposure_confirmed", "eligible", "storage_failure")},
             "accepted_reports": len(attempt["accepted_reports"]), "report_attempts": len(attempt["report_attempts"]),
