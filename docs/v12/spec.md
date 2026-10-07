@@ -624,3 +624,42 @@ bookkeeping and no trial evidence. Results state the repair as a declared deviat
 The attempt that was running when the lane stopped keeps its existing handling: its start
 is reconciled by `reconcile-cleanup`, it stays consumed and ineligible, and a successor
 root excludes it with the other 576 consumed assignments.
+
+#### 8.2.1 External binding, resumable completion, prior-root checks (amendment A4.1)
+
+The Astra review of A4 ([review-astra-a4.md](review-astra-a4.md)) showed that the three
+conditions above are mechanical: they trust the seal inside the corrupt file and the
+journal beside it, so an operator could fabricate a "single-bit" corruption that rolls back
+unresolved usage or lowers a settlement and still pass. A4.1 adds a trust anchor outside
+the guest, and two robustness fixes.
+
+1. Binding. `repair-ledger` requires `--binding PATH`, a sealed record (kind
+   `peer_reporting_v11_ledger_repair_binding`) created before the repair from evidence
+   committed to the public repository, and carrying the user's approval text. It names
+   the study, root and lane, the root's plan hash, the SHA-256 of the corrupt and of the
+   restored ledger bytes, the byte offset and bit mask, the identity record's seal hash,
+   the lane journal's record count and last record hash at the checkpoint, the SHA-256 of
+   that journal, and the commit that holds the evidence. The repair refuses unless every
+   value equals what it computes from the live files, and unless the lane journal is
+   unchanged since the checkpoint (same record count and last hash) apart from records the
+   repair itself appends. The repair record carries the binding's seal hash, and verify
+   checks that the binding is present, sealed, and consistent with the record.
+2. Resumable completion. The repair writes a sealed `prepared` record first, then the
+   retained bytes, the restored ledger and the journal declaration, then marks the record
+   complete. If it stops partway, rerunning the same command with the same binding
+   completes it, after checking the retained bytes, the target bytes, the prepared record
+   and the unchanged journal checkpoint. Verify rejects a prepared repair that was never
+   completed.
+3. Prior roots. Every place that accepts a prior root (building a successor, verifying it,
+   exporting it, and the consumed-assignment ledger) rechecks the prior root's repair
+   evidence exactly as verify does, so a successor cannot hide missing or altered
+   retention evidence.
+
+The binding for this incident pins: corrupt SHA-256
+`c36e197e5fe087106cb926f4056fbcb7cd154c38d7c173b820744c5a83ca524e`, restored SHA-256
+`3a2f1ac6c96b8cabddf19a4620f6ba7317719042de69546bf07028a4e7f4f235`, byte 36,838 with mask
+0x20, identity seal `fbc5a63a727670a07d9c5011ab2d1c5a1d8eef4346e2f20b3c3fff70553b2b30`,
+and a journal checkpoint of 837 records ending in
+`1da94371017eab2d8d71689875ef6de93ef4047d505e7c0cecb11dd6870df970` (journal SHA-256
+`a56ccce6049ae9878198cffa7c70523717311bae0e4091cd427c0ec81b2af5f8`), all taken from
+`tests/v11/data/ledger-bitflip-grid/` as committed in `8cbe359`.
