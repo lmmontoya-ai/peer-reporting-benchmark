@@ -663,3 +663,19 @@ and a journal checkpoint of 837 records ending in
 `1da94371017eab2d8d71689875ef6de93ef4047d505e7c0cecb11dd6870df970` (journal SHA-256
 `a56ccce6049ae9878198cffa7c70523717311bae0e4091cd427c0ec81b2af5f8`), all taken from
 `tests/v11/data/ledger-bitflip-grid/` as committed in `8cbe359`.
+
+Trust boundary (A4.1, after the second Astra review). The code checks that a binding is
+sealed, that its values match the live files, and that its evidence equals a local Git
+commit. It cannot establish that the commit was published, who controls the repository,
+or who approved the binding: a binding built from fabricated evidence in a private
+repository would also pass. Those are prerequisites enforced outside the code. For this
+incident the trust anchor is the evidence committed in `8cbe359` and pushed to the public
+repository before the repair, together with the user's approval of that exact binding.
+A seal and an approval string alone carry no such authority.
+
+Declaration writes (A4.1, item 2 refined). The prepared record stores the exact bytes of
+the intended `ledger_repaired` journal record before anything else changes. If the
+declaration append stops partway, a rerun may remove a trailing partial line only when
+those bytes are a strict prefix of the stored intended record and everything before them
+equals the approved journal checkpoint; it then appends the full record. Any other
+unexpected journal tail refuses the rerun.
