@@ -1515,20 +1515,25 @@ def superseded_by(directory: Path, plan: dict) -> list[str]:
 def consumed_attempts_in_root(directory: Path, *, bundle: ProtocolBundle | None = None) -> tuple[dict, set[str]]:
     """A root's plan and every attempt with a journaled ``attempt_started`` in any of its lanes.
 
-    Each lane's journal hash chain, index checkpoint, and budget history are
+    Each lane's journal hash chain, index checkpoint, budget history and repairs are
     checked, so a truncated journal cannot hide a start.
     """
     directory = Path(directory)
     plan = read_live_plan(directory)
     consumed: set[str] = set()
+    journals = {}
     for lane in plan["lanes"]:
         state = _PhaseState(safe_child(directory, lane["path"]), bundle=bundle)
         try:
             if state.plan_hash != lane["plan_hash"]:
                 raise EvidenceError(f"lane {lane['lane_id']} differs from the sealed live plan")
             consumed |= {record["data"]["attempt_id"] for record in state.journal.of_kind("attempt_started")}
+            journals[lane["lane_id"]] = state.journal.records
         finally:
             state.journal.close()
+    from .ledger_repair import verify_root_ledger_repairs
+
+    verify_root_ledger_repairs(directory, plan, journals)
     return plan, consumed
 
 

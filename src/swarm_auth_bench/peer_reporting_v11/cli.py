@@ -1,7 +1,8 @@
 """v1.1 offline tools and explicitly authorized, capped live phases.
 
 Offline commands (validate, build, verify, replay, export-review, propose-caps,
-freeze-caps, abandon-root, reconcile-cleanup, repair-ledger) never start a model session. Live commands (compatibility,
+freeze-caps, abandon-root, reconcile-cleanup, ledger-repair-binding, repair-ledger) never start a model session.
+Live commands (compatibility,
 calibration, smoke, collection)
 refuse to run without frozen caps equal to the sealed plan's caps and a sealed
 user execution authorization that names the exact plan.
@@ -179,6 +180,16 @@ def _parser() -> argparse.ArgumentParser:
     repair.add_argument("--lane", required=True, help="lane ID in the sealed root")
     repair.add_argument("--reason", required=True)
     repair.add_argument("--approval-text", required=True)
+    repair.add_argument("--binding", type=Path, required=True, help="approved sealed binding from committed evidence")
+    binding = commands.add_parser("ledger-repair-binding", help="A4.1: bind committed corruption evidence offline")
+    binding.add_argument("evidence", type=Path, help="committed ledger, identity and journal directory")
+    binding.add_argument("--study", type=Path, required=True, help="study directory name or path")
+    binding.add_argument("--root", type=Path, required=True, help="registered root directory name or path")
+    binding.add_argument("--lane", required=True)
+    binding.add_argument("--plan-hash", required=True, help="sealed live root plan hash")
+    binding.add_argument("--commit", required=True, help="Git commit containing the exact evidence bytes")
+    binding.add_argument("--approval-text", required=True)
+    binding.add_argument("--output", type=Path, required=True)
     for name in ("build-study", "verify-study"):
         study = commands.add_parser(name, help="build or verify the sealed study offline; no model call")
         study.add_argument("directory", type=Path)
@@ -290,7 +301,15 @@ def _run(args: argparse.Namespace) -> dict:
         from .ledger_repair import repair_ledger
 
         return repair_ledger(args.root, study_directory=args.study, lane_id=args.lane, reason=args.reason,
-                             approval_text=args.approval_text)
+                             approval_text=args.approval_text, binding_path=args.binding)
+    if args.command == "ledger-repair-binding":
+        from .ledger_repair import build_ledger_repair_binding
+
+        binding = build_ledger_repair_binding(args.evidence, study=args.study.name, root=args.root.name, lane_id=args.lane,
+                                             plan_hash=args.plan_hash, commit=args.commit,
+                                             approval_text=args.approval_text)
+        _write_new_json_files({args.output: binding})
+        return {"output": str(args.output), "binding": binding, "live_model_calls": 0}
     if args.command == "build":
         from .live import STUDY_MANIFEST, build_phase_plan, prepare_live_root, validate_arm_selection
 
