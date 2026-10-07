@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from ..events import content_hash
 from .config import validate_caps
-from .storage import atomic_json, read_sealed, seal
+from .storage import atomic_json, check_seal, read_sealed, seal
 
 LEDGER_VERSION = "peer-reporting-budget-v2"
 IDENTITY_VERSION = "peer-reporting-budget-identity-v2"
@@ -39,6 +39,57 @@ def _integer(value: Any, minimum: int = 0) -> bool:
 def _fields(value: Any, expected: set[str], description: str) -> None:
     if type(value) is not dict or set(value) != expected:
         raise ValueError(f"invalid budget {description} fields")
+
+
+def validate_ledger_identity(marker: dict, caps: dict, *, plan_hash: str) -> None:
+    """The ordinary ledger identity checks, also required by the sealed A4 repair."""
+    check_seal(marker)
+    _fields(marker, {"schema_version", "ledger_id", "plan_hash", "caps_hash", "created_at", "seal_hash"},
+            "identity marker")
+    ledger_id = marker["ledger_id"]
+    if (marker["schema_version"] != IDENTITY_VERSION or type(ledger_id) is not str
+            or len(ledger_id) != 32 or any(character not in "0123456789abcdef" for character in ledger_id)
+            or not _time_value(marker["created_at"])):
+        raise ValueError("invalid budget identity marker")
+    if marker["plan_hash"] != plan_hash or marker["caps_hash"] != content_hash(caps):
+        raise ValueError("budget identity marker plan or caps mismatch")
+
+
+def validate_ledger_state(state: dict, marker: dict, caps: dict, *, plan_hash: str) -> None:
+    """Require the same seal, structure and binding as ordinary ledger opening."""
+    check_seal(state)
+    _fields(state, {"schema_version", "ledger_id", "plan_hash", "identity_marker_hash", "caps",
+                    "started_at", "attempts", "stop_generation", "stop_reason", "seal_hash"}, "ledger")
+    if (state["schema_version"] != LEDGER_VERSION or state["ledger_id"] != marker["ledger_id"]
+            or state["plan_hash"] != plan_hash or state["identity_marker_hash"] != marker["seal_hash"]
+            or state["caps"] != caps or state["started_at"] != marker["created_at"]):
+        raise ValueError("budget ledger identity, plan, caps, or start time mismatch")
+    validate_caps(state["caps"])
+    if (not _time_value(state["started_at"]) or type(state["attempts"]) is not dict
+            or type(state["stop_generation"]) is not bool
+            or type(state["stop_reason"]) not in (str, type(None))
+            or state["stop_reason"] not in {None, "collection_wall_limit", "clock_regression",
+                                             "collection_token_limit"}):
+        raise ValueError("invalid budget ledger state")
+    for attempt_id, attempt in state["attempts"].items():
+        if type(attempt_id) is not str or not 1 <= len(attempt_id) <= 200:
+            raise ValueError("invalid budget attempt ID")
+        _fields(attempt, {"status", "reservation", "observed", "actual", "notifications", "admitted_at"},
+                "attempt")
+        if (type(attempt["status"]) is not str or attempt["status"] not in {"active", "unresolved", "settled"}
+                or not _integer(attempt["reservation"], caps["reserved_tokens_per_trial"])
+                or not _integer(attempt["observed"]) or attempt["reservation"] < attempt["observed"]
+                or not _time_value(attempt["admitted_at"]) or type(attempt["notifications"]) is not dict):
+            raise ValueError("invalid budget attempt state")
+        if attempt["status"] == "settled":
+            if not _integer(attempt["actual"], attempt["observed"]):
+                raise ValueError("invalid settled budget usage")
+        elif attempt["actual"] is not None:
+            raise ValueError("unsettled budget attempt has final usage")
+        for notification_id, usage in attempt["notifications"].items():
+            if (type(notification_id) is not str or not 1 <= len(notification_id) <= 200
+                    or (usage is not None and not _integer(usage))):
+                raise ValueError("invalid budget usage notification")
 
 
 @contextmanager
@@ -116,50 +167,11 @@ class BudgetLedger:
     def _read_verified(self) -> dict[str, Any]:
         """Require both sealed files and their original binding under the lock."""
         marker = read_sealed(self.marker_path)
-        _fields(marker, {"schema_version", "ledger_id", "plan_hash", "caps_hash", "created_at", "seal_hash"},
-                "identity marker")
-        ledger_id = marker["ledger_id"]
-        if (marker["schema_version"] != IDENTITY_VERSION or type(ledger_id) is not str
-                or len(ledger_id) != 32 or any(character not in "0123456789abcdef" for character in ledger_id)
-                or not _time_value(marker["created_at"])):
-            raise ValueError("invalid budget identity marker")
-        if marker["plan_hash"] != self.plan_hash or marker["caps_hash"] != content_hash(self.caps):
-            raise ValueError("budget identity marker plan or caps mismatch")
+        validate_ledger_identity(marker, self.caps, plan_hash=self.plan_hash)
         if self._marker_hash is not None and marker["seal_hash"] != self._marker_hash:
             raise ValueError("budget identity marker changed")
         state = read_sealed(self.path)
-        _fields(state, {"schema_version", "ledger_id", "plan_hash", "identity_marker_hash", "caps",
-                        "started_at", "attempts", "stop_generation", "stop_reason", "seal_hash"}, "ledger")
-        if (state["schema_version"] != LEDGER_VERSION or state["ledger_id"] != ledger_id
-                or state["plan_hash"] != self.plan_hash or state["identity_marker_hash"] != marker["seal_hash"]
-                or state["caps"] != self.caps or state["started_at"] != marker["created_at"]):
-            raise ValueError("budget ledger identity, plan, caps, or start time mismatch")
-        validate_caps(state["caps"])
-        if (not _time_value(state["started_at"]) or type(state["attempts"]) is not dict
-                or type(state["stop_generation"]) is not bool
-                or type(state["stop_reason"]) not in (str, type(None))
-                or state["stop_reason"] not in {None, "collection_wall_limit", "clock_regression",
-                                                 "collection_token_limit"}):
-            raise ValueError("invalid budget ledger state")
-        for attempt_id, attempt in state["attempts"].items():
-            if type(attempt_id) is not str or not 1 <= len(attempt_id) <= 200:
-                raise ValueError("invalid budget attempt ID")
-            _fields(attempt, {"status", "reservation", "observed", "actual", "notifications", "admitted_at"},
-                    "attempt")
-            if (type(attempt["status"]) is not str or attempt["status"] not in {"active", "unresolved", "settled"}
-                    or not _integer(attempt["reservation"], self.caps["reserved_tokens_per_trial"])
-                    or not _integer(attempt["observed"]) or attempt["reservation"] < attempt["observed"]
-                    or not _time_value(attempt["admitted_at"]) or type(attempt["notifications"]) is not dict):
-                raise ValueError("invalid budget attempt state")
-            if attempt["status"] == "settled":
-                if not _integer(attempt["actual"], attempt["observed"]):
-                    raise ValueError("invalid settled budget usage")
-            elif attempt["actual"] is not None:
-                raise ValueError("unsettled budget attempt has final usage")
-            for notification_id, usage in attempt["notifications"].items():
-                if (type(notification_id) is not str or not 1 <= len(notification_id) <= 200
-                        or (usage is not None and not _integer(usage))):
-                    raise ValueError("invalid budget usage notification")
+        validate_ledger_state(state, marker, self.caps, plan_hash=self.plan_hash)
         self._marker_hash = marker["seal_hash"]
         return state
 

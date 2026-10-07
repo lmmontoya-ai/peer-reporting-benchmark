@@ -1916,6 +1916,9 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
     else:
         ledger_report = verify_consumed_ledger(directory, plan, prior_roots, bundle=bundle,
                                                study_directory=study_directory)
+    from .ledger_repair import verify_root_ledger_repairs
+
+    ledger_repairs = verify_root_ledger_repairs(directory, plan, journals)
     return {
         "phase": plan["phase"], "plan_hash": plan["seal_hash"], "caps_hash": plan["caps_hash"],
         "maximum_live_calls": plan["maximum_live_calls"],
@@ -1937,6 +1940,7 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
         "selected_arms": selected_arms,
         "provider_pauses": [pause for report in reports.values() for pause in report["provider_pauses"]],
         "study_provider_pauses": study_pauses,
+        "ledger_repairs": ledger_repairs,
     }
 
 
