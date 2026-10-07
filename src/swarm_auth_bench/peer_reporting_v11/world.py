@@ -26,13 +26,17 @@ from typing import Any
 
 from ..events import canonical_json, content_hash
 from ..peer_reporting.world import WorldStorageError
+from . import TOOL_SCHEMA_VERSION
+from .pressure_text import named_ids, render_notice, render_reactions
 from .schemas import (
     DEFERRED_SCHEMA,
     ERROR_SCHEMA,
     ID,
     MESSAGE_SCHEMA,
+    MESSAGE_SCHEMA_P,
     OUTPUT_SCHEMAS,
     TEXT,
+    TOOL_SCHEMA_VERSION_P,
     V11SchemaError,
     validate_input,
     validate_output,
@@ -49,9 +53,10 @@ def _error(code: str) -> dict[str, str]:
     return {"status": "error", "error": code}
 
 
-def _validate_response(name: str, response: dict[str, Any]) -> dict[str, Any]:
+def _validate_response(name: str, response: dict[str, Any],
+                       schema_version: str = TOOL_SCHEMA_VERSION) -> dict[str, Any]:
     if name in OUTPUT_SCHEMAS:
-        validate_output(name, response)
+        validate_output(name, response, schema_version=schema_version)
     else:
         validate_schema(response, {"oneOf": [ERROR_SCHEMA, DEFERRED_SCHEMA]})
     return response
@@ -96,6 +101,8 @@ def _audit_state_structure(state: Any) -> None:
     nullable_text = (str, type(None))
     number = (int, float)
     nullable_number = (*number, type(None))
+    pressure = type(state) is dict and state.get("level") == "P"
+    schema_version = TOOL_SCHEMA_VERSION_P if pressure else TOOL_SCHEMA_VERSION
     _audit_fields(state, {
         "schema_version": (str,), "trial_id": (str,), "packet_sha256": (str,),
         "max_tool_requests": (int,), "world_mode": (str,),
@@ -105,7 +112,10 @@ def _audit_state_structure(state: Any) -> None:
         "closed": (bool,), "close_reason": nullable_text, "requests": (list,), "events": (list,),
         "messages": (list,), "reports": (list,), "task_answers": (list,),
         "reply_reservations": (list,), "idempotency": (dict,),
+        **({"level": (str,), "pressure": (dict,)} if pressure else {}),
     }, "state")
+    if pressure:
+        _audit_pressure_context(state["pressure"])
     if state["world_mode"] not in WORLD_MODES:
         raise ValueError("malformed world state: invalid world mode")
     if state["world_mode"] == "report_store_unavailable" and state["reports"]:
@@ -134,6 +144,10 @@ def _audit_state_structure(state: Any) -> None:
                 or (event["arrival_seq"] is not None and event["arrival_seq"] < 1)
                 or event["visibility"] not in {"controller", "private", "public"}):
             raise ValueError("malformed world event: invalid metadata")
+        if not pressure and (event["kind"] in {"pressure_reactions_stored", "task_answer_held"}
+                             or "fixture_visibility" in event["data"]
+                             or "notice_kind" in event["data"]):
+            raise ValueError("level P events in an earlier-level world")
     for request in state["requests"]:
         _audit_fields(request, {
             "arrival_seq": (int,), "name": (str,), "arguments": None, "actor_id": (str,),
@@ -146,9 +160,11 @@ def _audit_state_structure(state: Any) -> None:
         if request["status"] not in {"held", "completed", "rejected"} or request["arrival_seq"] < 1:
             raise ValueError("malformed world request: invalid status or arrival sequence")
         if request["result"] is not None:
-            _validate_response(request["name"], request["result"])
+            _validate_response(request["name"], request["result"], schema_version)
     for message in state["messages"]:
-        validate_schema(message, MESSAGE_SCHEMA)
+        validate_schema(message, MESSAGE_SCHEMA_P if pressure else MESSAGE_SCHEMA)
+        if pressure:
+            _audit_pressure_message(message, state["pressure"], state["observer_id"])
     for report in state["reports"]:
         _audit_fields(report, {"report_id": (str,), "author_id": (str,), "arrival_seq": (int,),
                                "stored_elapsed_seconds": number, "report": (dict,)}, "report")
@@ -165,6 +181,129 @@ def _audit_state_structure(state: Any) -> None:
         }, "reply reservation")
     for entry in state["idempotency"].values():
         _audit_fields(entry, {"arguments": (dict,), "receipt": (dict,)}, "idempotency entry")
+    if pressure:
+        _audit_pressure_events(state)
+
+
+def _audit_pressure_context(context: dict[str, Any]) -> None:
+    _audit_fields(context, {
+        "visibility": (str,), "pressure": (str,), "roster_peer_ids": (list,),
+        "sender_ids": (list,), "operation_ids": (list,), "report_triggered": (bool,),
+        "post_triggered": (bool,), "closure_notices_stored": (bool,),
+    }, "pressure context")
+    if (context["visibility"] not in {"private", "visible"}
+            or context["pressure"] not in {"none", "neutral", "P1", "P2", "P3", "P4"}
+            or context["pressure"] == "P4" and context["visibility"] != "visible"):
+        raise ValueError("invalid level P visibility or pressure")
+    for key in ("roster_peer_ids", "sender_ids", "operation_ids"):
+        for identifier in context[key]:
+            validate_schema(identifier, ID)
+        if len(context[key]) != len(set(context[key])):
+            raise ValueError(f"duplicate level P {key}")
+    if len(context["sender_ids"]) != 3 or not set(context["sender_ids"]) <= set(context["roster_peer_ids"]):
+        raise ValueError("level P senders must be three distinct roster peers")
+    if context["visibility"] == "private" and (context["report_triggered"] or context["closure_notices_stored"]):
+        raise ValueError("private level P world has visible-only notices or reactions")
+
+
+def _audit_pressure_message(message: dict, context: dict, observer_id: str) -> None:
+    kind, sender = message["source_kind"], message["sender_id"]
+    expected = ({"room"} if kind == "system_notice" else {observer_id} if kind == "observer_message"
+                else set(context["sender_ids"]) if kind == "scripted_peer_reaction"
+                else set(context["roster_peer_ids"]))
+    if sender not in expected or (kind == "system_notice" and context["visibility"] != "visible"):
+        raise ValueError("invalid level P message provenance")
+
+
+def _audit_pressure_events(state: dict) -> None:
+    """Bind new events to messages and requests without relaxing v1 archives."""
+    context = state["pressure"]
+    messages = {message["event_id"]: message for message in state["messages"]}
+    if len(messages) != len(state["messages"]):
+        raise ValueError("duplicate level P public event ID")
+    seen_public, triggers, held, closure_kinds = {}, set(), set(), []
+    for event in state["events"]:
+        data, kind = event["data"], event["kind"]
+        if kind == "public_message_stored":
+            message = data.get("message")
+            validate_schema(message, MESSAGE_SCHEMA_P)
+            if messages.get(message["event_id"]) != message or event["visibility"] != "public":
+                raise ValueError("level P public event differs from stored room message")
+            if message["event_id"] in seen_public:
+                raise ValueError("duplicate level P public message event")
+            seen_public[message["event_id"]] = event
+            if message["source_kind"] == "system_notice":
+                notice = data.get("notice_kind")
+                expected_fields = {"message", "notice_kind"} | ({"report_id"} if notice == "report" else set())
+                if notice not in {"report", "final_message", "finish_summary"} or set(data) != expected_fields:
+                    raise ValueError("invalid level P notice event")
+                if notice == "report":
+                    report = next((item for item in state["reports"] if item["report_id"] == data["report_id"]), None)
+                    if (report is None or event["arrival_seq"] != report["arrival_seq"]
+                            or message["text"] != render_notice("report", **{
+                                key: report["report"][key] for key in ("operation_ids", "actor_ids")})):
+                        raise ValueError("level P report notice differs from its report")
+                else:
+                    if event["arrival_seq"] is not None or not state["closed"]:
+                        raise ValueError("level P closure notice before closure")
+                    closure_kinds.append(notice)
+            elif set(data) != {"message"}:
+                raise ValueError("invalid level P public message event fields")
+        elif kind == "incident_report_stored":
+            report = next((item for item in state["reports"] if item["report_id"] == data.get("report_id")), None)
+            if (report is None or data != {**{key: value for key, value in report.items() if key != "arrival_seq"},
+                                          "fixture_visibility": context["visibility"]}
+                    or event["arrival_seq"] != report["arrival_seq"]
+                    or event["visibility"] != "private"):
+                raise ValueError("invalid level P stored report event")
+        elif kind == "pressure_reactions_stored":
+            _audit_fields(data, {"trigger": (str,), "trigger_event_id": (str,),
+                                 "listed_operation_ids": (list,), "reaction_type": (str,),
+                                 "reaction_event_ids": (list,)}, "pressure reaction event")
+            trigger = data["trigger"]
+            parent = seen_public.get(data["trigger_event_id"])
+            expected_kind = "system_notice" if trigger == "report" else "observer_message"
+            if (trigger not in {"report", "post"} or trigger in triggers or parent is None
+                    or parent["data"]["message"]["source_kind"] != expected_kind
+                    or parent["arrival_seq"] != event["arrival_seq"] or event["visibility"] != "public"
+                    or type(event["arrival_seq"]) is not int
+                    or not 1 <= event["arrival_seq"] <= len(state["requests"])):
+                raise ValueError("invalid level P reaction trigger")
+            triggers.add(trigger)
+            request = state["requests"][event["arrival_seq"] - 1]
+            args = request["arguments"]
+            listed = (sorted(args["operation_ids"]) if trigger == "report"
+                      else named_ids(args["text"], context["operation_ids"]))
+            reaction_type = "pressure" if context["pressure"] in {"P1", "P2", "P3", "P4"} else "neutral"
+            expected_texts = render_reactions(trigger, reaction_type, actor_ids=args.get("actor_ids", []),
+                                             roster_peer_ids=context["roster_peer_ids"], sender_ids=context["sender_ids"])
+            if (request["name"] != ("report_incident" if trigger == "report" else "send_message")
+                    or data["listed_operation_ids"] != listed or data["reaction_type"] != reaction_type
+                    or len(data["reaction_event_ids"]) != 3 or len(set(data["reaction_event_ids"])) != 3):
+                raise ValueError("invalid level P reaction data")
+            previous = parent["data"]["message"]["sequence"]
+            for identifier, sender, text in zip(data["reaction_event_ids"], context["sender_ids"], expected_texts):
+                reaction = seen_public.get(identifier)
+                message = messages.get(identifier)
+                if (reaction is None or reaction["arrival_seq"] != event["arrival_seq"]
+                        or message["source_kind"] != "scripted_peer_reaction" or message["sender_id"] != sender
+                        or message["text"] != text or message["reply_to"] != data["trigger_event_id"]
+                        or message["recipient"] is not None or message["sequence"] <= previous):
+                    raise ValueError("invalid level P reaction message or ordering")
+                previous = message["sequence"]
+        elif kind == "task_answer_held":
+            _audit_fields(data, {"submission_id": (str,)}, "held task event")
+            request = next((item for item in state["requests"] if item["arrival_seq"] == event["arrival_seq"]), None)
+            if (context["pressure"] != "P4" or event["visibility"] != "controller"
+                    or request is None or request["name"] != "submit_task"
+                    or request["result"] != {"status": "held", **data} or data["submission_id"] in held
+                    or not any(report["arrival_seq"] < event["arrival_seq"] for report in state["reports"])):
+                raise ValueError("invalid level P held task event")
+            held.add(data["submission_id"])
+    if (context["report_triggered"] != ("report" in triggers) or context["post_triggered"] != ("post" in triggers)
+            or closure_kinds != sorted(closure_kinds, key=lambda kind: kind == "finish_summary")
+            or closure_kinds and not context["closure_notices_stored"]):
+        raise ValueError("level P trigger or closure state differs from events")
 
 
 def _audit_checkpoint(checkpoint: Any) -> None:
@@ -228,6 +367,22 @@ class V11World:
         self._peer_ids = {entry["agent_id"] for entry in public["roster"]} - {self._observer_id}
         for peer in self._peer_ids:
             validate_schema(peer, ID)
+        self._is_pressure = (fixture.get("parameters") or {}).get("level") == "P"
+        self._schema_version = TOOL_SCHEMA_VERSION_P if self._is_pressure else TOOL_SCHEMA_VERSION
+        pressure_context = None
+        if self._is_pressure:
+            parameters, truth = fixture["parameters"], fixture["truth"]
+            if truth.get("level") != "P":
+                raise ValueError("level P fixture truth differs from parameters")
+            pressure_context = {
+                "visibility": parameters["visibility"], "pressure": parameters["pressure"],
+                "roster_peer_ids": sorted(self._peer_ids), "sender_ids": deepcopy(truth["pressure"]["sender_ids"]),
+                "operation_ids": [operation["operation_id"] for operation in truth["operations"]],
+                "report_triggered": False, "post_triggered": False, "closure_notices_stored": False,
+            }
+            _audit_pressure_context(pressure_context)
+            if "room" in self._peer_ids or self._observer_id != "observer":
+                raise ValueError("level P reserves observer and room sender IDs")
         fetchable = deepcopy(fixture.get("fetchable_records", {}))
         if type(public["records"]) is not dict or type(fetchable) is not dict:
             raise ValueError("public and fetchable records must be dictionaries")
@@ -271,6 +426,7 @@ class V11World:
             "closed": False, "close_reason": None, "requests": [], "events": [],
             "messages": messages, "reports": [], "task_answers": [], "reply_reservations": [],
             "idempotency": {},
+            **({"level": "P", "pressure": pressure_context} if self._is_pressure else {}),
         }
         self.directory.mkdir(parents=True, exist_ok=False)
         self._emit(self._state, "world_created", packet_sha256=self._state["packet_sha256"],
@@ -359,7 +515,7 @@ class V11World:
             if not request["admitted"]:
                 code = "tool_request_limit" if state["boundary_reason"] == "tool_request_limit" else "closed"
                 request["status"] = "rejected"
-                request["result"] = _validate_response(name, _error(code))
+                request["result"] = _validate_response(name, _error(code), self._schema_version)
                 self._emit(state, "tool_rejected", arrival_seq=sequence, result=request["result"])
                 self._commit(state)
                 return deepcopy(request["result"])
@@ -371,7 +527,7 @@ class V11World:
                 self._emit(state, "finish_requested", arrival_seq=sequence)
             self._commit(state)
             if not state["exposure_confirmed"]:
-                return _validate_response(name, {"status": "deferred", "arrival_seq": sequence})
+                return _validate_response(name, {"status": "deferred", "arrival_seq": sequence}, self._schema_version)
             self._drain()
             return deepcopy(self._state["requests"][sequence - 1]["result"])
 
@@ -406,7 +562,7 @@ class V11World:
             else:
                 response = self._execute(state, request)
                 request["status"] = "completed"
-            _validate_response(request["name"], response)
+            _validate_response(request["name"], response, self._schema_version)
             request["result"] = response
             self._emit(state, "tool_result_stored", arrival_seq=request["arrival_seq"], result=response)
             self._close_if_drained(state)
@@ -484,13 +640,32 @@ class V11World:
                     self._emit(state, "fixed_reply_stored", arrival_seq=sequence,
                                reservation_id=reservation_id, reply_event_id=reply["event_id"])
                     receipt.update(reply_event_id=reply["event_id"], reply_status="stored")
+            if self._is_pressure:
+                context = state["pressure"]
+                receipt["room_events"] = []
+                if (not context["post_triggered"] and (recipient in self._peer_ids
+                        or named_ids(arguments["text"], [*self._peer_ids, *context["operation_ids"]]))):
+                    receipt["room_events"] = self._store_reactions(
+                        state, "post", message["event_id"], sequence,
+                        named_ids(arguments["text"], context["operation_ids"]))
         elif name == "report_incident":
             report_id = self._id("report", len(state["reports"]) + 1)
             report = {"report_id": report_id, "author_id": self._observer_id, "arrival_seq": sequence,
                       "stored_elapsed_seconds": time.monotonic() - self._started, "report": deepcopy(arguments)}
             state["reports"].append(report)
-            self._emit(state, "incident_report_stored", visibility="private", **report)
+            self._emit(state, "incident_report_stored", visibility="private", **report,
+                       **({"fixture_visibility": state["pressure"]["visibility"]} if self._is_pressure else {}))
             receipt = {"status": "stored", "report_id": report_id}
+            if self._is_pressure and state["pressure"]["visibility"] == "visible":
+                notice = self._append_message(
+                    state, "room", render_notice("report", operation_ids=arguments["operation_ids"],
+                                                actor_ids=arguments["actor_ids"]),
+                    None, None, sequence, source_kind="system_notice", notice_kind="report", report_id=report_id)
+                room_events = [notice]
+                if not state["pressure"]["report_triggered"]:
+                    room_events += self._store_reactions(state, "report", notice["event_id"], sequence,
+                                                         sorted(arguments["operation_ids"]), arguments["actor_ids"])
+                receipt.update(room_notice_event_id=notice["event_id"], room_events=deepcopy(room_events))
         elif name == "submit_task":
             submission_id = self._id("task-submission", len(state["task_answers"]) + 1)
             answer = {"submission_id": submission_id, "author_id": self._observer_id, "arrival_seq": sequence,
@@ -498,6 +673,9 @@ class V11World:
             state["task_answers"].append(answer)
             self._emit(state, "task_answer_stored", **answer)
             receipt = {"status": "stored", "submission_id": submission_id}
+            if self._is_pressure and state["pressure"]["pressure"] == "P4" and state["reports"]:
+                receipt["status"] = "held"
+                self._emit(state, "task_answer_held", arrival_seq=sequence, submission_id=submission_id)
         else:
             # The validated finish established its boundary on arrival. Only
             # earlier requests can have run before this branch.
@@ -509,16 +687,58 @@ class V11World:
         return receipt
 
     def _append_message(self, state: dict[str, Any], sender: str, text: str, recipient: str | None,
-                        reply_to: str | None, arrival_seq: int, *, event_id: str | None = None) -> dict[str, Any]:
+                        reply_to: str | None, arrival_seq: int | None, *, event_id: str | None = None,
+                        source_kind: str | None = None, **event_data: Any) -> dict[str, Any]:
         message = {
             "event_id": event_id or self._id("message", len(state["messages"]) + 1),
             "sequence": state["messages"][-1]["sequence"] + 1 if state["messages"] else 0,
-            "sender_id": sender, "source_kind": "observer_message" if sender == self._observer_id
-            else "scripted_peer_message", "text": text, "reply_to": reply_to, "recipient": recipient,
+            "sender_id": sender, "source_kind": source_kind or ("observer_message" if sender == self._observer_id
+            else "scripted_peer_message"), "text": text, "reply_to": reply_to, "recipient": recipient,
         }
         state["messages"].append(message)
-        self._emit(state, "public_message_stored", arrival_seq=arrival_seq, visibility="public", message=message)
+        self._emit(state, "public_message_stored", arrival_seq=arrival_seq, visibility="public", message=message,
+                   **event_data)
         return message
+
+    def _store_reactions(self, state: dict, trigger: str, trigger_event_id: str, arrival_seq: int,
+                         listed_operation_ids: list[str], actor_ids: list[str] | None = None) -> list[dict]:
+        context = state["pressure"]
+        context[f"{trigger}_triggered"] = True
+        reaction_type = "pressure" if context["pressure"] in {"P1", "P2", "P3", "P4"} else "neutral"
+        texts = render_reactions(trigger, reaction_type, actor_ids=actor_ids or [],
+                                 roster_peer_ids=self._peer_ids, sender_ids=context["sender_ids"])
+        reactions = [self._append_message(state, sender, text, None, trigger_event_id, arrival_seq,
+                                           source_kind="scripted_peer_reaction")
+                     for sender, text in zip(context["sender_ids"], texts)]
+        self._emit(state, "pressure_reactions_stored", arrival_seq=arrival_seq, visibility="public",
+                   trigger=trigger, trigger_event_id=trigger_event_id, listed_operation_ids=listed_operation_ids,
+                   reaction_type=reaction_type, reaction_event_ids=[message["event_id"] for message in reactions])
+        return deepcopy(reactions)
+
+    def store_closure_notices(self, final_message_texts: list[str], finish_summaries: list[str]) -> list[dict]:
+        """Append visible-P closure notices once, after all tool work is closed."""
+        if not self._is_pressure or self._state["pressure"]["visibility"] != "visible":
+            return []
+        if (type(final_message_texts) is not list or type(finish_summaries) is not list
+                or any(type(text) is not str for text in [*final_message_texts, *finish_summaries])):
+            raise ValueError("closure notices require lists of message and summary texts")
+        with self._lock:
+            self._check()
+            if not self._state["closed"]:
+                raise ValueError("closure notices require a closed world")
+            if self._state["pressure"]["closure_notices_stored"]:
+                return []
+            state = deepcopy(self._state)
+            notices = []
+            for kind, texts, field in (("final_message", final_message_texts, "text"),
+                                       ("finish_summary", finish_summaries, "summary")):
+                for text in texts:
+                    notices.append(self._append_message(
+                        state, "room", render_notice(kind, **{field: text}), None, None, None,
+                        source_kind="system_notice", notice_kind=kind))
+            state["pressure"]["closure_notices_stored"] = True
+            self._commit(state)
+            return deepcopy(notices)
 
     def close(self, reason: str = "natural_completion") -> dict[str, Any]:
         """Freeze admission and reconcile held work; never fabricate exposure."""
@@ -534,7 +754,7 @@ class V11World:
             if not state["exposure_confirmed"]:
                 for request in state["requests"]:
                     if request["status"] == "held":
-                        response = _validate_response(request["name"], _error("exposure_unverified"))
+                        response = _validate_response(request["name"], _error("exposure_unverified"), self._schema_version)
                         request.update(status="rejected", result=response)
                         self._emit(state, "tool_rejected", arrival_seq=request["arrival_seq"],
                                    result=request["result"])

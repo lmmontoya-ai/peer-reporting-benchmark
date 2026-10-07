@@ -9,11 +9,12 @@ live plan cannot bind the wrong schemas by accident.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from ..events import content_hash
 from . import TOOL_SCHEMA_VERSION
+from .schemas import TOOL_SCHEMA_VERSION_P
 
 TOOL_NAMES = ("read_channel", "send_message", "read_record", "report_incident", "submit_task", "agent_finish")
 MAX_OPERATION_IDS = 32
@@ -36,6 +37,22 @@ class ProtocolBundle:
     build_fixture: Callable[..., dict[str, Any]]
     verify_fixture: Callable[[dict, dict], list[str]]
     build_instructions: Callable[..., str]
+
+    def tool_set(self, version: str) -> ProtocolBundle:
+        """Select archived descriptors, schemas, hashes and wire tools by version."""
+        if version not in {TOOL_SCHEMA_VERSION, TOOL_SCHEMA_VERSION_P}:
+            raise ValueError(f"unknown tool schema version: {version}")
+        if version == self.schema_version:
+            return require_v11_tools(self)
+        from . import schemas
+
+        return require_v11_tools(replace(
+            self, schema_version=version, input_schemas=deepcopy(schemas.INPUT_SCHEMAS),
+            output_schemas=deepcopy(schemas.OUTPUT_SCHEMAS_P if version == TOOL_SCHEMA_VERSION_P
+                                    else schemas.OUTPUT_SCHEMAS),
+            tool_descriptors=deepcopy(schemas.TOOL_DESCRIPTORS_P if version == TOOL_SCHEMA_VERSION_P
+                                       else schemas.TOOL_DESCRIPTORS),
+        ))
 
     @property
     def tool_names(self) -> tuple[str, ...]:
@@ -83,8 +100,8 @@ class ProtocolBundle:
 def require_v11_tools(bundle: ProtocolBundle) -> ProtocolBundle:
     """Refuse any tool set except the six v1.1 tools of spec section 7."""
     failures = []
-    if bundle.schema_version != TOOL_SCHEMA_VERSION:
-        failures.append(f"tool schema version {bundle.schema_version!r} is not {TOOL_SCHEMA_VERSION!r}")
+    if bundle.schema_version not in {TOOL_SCHEMA_VERSION, TOOL_SCHEMA_VERSION_P}:
+        failures.append(f"unknown tool schema version {bundle.schema_version!r}")
     names = bundle.tool_names
     if len(names) != len(TOOL_NAMES) or set(names) != set(TOOL_NAMES):
         failures.append("tool descriptors are not exactly the six v1.1 tools")
@@ -106,6 +123,14 @@ def require_v11_tools(bundle: ProtocolBundle) -> ProtocolBundle:
     if failures:
         raise ValueError("v1.1 tool manifest binding failed: " + "; ".join(failures))
     return bundle
+
+
+def tools_for_levels(bundle: ProtocolBundle, levels: Any) -> ProtocolBundle:
+    """P-A1: select v2 for an all-P root and refuse a mixed root."""
+    levels = set(levels)
+    if "P" in levels and levels != {"P"}:
+        raise ValueError("a live root may not mix level P with other levels")
+    return bundle.tool_set(TOOL_SCHEMA_VERSION_P if levels == {"P"} else TOOL_SCHEMA_VERSION)
 
 
 def load_bundle() -> ProtocolBundle:

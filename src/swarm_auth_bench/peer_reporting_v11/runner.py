@@ -19,7 +19,7 @@ from typing import Callable
 from ..events import content_hash
 from ..peer_reporting.score import TERMINATION_KINDS
 from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
-from .bundle import ProtocolBundle, load_bundle
+from .bundle import ProtocolBundle, load_bundle, tools_for_levels
 from .config import SOCIAL_ARMS, SOCIAL_FIELDS, load_protocol, social_fixture_cells
 from .lanes import EFFORTS, PROMPT_CONDITIONS, TOOL_REQUEST_CAP, lane_id, validate_effort, validate_world_mode
 from .live import read_live_plan, read_root_fixture
@@ -131,6 +131,9 @@ def replay_fixture(fixture: dict, directory: Path, *, attempt_id: str, labels: d
                    max_tool_requests: int = TOOL_REQUEST_CAP) -> dict:
     """Run one authored script through a fresh world in a new directory; return the attempt."""
     bundle = bundle or load_bundle()
+    pressure = fixture["parameters"].get("level") == "P"
+    if pressure:
+        bundle = tools_for_levels(bundle, ["P"])
     world_mode = validate_world_mode(labels["world_mode"])
     validate_effort(labels["effort"])
     script = scripted_observer(fixture, world_mode=world_mode) if script is None else deepcopy(script)
@@ -147,6 +150,10 @@ def replay_fixture(fixture: dict, directory: Path, *, attempt_id: str, labels: d
         for action in script["actions"]:
             world.dispatch(action["tool"], action["arguments"])
         world.close(termination)
+        if pressure and fixture["parameters"]["visibility"] == "visible":
+            summaries = [request["arguments"]["summary"] for request in world.requests
+                         if request["name"] == "agent_finish" and request.get("result") == {"status": "closed"}]
+            world.store_closure_notices([script["final_response"]] if script.get("final_response") else [], summaries)
         checkpoint = world.checkpoint
         state = bundle.audit_state(world.directory, checkpoint)
     except Exception as error:  # durable evidence is audited, never assumed current
@@ -182,6 +189,12 @@ def replay_fixture(fixture: dict, directory: Path, *, attempt_id: str, labels: d
         "usage": {"total_tokens": 0, "observed_total_tokens": 0}, "elapsed_seconds": None,
         "world_checkpoint": checkpoint, "storage_failure": storage_failure, "script": script,
     }
+    if pressure:
+        attempt["pressure_events"] = [deepcopy(event) for event in state["events"]
+                                      if event["kind"] in {"pressure_reactions_stored", "task_answer_held"}
+                                      or event["kind"] == "public_message_stored"
+                                      and event["data"]["message"]["source_kind"] in {
+                                          "system_notice", "scripted_peer_reaction"}]
     atomic_json(directory / "attempt.json", seal(attempt))
     return attempt
 

@@ -9,6 +9,7 @@ from typing import Any
 from . import TOOL_SCHEMA_VERSION
 
 SCHEMA_VERSION = TOOL_SCHEMA_VERSION
+TOOL_SCHEMA_VERSION_P = "peer-reporting-v11-tools-v2"
 DRAFT = "https://json-schema.org/draft/2020-12/schema"
 ID = {"type": "string", "minLength": 1, "maxLength": 100}
 NULLABLE_ID = {**ID, "type": ["string", "null"]}
@@ -102,6 +103,42 @@ TOOL_DESCRIPTORS = [
     for name in INPUT_SCHEMAS
 ]
 
+# Keep all v1 definitions above intact. P-A1 uses these same inputs, including
+# their archived IDs, with one visibility-neutral descriptor/output set.
+MESSAGE_SCHEMA_P = deepcopy(MESSAGE_SCHEMA)
+MESSAGE_SCHEMA_P["properties"]["source_kind"]["enum"] += ["system_notice", "scripted_peer_reaction"]
+MESSAGE_SCHEMA_P["properties"]["text"] = {"type": "string", "minLength": 1}
+MESSAGE_SCHEMA_P.update({
+    "if": {"properties": {"source_kind": {"const": "system_notice"}}},
+    "then": {"properties": {"sender_id": {"const": "room"}}},
+    "else": {"properties": {"text": TEXT, "sender_id": {"not": {"const": "room"}}}},
+})
+_ROOM_REACTIONS = {"type": "array", "items": MESSAGE_SCHEMA_P,
+                   "oneOf": [{"maxItems": 0}, {"minItems": 3, "maxItems": 3}]}
+_P_SUCCESS = {name: deepcopy(schema["oneOf"][0]) for name, schema in OUTPUT_SCHEMAS.items()}
+_P_SUCCESS["read_channel"]["properties"]["messages"]["items"] = MESSAGE_SCHEMA_P
+_P_SUCCESS["send_message"]["properties"]["room_events"] = _ROOM_REACTIONS
+_P_SUCCESS["send_message"]["required"].append("room_events")
+_P_VISIBLE_REPORT = _object({
+    "status": {"const": "stored"}, "report_id": ID, "room_notice_event_id": ID,
+    "room_events": {"type": "array", "items": MESSAGE_SCHEMA_P,
+                    "oneOf": [{"minItems": 1, "maxItems": 1}, {"minItems": 4, "maxItems": 4}]},
+})
+OUTPUT_SCHEMAS_P = {
+    name: {"$schema": DRAFT, "$id": f"urn:{TOOL_SCHEMA_VERSION_P}:{name}:output",
+           "oneOf": [schema, *([_P_VISIBLE_REPORT] if name == "report_incident" else []),
+                     *([_object({"status": {"const": "held"}, "submission_id": ID})]
+                       if name == "submit_task" else []), ERROR_SCHEMA, DEFERRED_SCHEMA]}
+    for name, schema in _P_SUCCESS.items()
+}
+TOOL_DESCRIPTORS_P = [
+    {"name": name,
+     "description": (_DESCRIPTIONS[name].replace("Store a private report", "Store a report", 1)
+                     if name == "report_incident" else _DESCRIPTIONS[name]),
+     "inputSchema": deepcopy(INPUT_SCHEMAS[name]), "outputSchema": deepcopy(OUTPUT_SCHEMAS_P[name])}
+    for name in INPUT_SCHEMAS
+]
+
 
 def scan_wire_specs(specs: list[dict[str, Any]]) -> list[str]:
     """Reject schema IDs and construct names anywhere in serialized runtime tools."""
@@ -152,18 +189,41 @@ def validate_schema(value: object, schema: dict[str, Any], path: str = "") -> No
     if "const" in schema and (type(value) is not type(schema["const"]) or value != schema["const"]):
         raise V11SchemaError(path, "const")
     if "oneOf" in schema:
-        # Every response alternative has a distinct status constant. Select
-        # that branch so an invalid error response retains its field detail.
+        # Preserve v1's status-directed error details. V2 also has two stored
+        # report shapes and array cardinality alternatives without statuses.
         alternatives = schema["oneOf"]
-        selected = alternatives[0]
-        if type(value) is dict:
-            for alternative in alternatives:
-                status = alternative["properties"]["status"]["const"]
-                if type(value.get("status")) is type(status) and value["status"] == status:
-                    selected = alternative
-                    break
-        validate_schema(value, selected, path)
-        return
+        candidates = alternatives
+        if type(value) is dict and all("status" in entry.get("properties", {}) for entry in alternatives):
+            candidates = [entry for entry in alternatives
+                          if value.get("status") == entry["properties"]["status"]["const"]
+                          and type(value.get("status")) is type(entry["properties"]["status"]["const"])]
+            candidates = candidates or alternatives[:1]
+        failures, matches = [], 0
+        for alternative in candidates:
+            try:
+                validate_schema(value, alternative, path)
+                matches += 1
+            except V11SchemaError as error:
+                failures.append(error)
+        if not matches:
+            raise failures[0]
+        if matches != 1:
+            raise V11SchemaError(path, "oneOf")
+    if "not" in schema:
+        try:
+            validate_schema(value, schema["not"], path)
+        except V11SchemaError:
+            pass
+        else:
+            raise V11SchemaError(path, "not")
+    if "if" in schema:
+        try:
+            validate_schema(value, schema["if"], path)
+        except V11SchemaError:
+            conditional = schema.get("else", {})
+        else:
+            conditional = schema.get("then", {})
+        validate_schema(value, conditional, path)
     if type(value) is dict:
         properties = schema.get("properties", {})
         for key in schema.get("required", []):
@@ -179,6 +239,8 @@ def validate_schema(value: object, schema: dict[str, Any], path: str = "") -> No
     elif type(value) is list:
         if len(value) > schema.get("maxItems", len(value)):
             raise V11SchemaError(path, "maxItems", schema["maxItems"])
+        if len(value) < schema.get("minItems", 0):
+            raise V11SchemaError(path, "minItems", schema["minItems"])
         if schema.get("uniqueItems") and any(item in value[:i] for i, item in enumerate(value)):
             raise V11SchemaError(path, "uniqueItems")
         for index, entry in enumerate(value):
@@ -202,7 +264,10 @@ def validate_input(name: str, arguments: object) -> None:
     validate_schema(arguments, INPUT_SCHEMAS[name])
 
 
-def validate_output(name: str, value: object) -> None:
-    if name not in OUTPUT_SCHEMAS:
+def validate_output(name: str, value: object, *, schema_version: str = SCHEMA_VERSION) -> None:
+    if schema_version not in {SCHEMA_VERSION, TOOL_SCHEMA_VERSION_P}:
+        raise ValueError(f"unknown tool schema version: {schema_version}")
+    outputs = OUTPUT_SCHEMAS_P if schema_version == TOOL_SCHEMA_VERSION_P else OUTPUT_SCHEMAS
+    if name not in outputs:
         raise V11SchemaError("", "enum")
-    validate_schema(value, OUTPUT_SCHEMAS[name])
+    validate_schema(value, outputs[name])
