@@ -146,6 +146,9 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--phase", choices=PHASES, required=True)
     build.add_argument("--caps", type=Path, required=True)
     build.add_argument("--revision", required=True)
+    from .schemas import TOOL_SCHEMA_VERSION_P
+    build.add_argument("--tool-schema-version", choices=(TOOL_SCHEMA_VERSION, TOOL_SCHEMA_VERSION_P),
+                       help="compatibility only: select v1 (default) or the level P v2 probe")
     _study(build, "sealed v1.1 study directory (calibration, smoke, collection); the root is registered there")
     build.add_argument("--compatibility", type=Path, action="append", default=[])
     build.add_argument("--smoke", type=Path)
@@ -331,7 +334,8 @@ def _run(args: argparse.Namespace) -> dict:
             raise ValueError("--review-plan applies only to a collection build")
         plan = build_phase_plan(args.phase, read_json(args.caps), revision=args.revision, study_directory=args.study,
                                 compatibility_directories=args.compatibility, smoke_directory=args.smoke,
-                                prior_roots=args.prior_roots, bundle=bundle, review_plan=review, arms=args.arms)
+                                prior_roots=args.prior_roots, bundle=bundle, review_plan=review, arms=args.arms,
+                                tool_schema_version=args.tool_schema_version)
         study = args.study if args.phase != "compatibility" else None
         return {**prepare_live_root(args.root, plan, study_directory=study, prior_roots=args.prior_roots,
                                     bundle=bundle, review_plan=review), "selected_arms": plan[0]["selected_arms"]}

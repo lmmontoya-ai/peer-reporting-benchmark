@@ -57,6 +57,7 @@ from .bundle import ProtocolBundle, load_bundle
 from .lanes import PROVIDER_PAUSE_CLASSIFICATIONS
 from .live import (
     CONFIGURATION_CHECKS,
+    _tool_set_for_plan,
     _row_valid,
     authorization_error,
     check_abandoned_root,
@@ -309,6 +310,7 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
     amendment_errors: list[str] = []
     directory = Path(directory)
     plan = read_live_plan(directory)
+    bundle = _tool_set_for_plan(plan, bundle)
     _require(plan["phase"] != "compatibility",
              "compatibility attempts are engineering checks, not behavioral observations")
     rows: list[dict] = []
@@ -405,6 +407,7 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
              "export must be outside the source live root")
     bundle = bundle or load_bundle()
     plan = read_live_plan(directory)
+    bundle = _tool_set_for_plan(plan, bundle)
     _require(plan["phase"] != "compatibility",
              "compatibility attempts are engineering checks, not behavioral observations")
     registration = root_registration(study_directory, plan, directory=directory, require_finalized=False)

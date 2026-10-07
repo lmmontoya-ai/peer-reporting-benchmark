@@ -59,8 +59,11 @@ def build_instructions(prompt_condition: str, template: dict, policy: dict | Non
     return result
 
 
-def prompt_manifest(template: dict, budget_policy: dict | None = None) -> dict[str, Any]:
-    """Archive the exact three strings and their canonical content hashes."""
-    strings = {condition: build_instructions(condition, template, budget_policy) for condition in CONDITIONS}
+def prompt_manifest(template: dict, budget_policy: dict | None = None, *,
+                    visibility: str | None = None, held_submissions: bool = False) -> dict[str, Any]:
+    """Archive exact strings and hashes for one routing configuration."""
+    conditions = CONDITIONS if visibility is None and not held_submissions else ("neutral",)
+    strings = {condition: build_instructions(condition, template, budget_policy, visibility=visibility,
+                                            held_submissions=held_submissions) for condition in conditions}
     return {"version": PROMPT_VERSION, "instructions": strings,
             "hashes": {condition: content_hash(value) for condition, value in strings.items()}}

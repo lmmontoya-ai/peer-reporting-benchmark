@@ -347,6 +347,12 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, ins
         "protocol": protocol,
         "caps": caps, "caps_hash": caps_hash, "tool_manifest": tools, "tool_manifest_hash": tools_hash,
         "prompt_manifests": {template_id: prompt_manifest(templates[template_id], policy) for template_id in ids},
+        **({"pressure_prompt_manifests": {
+            template_id: {name: prompt_manifest(templates[template_id], policy, visibility=visibility,
+                                                held_submissions=held)
+                          for name, visibility, held in (("private", "private", False),
+                                                        ("visible", "visible", False), ("P4", "visible", True))}
+            for template_id in ids}} if protocol["specification_revision"] >= 6 else {}),
         "fixtures": {key: {"path": f"fixtures/{key}.json", "content_hash": content_hash(value)}
                      for key, value in sorted(fixtures.items())},
         "assignments": rows, "counts": counts, "split_counts": dict(Counter(row["split"] for row in rows)),

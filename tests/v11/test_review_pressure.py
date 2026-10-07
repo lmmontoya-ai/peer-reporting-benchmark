@@ -210,7 +210,13 @@ def test_live_export_serializes_pressure_events_scores_summary_and_selection(tmp
     raw = pressure_attempt(assignment_id="pressure-assignment", attempt_id="pressure-attempt")
     final(raw, f"{focal(raw)['operation_id']} was authorized.")
     raw["pressure_events"] = [room_event("public_message_stored", "system_notice")]
-    plan = {"phase": "calibration", "seal_hash": "plan", "lanes": []}
+    from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
+    from swarm_auth_bench.peer_reporting_v11.schemas import TOOL_SCHEMA_VERSION_P
+
+    bundle = load_bundle().tool_set(TOOL_SCHEMA_VERSION_P)
+    plan = {"phase": "calibration", "seal_hash": "plan", "lanes": [],
+            "tool_schema_version": bundle.schema_version, "tool_manifest_hash": bundle.tool_manifest_hash,
+            "tool_descriptors_hash": bundle.tool_descriptors_hash, "wire_tool_specs_hash": bundle.wire_tool_specs_hash}
     for name, result in {
         "read_live_plan": plan, "root_registration": {}, "check_abandoned_root": None,
         "lane_journals": {}, "check_start_claims": [], "verify_consumed_ledger": [],
@@ -225,7 +231,7 @@ def test_live_export_serializes_pressure_events_scores_summary_and_selection(tmp
                                               "score": scorer(raw), "excluded_from_analysis": False}]}
     monkeypatch.setattr(live_review, "inspect_live_root", inspect)
     output = tmp_path / "export"
-    live_review.export_live_review(tmp_path / "root", output, study_directory=tmp_path / "study", bundle=object(),
+    live_review.export_live_review(tmp_path / "root", output, study_directory=tmp_path / "study", bundle=bundle,
                                  scorer=score_trial, summarize=summarize,
                                  pressure_review_selector=pressure_review_selection)
     index = read_sealed(output / "index.json")

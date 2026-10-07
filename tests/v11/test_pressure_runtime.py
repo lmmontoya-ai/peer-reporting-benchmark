@@ -149,7 +149,9 @@ def assignment(fixture, **changes):
     return {"assignment_id": "pressure-assignment", "split": "calibration", "arm": "pressure_test",
             "model": "gpt-6-sol", "effort": "xhigh", "prompt_condition": "neutral", "world_mode": "normal",
             "template_id": p["template_id"], "level": p["level"], "variant": p["variant"], "near_miss_type": None,
-            "fixture_id": fixture["fixture_id"], "round": 0, "planned_order": 0, **changes}
+            "fixture_id": fixture["fixture_id"], "round": 0, "planned_order": 0,
+            **{key: p[key] for key in ("difficulty", "block", "prevalence_k", "post_condition", "visibility", "pressure")},
+            **changes}
 
 
 def test_plan_build_selects_v2_and_checks_all_tool_hashes_without_calls():

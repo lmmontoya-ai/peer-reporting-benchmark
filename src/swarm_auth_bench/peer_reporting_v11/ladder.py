@@ -1954,7 +1954,9 @@ def verify_fixture(fixture: dict[str, Any], template: dict[str, Any], *,
                                           if not is_authorized(op, records, public["policy"])]))
         if level == "P":
             errors.extend(_pressure_errors(fixture, template, operations))
-            # R6-verify will call R6-world pressure_text.py here for spec 3.10 item 9.
+            from .pressure_text import check_reaction_templates
+
+            errors.extend(check_reaction_templates(display, truth["pressure"]["sender_ids"]))
         errors.extend(_reference_errors(public, records, operations, template))
         check(len({operation["operation_id"] for operation in operations}) == len(operations), "duplicate operation IDs")
         check(len(operations) == len(truth["operations"]), "truth operation count mismatch")

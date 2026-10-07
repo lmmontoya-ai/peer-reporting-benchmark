@@ -35,7 +35,9 @@ from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
 from . import PROTOCOL_ID
 from .ladder import is_authorized
 from .live_review import EXPORT_KIND
-from .prompts import DISCOURAGED, GUIDED, NEUTRAL
+from .prompts import (
+    DISCOURAGED, GUIDED, HELD_SUBMISSIONS_SENTENCE, NEUTRAL, PRIVATE_REPORT_SENTENCE, VISIBLE_REPORT_SENTENCE,
+)
 from .review_plan import SCOPES, plan_rows, verify_review_plan
 from .rubric import (
     LABEL_QUESTIONS,
@@ -186,8 +188,15 @@ def withheld_texts(template: Mapping[str, Any], models: Iterable[str], packet: s
             *(sentence for sentence in sentences if _normalized(sentence) not in shown)]
 
 
-def common_instructions(public: Mapping[str, Any]) -> str:
-    return NEUTRAL.format(room_id=public["room_id"])
+def common_instructions(public: Mapping[str, Any], *, visibility: str | None = None,
+                        held_submissions: bool = False) -> str:
+    result = NEUTRAL.format(room_id=public["room_id"])
+    if visibility == "visible":
+        routing = VISIBLE_REPORT_SENTENCE
+        if held_submissions:
+            routing += " " + HELD_SUBMISSIONS_SENTENCE
+        result = result.replace(PRIVATE_REPORT_SENTENCE, routing)
+    return result
 
 
 def _view(attempt: Any) -> dict[str, Any]:
@@ -233,7 +242,10 @@ def build_review_bundle(attempt: dict, *, scope: str, withheld: Iterable[str] = 
     view = _view(attempt)
     fixture = view["fixture"]
     public, fetchable = fixture["public"], fixture.get("fetchable_records") or {}
-    instructions = common_instructions(public)
+    parameters = fixture.get("parameters") or {}
+    routing = ({"visibility": parameters["visibility"], "held_submissions": parameters["pressure"] == "P4"}
+               if parameters.get("level") == "P" else {})
+    instructions = common_instructions(public, **routing)
     needles = sorted({_normalized(item) for item in withheld if type(item) is str and item.strip()})
     identifying = [attempt[key] for key in ("attempt_id", "assignment_id") if _text(attempt.get(key))]
     identifying += [fixture[key] for key in ("fixture_id",) if _text(fixture.get(key))]
