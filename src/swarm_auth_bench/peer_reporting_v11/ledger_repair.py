@@ -6,11 +6,14 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import tempfile
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ..events import canonical_json, content_hash
+from ..long_events import GENESIS_HASH, iter_events
 from ..peer_reporting.budget import _locked, validate_ledger_identity, validate_ledger_state
 from ..peer_reporting.live import (
     INDEX_FILE,
@@ -28,6 +31,14 @@ from . import PROTOCOL_ID
 
 REPAIR_DIRECTORY = "ledger-repairs"
 REPAIR_KIND = "peer_reporting_v11_ledger_repair"
+BINDING_KIND = "peer_reporting_v11_ledger_repair_binding"
+BINDING_FIELDS = {"kind", "protocol_id", "study", "root", "lane_id", "plan_hash", "corrupt_sha256",
+                  "restored_sha256", "byte_offset", "bit_mask", "identity_seal_hash", "journal", "commit",
+                  "approval_text", "seal_hash"}
+REPAIR_FIELDS = {"kind", "protocol_id", "plan_hash", "lane_id", "lane_plan_hash", "corrupt_sha256",
+                 "restored_sha256", "byte_offset", "bit_mask", "original_byte", "restored_byte",
+                 "journal_reconstruction_hash", "journal", "reason", "approval_text", "recorded_utc",
+                 "binding_hash", "status", "seal_hash"}
 BIT_MASKS = tuple(1 << bit for bit in range(8))
 _SEAL_HEADER = b',"seal_hash":"'
 _SEAL_PROPERTY = re.compile(rb',"seal_hash":"([0-9a-f]{64})"')
@@ -170,89 +181,292 @@ def single_bit_candidates(corrupt: bytes, marker: dict, caps: dict, *, plan_hash
     return list(found.values())
 
 
+def _sha256(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _require_corrupt(raw: bytes) -> None:
+    try:
+        check_seal(json.loads(raw.decode("utf-8")))
+    except (ValueError, UnicodeError):
+        return
+    raise EvidenceError("budget ledger already verifies its seal; repair refused")
+
+
+def _unique_candidate(corrupt: bytes, marker: dict, caps: dict) -> dict:
+    _require_corrupt(corrupt)
+    candidates = single_bit_candidates(corrupt, marker, caps, plan_hash=marker["plan_hash"])
+    if len(candidates) != 1:
+        raise EvidenceError(f"ledger repair requires exactly one single-bit candidate; found {len(candidates)}")
+    return candidates[0]
+
+
+def _evidence_caps(corrupt: bytes, marker: dict) -> dict:
+    """Recover the flat caps object against its independently sealed identity hash.
+
+    A damaged caps key, brace, or value must not require the whole ledger to parse.
+    Enumerate header and object variants, then let the exhaustive ledger search
+    establish the unique bit. Caps validation still runs in that search.
+    """
+    header = b'"caps":{'
+    headers = {header}
+    for offset, byte in enumerate(header):
+        for mask in BIT_MASKS:
+            headers.add(header[:offset] + bytes([byte ^ mask]) + header[offset + 1:])
+    for variant in headers:
+        start = corrupt.find(variant)
+        if start < 0:
+            continue
+        start += len(header) - 1
+        # Either the closing brace or the next property's delimiter is intact.
+        ends = {corrupt.find(b'}', start) + 1, corrupt.find(b',"identity_marker_hash"', start)}
+        for end in sorted(ends):
+            if end <= start:
+                continue
+            raw = corrupt[start:end]
+            variants = [raw]
+            variants.extend(raw[:offset] + bytes([byte ^ mask]) + raw[offset + 1:]
+                            for offset, byte in enumerate(raw) for mask in BIT_MASKS)
+            for value in variants:
+                try:
+                    caps = json.loads(value)
+                    if type(caps) is dict and content_hash(caps) == marker["caps_hash"]:
+                        return caps
+                except (ValueError, UnicodeError):
+                    continue
+    raise EvidenceError("cannot recover caps matching the sealed ledger identity")
+
+
+def _committed_evidence(directory: Path, commit: str) -> tuple[str, dict[str, bytes]]:
+    """Read the named Git snapshot and reject dirty or uncommitted evidence."""
+    def git(*args: str) -> bytes:
+        result = subprocess.run(["git", "-C", str(directory), *args], capture_output=True, check=False)
+        if result.returncode:
+            raise EvidenceError("ledger repair binding requires evidence in the named Git commit")
+        return result.stdout
+
+    repository = Path(os.fsdecode(git("rev-parse", "--show-toplevel").strip())).resolve()
+    relative = directory.resolve().relative_to(repository).as_posix()
+    resolved = git("rev-parse", "--verify", "--end-of-options", f"{commit}^{{commit}}").decode().strip()
+    evidence = {}
+    for name in (LEDGER_FILE, LEDGER_FILE + ".identity.json", JOURNAL_FILE):
+        path = safe_child(directory, name)
+        raw = path.read_bytes()
+        git_path = name if relative == "." else f"{relative}/{name}"
+        if raw != git("show", f"{resolved}:{git_path}"):
+            raise EvidenceError(f"binding evidence {name} differs from the named Git commit")
+        evidence[name] = raw
+    return resolved, evidence
+
+
+def build_ledger_repair_binding(evidence_directory: Path, *, study: str, root: str, lane_id: str,
+                                plan_hash: str, commit: str, approval_text: str) -> dict:
+    """Build the approved offline binding from the exact committed incident bytes."""
+    directory = Path(evidence_directory)
+    resolved, evidence = _committed_evidence(directory, commit)
+    marker = json.loads(evidence[LEDGER_FILE + ".identity.json"])
+    check_seal(marker)
+    corrupt = evidence[LEDGER_FILE]
+    caps = _evidence_caps(corrupt, marker)
+    candidate = _unique_candidate(corrupt, marker, caps)
+    records = list(iter_events(safe_child(directory, JOURNAL_FILE)))
+    if safe_child(directory, JOURNAL_FILE).read_bytes() != evidence[JOURNAL_FILE]:
+        raise EvidenceError("binding journal changed while reading committed evidence")
+    if not records or records[0]["run_id"] != marker["plan_hash"]:
+        raise EvidenceError("binding journal belongs to another lane plan")
+    _check_attempts(candidate["state"], records, caps)
+    binding = seal({
+        "kind": BINDING_KIND, "protocol_id": PROTOCOL_ID, "study": study, "root": root,
+        "lane_id": lane_id, "plan_hash": plan_hash, "commit": resolved, "approval_text": approval_text,
+        "corrupt_sha256": _sha256(corrupt), "restored_sha256": _sha256(candidate["bytes"]),
+        "byte_offset": candidate["byte_offset"], "bit_mask": candidate["bit_mask"],
+        "identity_seal_hash": marker["seal_hash"],
+        "journal": {"count": len(records), "final_hash": records[-1]["hash"],
+                    "sha256": _sha256(evidence[JOURNAL_FILE])},
+    })
+    _validate_binding(binding)
+    return binding
+
+
+def _validate_binding(binding: dict) -> None:
+    check_seal(binding)
+    if (set(binding) != BINDING_FIELDS or binding["kind"] != BINDING_KIND
+            or binding["protocol_id"] != PROTOCOL_ID):
+        raise EvidenceError("invalid ledger repair binding fields or kind")
+    for field in ("study", "root", "lane_id"):
+        _identifier(binding[field], f"binding {field}")
+        if Path(binding[field]).name != binding[field] or "/" in binding[field] or "\\" in binding[field]:
+            raise EvidenceError("binding study, root and lane must be names")
+    for field in ("plan_hash", "corrupt_sha256", "restored_sha256", "identity_seal_hash"):
+        if type(binding[field]) is not str or not re.fullmatch(r"[0-9a-f]{64}", binding[field]):
+            raise EvidenceError(f"invalid binding {field}")
+    checkpoint = binding["journal"]
+    if (type(checkpoint) is not dict or set(checkpoint) != {"count", "final_hash", "sha256"}
+            or type(checkpoint["count"]) is not int or checkpoint["count"] < 1
+            or any(type(checkpoint[field]) is not str or not re.fullmatch(r"[0-9a-f]{64}", checkpoint[field])
+                   for field in ("final_hash", "sha256"))):
+        raise EvidenceError("invalid binding journal checkpoint")
+    if (type(binding["byte_offset"]) is not int or binding["byte_offset"] < 0
+            or type(binding["bit_mask"]) is not int or binding["bit_mask"] not in BIT_MASKS
+            or type(binding["commit"]) is not str or not re.fullmatch(r"[0-9a-f]{40}", binding["commit"])
+            or type(binding["approval_text"]) is not str or not binding["approval_text"].strip()):
+        raise EvidenceError("invalid binding bit, commit or approval")
+
+
+def _check_binding_context(binding: dict, directory: Path, plan: dict, lane: dict, marker: dict) -> None:
+    _validate_binding(binding)
+    expected = {"study": directory.resolve().parent.parent.name, "root": directory.resolve().name,
+                "plan_hash": plan["seal_hash"], "lane_id": lane["lane_id"],
+                "identity_seal_hash": marker["seal_hash"]}
+    if any(binding[field] != value for field, value in expected.items()):
+        raise EvidenceError("ledger repair binding differs from live root identity")
+
+
+def _check_journal_binding(binding: dict, path: Path, records: list[dict], *, tail: list[dict] | None = None) -> None:
+    checkpoint = binding["journal"]
+    count = checkpoint["count"]
+    raw = path.read_bytes()
+    lines = raw.splitlines(keepends=True)
+    final_hash = records[count - 1]["hash"] if 0 < count <= len(records) else GENESIS_HASH
+    if (count > len(records) or final_hash != checkpoint["final_hash"]
+            or _sha256(b"".join(lines[:count])) != checkpoint["sha256"]):
+        raise EvidenceError("lane journal differs from the approved binding checkpoint")
+    if tail is not None and records[count:] != tail:
+        raise EvidenceError("lane journal changed after the approved binding checkpoint")
+
+
 def _repair_records(lane_dir: Path) -> list[tuple[Path, dict]]:
     directory = safe_child(lane_dir, REPAIR_DIRECTORY)
     records = []
     for path in directory.glob("*.json"):
+        if re.fullmatch(r"binding-[0-9a-f]{64}\.json", path.name):
+            continue
         if not re.fullmatch(r"repair-[1-9][0-9]*\.json", path.name):
             raise EvidenceError("invalid ledger repair record filename")
-        path = safe_child(directory, path.name)
-        records.append((path, read_sealed(path)))
+        records.append((safe_child(directory, path.name), read_sealed(path)))
     return sorted(records, key=lambda item: int(item[0].stem.split("-")[1]))
 
 
-def verify_root_ledger_repairs(directory: Path, plan: dict, journals: dict[str, list[dict]]) -> list[dict]:
-    """Verify every sealed record and its retained bytes against the journaled repair."""
+def _binding_path(lane_dir: Path, binding_hash: str) -> Path:
+    if type(binding_hash) is not str or not re.fullmatch(r"[0-9a-f]{64}", binding_hash):
+        raise EvidenceError("invalid ledger repair binding hash")
+    return safe_child(lane_dir, f"{REPAIR_DIRECTORY}/binding-{binding_hash}.json")
+
+
+def _completion(record: dict) -> dict:
+    # Completion changes only status, so its seal is known before declaration.
+    # A crash after the append can match that declaration without appending twice.
+    return seal({**{key: value for key, value in record.items() if key != "seal_hash"}, "status": "complete"})
+
+
+def _declaration(relative: str, complete: dict) -> dict:
+    return {"repair_record": relative, "repair_hash": complete["seal_hash"],
+            "corrupt_sha256": complete["corrupt_sha256"], "restored_sha256": complete["restored_sha256"]}
+
+
+def _check_record(record: dict, binding: dict, plan: dict, lane: dict, corrupt: bytes,
+                  candidate: dict, reconstruction: dict) -> None:
+    check_seal(record)
+    if (set(record) != REPAIR_FIELDS or record["kind"] != REPAIR_KIND
+            or record["protocol_id"] != PROTOCOL_ID or record["status"] not in {"prepared", "complete"}):
+        raise EvidenceError("ledger repair record identity or fields mismatch")
+    expected = {"plan_hash": plan["seal_hash"], "lane_id": lane["lane_id"], "lane_plan_hash": lane["plan_hash"],
+                "binding_hash": binding["seal_hash"], "approval_text": binding["approval_text"],
+                "journal": binding["journal"], "journal_reconstruction_hash": content_hash(reconstruction),
+                "corrupt_sha256": _sha256(corrupt), "restored_sha256": _sha256(candidate["bytes"]),
+                "byte_offset": candidate["byte_offset"], "bit_mask": candidate["bit_mask"],
+                "original_byte": corrupt[candidate["byte_offset"]],
+                "restored_byte": candidate["bytes"][candidate["byte_offset"]]}
+    if any(canonical_json(record[field]) != canonical_json(value) for field, value in expected.items()):
+        raise EvidenceError("ledger repair record differs from binding, bytes or journal reconstruction")
+    if any(type(record[field]) is not str or not record[field].strip() for field in ("reason", "recorded_utc")):
+        raise EvidenceError("ledger repair omits its reason or timestamp")
+
+
+def _bound_candidate(corrupt: bytes, binding: dict, marker: dict, caps: dict) -> dict:
+    _require_corrupt(corrupt)
+    if _sha256(corrupt) != binding["corrupt_sha256"]:
+        raise EvidenceError("corrupt ledger bytes differ from approved binding")
+    candidate = _unique_candidate(corrupt, marker, caps)
+    for field, value in (("restored_sha256", _sha256(candidate["bytes"])),
+                         ("byte_offset", candidate["byte_offset"]), ("bit_mask", candidate["bit_mask"])):
+        if binding[field] != value:
+            raise EvidenceError(f"ledger repair binding {field} differs from computed candidate")
+    return candidate
+
+
+def verify_root_ledger_repairs(directory: Path, plan: dict, journals: dict[str, list[dict]], *,
+                               _pending_path: Path | None = None) -> list[dict]:
+    """Check completed records, approved bindings, retained bytes and journal prefixes."""
     reports = []
-    fields = {"kind", "protocol_id", "plan_hash", "lane_id", "lane_plan_hash", "corrupt_sha256",
-              "restored_sha256", "byte_offset", "bit_mask", "original_byte", "restored_byte",
-              "journal_reconstruction_hash", "journal", "reason", "approval_text", "recorded_utc", "seal_hash"}
     for lane in plan["lanes"]:
         lane_dir = safe_child(directory, lane["path"])
-        records = _repair_records(lane_dir)
+        records = [(path, record) for path, record in _repair_records(lane_dir) if path != _pending_path]
         journal = journals[lane["lane_id"]]
         entries = [entry for entry in journal if entry["kind"] == "ledger_repaired"]
+        if any(record.get("status") != "complete" for _, record in records):
+            raise EvidenceError("ledger repair is prepared but not completed")
         if len(records) != len(entries):
             raise EvidenceError("ledger repair records differ from the lane journal")
         seen = set()
         for (path, record), entry in zip(records, entries, strict=True):
-            if (set(record) != fields or record["kind"] != REPAIR_KIND or record["protocol_id"] != PROTOCOL_ID
-                    or record["plan_hash"] != plan["seal_hash"] or record["lane_id"] != lane["lane_id"]
-                    or record["lane_plan_hash"] != lane["plan_hash"]):
-                raise EvidenceError("ledger repair record identity or fields mismatch")
-            relative = f"{REPAIR_DIRECTORY}/{path.name}"
-            if entry["data"] != {"repair_record": relative, "repair_hash": record["seal_hash"],
-                                 "corrupt_sha256": record["corrupt_sha256"],
-                                 "restored_sha256": record["restored_sha256"]}:
-                raise EvidenceError("ledger repair record differs from its journal entry")
-            for field in ("corrupt_sha256", "restored_sha256", "journal_reconstruction_hash"):
-                if type(record[field]) is not str or not re.fullmatch(r"[0-9a-f]{64}", record[field]):
-                    raise EvidenceError("invalid ledger repair hash")
-            if record["corrupt_sha256"] in seen:
-                raise EvidenceError("a ledger repair repeats the same corrupt hash")
-            seen.add(record["corrupt_sha256"])
-            for field in ("reason", "approval_text", "recorded_utc"):
-                if type(record[field]) is not str or not record[field].strip():
-                    raise EvidenceError("ledger repair omits its reason, approval or timestamp")
-            corrupt = safe_child(lane_dir, f"{REPAIR_DIRECTORY}/{record['corrupt_sha256']}.corrupt").read_bytes()
-            if hashlib.sha256(corrupt).hexdigest() != record["corrupt_sha256"]:
-                raise EvidenceError("retained corrupt ledger bytes differ from their repair hash")
-            offset, mask = record["byte_offset"], record["bit_mask"]
-            if (type(offset) is not int or not 0 <= offset < len(corrupt)
-                    or type(mask) is not int or mask not in BIT_MASKS
-                    or type(record["original_byte"]) is not int or type(record["restored_byte"]) is not int
-                    or record["original_byte"] != corrupt[offset]
-                    or record["restored_byte"] != corrupt[offset] ^ mask):
-                raise EvidenceError("ledger repair does not record exactly one changed bit")
-            restored = corrupt[:offset] + bytes([corrupt[offset] ^ mask]) + corrupt[offset + 1:]
-            if hashlib.sha256(restored).hexdigest() != record["restored_sha256"]:
-                raise EvidenceError("ledger repair restored bytes differ from their hash target")
-            checkpoint = record["journal"]
-            count = entry["sequence"]
-            if canonical_json(checkpoint) != canonical_json({"count": count, "final_hash": entry["previous_hash"]}):
-                raise EvidenceError("ledger repair journal checkpoint mismatch")
+            binding = read_sealed(_binding_path(lane_dir, record.get("binding_hash")))
+            if binding["seal_hash"] != record["binding_hash"]:
+                raise EvidenceError("retained ledger repair binding hash mismatch")
             lane_plan = read_sealed(lane_dir / PLAN_FILE)
             if lane_plan["seal_hash"] != lane["plan_hash"]:
                 raise EvidenceError("ledger repair lane plan mismatch")
             marker = read_sealed(lane_dir / (LEDGER_FILE + ".identity.json"))
-            validate_ledger_identity(marker, lane_plan["caps"], plan_hash=lane["plan_hash"])
-            state = _decode_candidate(restored, marker, lane_plan["caps"], lane["plan_hash"])
-            reconstruction = _check_attempts(state, journal[:count], lane_plan["caps"])
-            if content_hash(reconstruction) != record["journal_reconstruction_hash"]:
-                raise EvidenceError("ledger repair journal reconstruction hash mismatch")
+            _check_binding_context(binding, directory, plan, lane, marker)
+            _check_journal_binding(binding, lane_dir / JOURNAL_FILE, journal)
+            count = binding["journal"]["count"]
+            if entry["sequence"] != count or entry["previous_hash"] != binding["journal"]["final_hash"]:
+                raise EvidenceError("ledger repair journal checkpoint mismatch")
+            corrupt = safe_child(lane_dir, f"{REPAIR_DIRECTORY}/{binding['corrupt_sha256']}.corrupt").read_bytes()
+            candidate = _bound_candidate(corrupt, binding, marker, lane_plan["caps"])
+            reconstruction = _check_attempts(candidate["state"], journal[:count], lane_plan["caps"])
+            _check_record(record, binding, plan, lane, corrupt, candidate, reconstruction)
+            relative = f"{REPAIR_DIRECTORY}/{path.name}"
+            if entry["data"] != _declaration(relative, record):
+                raise EvidenceError("ledger repair record differs from its journal entry")
+            if record["corrupt_sha256"] in seen:
+                raise EvidenceError("a ledger repair repeats the same corrupt hash")
+            seen.add(record["corrupt_sha256"])
             reports.append({"record": f"{lane['path']}/{relative}", **record})
     return reports
 
 
+def _retain_bytes(path: Path, raw: bytes) -> None:
+    """Retain exact bytes atomically so interrupted writes can be retried."""
+    if path.exists():
+        if path.read_bytes() != raw:
+            raise EvidenceError("existing retained corrupt ledger bytes differ")
+        return
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reason: str,
-                  approval_text: str) -> dict:
-    """Repair only the unique canonical, sealed, journal-exact A4 ledger candidate."""
+                  approval_text: str, binding_path: Path) -> dict:
+    """Prepare or finish one approved repair under root, lane and ledger locks."""
     from .live import COORDINATOR_LOCK, check_abandoned_root, read_live_plan, root_registration
     from .phase import INDEX_KIND, PLAN_KIND
 
     for description, text in (("reason", reason), ("approval text", approval_text)):
         if type(text) is not str or not text.strip():
             raise ValueError(f"a ledger repair needs nonempty {description}")
+    binding = read_sealed(binding_path)
+    _validate_binding(binding)
+    if approval_text != binding["approval_text"]:
+        raise EvidenceError("repair approval text differs from approved binding")
     directory = Path(directory)
     with ExitStack() as stack:
         stack.enter_context(_exclusive(directory / COORDINATOR_LOCK))
@@ -279,53 +493,70 @@ def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reaso
         checkpoint = index["journal"]
         if journal.hash_at(checkpoint["count"]) != checkpoint["final_hash"]:
             raise EvidenceError("lane journal differs from the retained index checkpoint")
-        corrupt = ledger_path.read_bytes()
-        try:
-            check_seal(json.loads(corrupt.decode("utf-8")))
-        except (ValueError, UnicodeError):
-            pass
-        else:
-            raise EvidenceError("budget ledger already verifies its seal; repair refused")
-        corrupt_hash = hashlib.sha256(corrupt).hexdigest()
-        prior = _repair_records(lane_dir)
-        if any(record.get("corrupt_sha256") == corrupt_hash for _, record in prior):
-            raise EvidenceError("a repair record for the same corrupt hash already exists")
-        verify_root_ledger_repairs(directory, {**plan, "lanes": [lane]}, {lane_id: journal.records})
         marker = read_sealed(ledger_path.with_suffix(".json.identity.json"))
-        candidates = single_bit_candidates(corrupt, marker, lane_plan["caps"], plan_hash=lane["plan_hash"])
-        if len(candidates) != 1:
-            raise EvidenceError(f"ledger repair requires exactly one single-bit candidate; found {len(candidates)}")
-        candidate = candidates[0]
-        reconstruction = _check_attempts(candidate["state"], journal.records, lane_plan["caps"])
-        restored_hash = hashlib.sha256(candidate["bytes"]).hexdigest()
-        offset, mask = candidate["byte_offset"], candidate["bit_mask"]
-        record = seal({
-            "kind": REPAIR_KIND, "protocol_id": PROTOCOL_ID, "plan_hash": plan["seal_hash"],
-            "lane_id": lane_id, "lane_plan_hash": lane["plan_hash"], "corrupt_sha256": corrupt_hash,
-            "restored_sha256": restored_hash, "byte_offset": offset, "bit_mask": mask,
-            "original_byte": corrupt[offset], "restored_byte": candidate["bytes"][offset],
-            "journal_reconstruction_hash": content_hash(reconstruction),
-            "journal": {"count": journal.count, "final_hash": journal.last_hash},
-            "reason": reason, "approval_text": approval_text, "recorded_utc": datetime.now(timezone.utc).isoformat(),
-        })
-        repairs = safe_child(lane_dir, REPAIR_DIRECTORY)
-        repairs.mkdir(exist_ok=True)
-        retained = safe_child(repairs, f"{corrupt_hash}.corrupt")
-        if retained.exists():
-            if retained.read_bytes() != corrupt:
-                raise EvidenceError("existing retained corrupt ledger bytes differ")
+        _check_binding_context(binding, directory, plan, lane, marker)
+        prior = _repair_records(lane_dir)
+        pending = [(path, record) for path, record in prior if record.get("status") == "prepared"]
+        if len(pending) > 1:
+            raise EvidenceError("multiple prepared ledger repairs")
+        target = ledger_path.read_bytes()
+        retained = safe_child(lane_dir, f"{REPAIR_DIRECTORY}/{binding['corrupt_sha256']}.corrupt")
+        if pending:
+            path, record = pending[0]
+            if record.get("binding_hash") != binding["seal_hash"] or record.get("reason") != reason:
+                raise EvidenceError("prepared repair differs from the same binding or command")
+            corrupt = retained.read_bytes() if retained.exists() else target
         else:
-            with retained.open("xb") as stream:
-                stream.write(corrupt)
-                stream.flush()
-                os.fsync(stream.fileno())
-        number = max((int(path.stem.split("-")[1]) for path, _ in prior), default=0) + 1
-        relative = f"{REPAIR_DIRECTORY}/repair-{number}.json"
-        # Save the declaration before restoring the ledger. An interrupted repair
-        # remains explicit evidence and cannot silently repeat the same corrupt hash.
-        atomic_json(safe_child(lane_dir, relative), record)
-        atomic_json(ledger_path, candidate["state"])
-        journal.append("ledger_repaired", repair_record=relative, repair_hash=record["seal_hash"],
-                       corrupt_sha256=corrupt_hash, restored_sha256=restored_hash)
+            if any(record.get("corrupt_sha256") == binding["corrupt_sha256"] for _, record in prior):
+                raise EvidenceError("a repair record for the same corrupt hash already exists")
+            verify_root_ledger_repairs(directory, {**plan, "lanes": [lane]}, {lane_id: journal.records})
+            corrupt = target
+        candidate = _bound_candidate(corrupt, binding, marker, lane_plan["caps"])
+        if target not in (corrupt, candidate["bytes"]):
+            raise EvidenceError("repair target bytes differ from approved corrupt and restored bytes")
+        count = binding["journal"]["count"]
+        reconstruction = _check_attempts(candidate["state"], journal.records[:count], lane_plan["caps"])
+        if not pending:
+            record = seal({
+                "kind": REPAIR_KIND, "protocol_id": PROTOCOL_ID, "plan_hash": plan["seal_hash"],
+                "lane_id": lane_id, "lane_plan_hash": lane["plan_hash"], "binding_hash": binding["seal_hash"],
+                "corrupt_sha256": binding["corrupt_sha256"], "restored_sha256": binding["restored_sha256"],
+                "byte_offset": candidate["byte_offset"], "bit_mask": candidate["bit_mask"],
+                "original_byte": corrupt[candidate["byte_offset"]],
+                "restored_byte": candidate["bytes"][candidate["byte_offset"]],
+                "journal_reconstruction_hash": content_hash(reconstruction), "journal": binding["journal"],
+                "reason": reason, "approval_text": approval_text, "recorded_utc": datetime.now(timezone.utc).isoformat(),
+                "status": "prepared",
+            })
+            number = max((int(path.stem.split("-")[1]) for path, _ in prior), default=0) + 1
+            path = safe_child(lane_dir, f"{REPAIR_DIRECTORY}/repair-{number}.json")
+        _check_record(record, binding, plan, lane, corrupt, candidate, reconstruction)
+        complete = _completion(record)
+        relative = f"{REPAIR_DIRECTORY}/{path.name}"
+        tail = journal.records[count:]
+        if tail and (len(tail) != 1 or tail[0]["kind"] != "ledger_repaired"
+                     or tail[0]["data"] != _declaration(relative, complete)):
+            raise EvidenceError("lane journal changed after the approved binding checkpoint")
+        _check_journal_binding(binding, lane_dir / JOURNAL_FILE, journal.records, tail=tail if pending else [])
+        if pending:
+            # Other historical repairs must remain intact while this one resumes.
+            verify_root_ledger_repairs(directory, {**plan, "lanes": [lane]},
+                                       {lane_id: journal.records[:count]}, _pending_path=path)
+        binding_copy = _binding_path(lane_dir, binding["seal_hash"])
+        if binding_copy.exists() and read_sealed(binding_copy) != binding:
+            raise EvidenceError("existing retained ledger repair binding differs")
+        if tail and (not retained.exists() or target != candidate["bytes"]):
+            raise EvidenceError("declared repair is missing its retained or restored bytes")
+        path.parent.mkdir(exist_ok=True)
+        if not pending:
+            atomic_json(path, record)
+        if not binding_copy.exists():
+            atomic_json(binding_copy, binding)
+        _retain_bytes(retained, corrupt)
+        if target == corrupt:
+            atomic_json(ledger_path, candidate["state"])
+        if not tail:
+            journal.append("ledger_repaired", **_declaration(relative, complete))
+        atomic_json(path, complete)
     return {"directory": str(directory), "status": "repaired", "repair_record": f"{lane['path']}/{relative}",
-            "repair": record, "live_model_calls": 0}
+            "repair": complete, "live_model_calls": 0}

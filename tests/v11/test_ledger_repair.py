@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import subprocess
 from collections import Counter
 from pathlib import Path
 
@@ -16,9 +17,11 @@ from swarm_auth_bench.peer_reporting_v11 import bundle as bundle_module
 from swarm_auth_bench.peer_reporting_v11 import ledger_repair, live
 from swarm_auth_bench.peer_reporting_v11.cli import main
 from swarm_auth_bench.peer_reporting_v11.ledger_repair import (
+    BINDING_KIND,
     BIT_MASKS,
     REPAIR_KIND,
     _check_attempts,
+    build_ledger_repair_binding,
     single_bit_candidates,
 )
 
@@ -26,6 +29,27 @@ from .live_fakes import caps_record, fake_bundle, study_rows, write_study
 
 DATA = Path(__file__).parent / "data" / "ledger-bitflip-grid"
 LANE = "gpt-6-luna-xhigh"
+APPROVAL = "Approved A4 offline repair."
+
+
+def committed_evidence(directory, raw, identity, journal):
+    directory.mkdir()
+    for name, value in (("budget-ledger.json", raw), ("budget-ledger.json.identity.json", identity),
+                        ("journal.jsonl", journal)):
+        (directory / name).write_bytes(value)
+    for args in (("init", "-q"), ("add", "."), ("commit", "-qm", "Offline synthetic repair evidence.")):
+        subprocess.run(["git", "-C", str(directory), "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false",
+                        "-c", "user.name=Offline test", "-c", "user.email=offline@example.invalid", *args],
+                       check=True, capture_output=True)
+    return directory
+
+
+def bind_lane(lane, evidence):
+    binding = build_ledger_repair_binding(evidence, study=lane["study"].name, root=lane["root"].name,
+                                         lane_id=LANE, plan_hash=lane["plan"]["seal_hash"], commit="HEAD",
+                                         approval_text=APPROVAL)
+    atomic_json(lane["binding"], binding)
+    return binding
 
 
 def flipped(raw, offset, mask=0x20):
@@ -91,8 +115,16 @@ def lane(tmp_path, monkeypatch):
                        **attribution)
     finally:
         journal.close()
-    return {"root": root, "study": study, "directory": lane_dir, "plan": plan, "lane_plan": lane_plan,
-            "budget": budget, "path": path, "original": path.read_bytes(), "reservation": reservation}
+    result = {"root": root, "study": study, "directory": lane_dir, "plan": plan, "lane_plan": lane_plan,
+              "budget": budget, "path": path, "original": path.read_bytes(), "reservation": reservation,
+              "binding": tmp_path / "binding.json"}
+    raw = result["original"]
+    evidence = committed_evidence(tmp_path / "evidence", flipped(raw, raw.index(b"notifications") + 4),
+                                  path.with_suffix(".json.identity.json").read_bytes(),
+                                  (lane_dir / "journal.jsonl").read_bytes())
+    result["evidence"] = evidence
+    bind_lane(result, evidence)
+    return result
 
 
 def corrupt_lane(lane):
@@ -104,7 +136,8 @@ def corrupt_lane(lane):
 
 def command(lane, capsys):
     code = main(["repair-ledger", str(lane["root"]), "--study", str(lane["study"]), "--lane", LANE,
-                 "--reason", "Single-bit storage corruption.", "--approval-text", "Approved A4 offline repair."])
+                 "--reason", "Single-bit storage corruption.", "--approval-text", APPROVAL,
+                 "--binding", str(lane["binding"])])
     return code, json.loads(capsys.readouterr().out)
 
 
@@ -211,7 +244,7 @@ def test_cli_refusals_leave_evidence_unchanged(lane, capsys, damage):
     assert not (lane["directory"] / "ledger-repairs").exists()
     if damage in {"extra_notification", "extra_reservation", "notification_value", "observed_max",
                   "settlement_actual", "settlement_status", "reservation_amount"}:
-        assert "exact journal reconstruction" in report["error"]
+        assert "approved binding" in report["error"]
     elif damage == "valid":
         assert "already verifies" in report["error"]
 
@@ -228,6 +261,7 @@ def test_cli_refuses_repeat_of_the_same_corrupt_bytes(lane, capsys):
 
 
 @pytest.mark.parametrize("damage", ["altered", "deleted", "record", "resealed_record", "missing_record",
+                                    "missing_binding", "binding", "resealed_binding",
                                     "wrong_bit_target", "multiple_bit_mask", "reconstruction_hash"])
 def test_verify_and_export_refuse_tampered_repair_evidence(lane, capsys, tmp_path, damage):
     corrupt_lane(lane)
@@ -241,6 +275,17 @@ def test_verify_and_export_refuse_tampered_repair_evidence(lane, capsys, tmp_pat
         retained.unlink()
     elif damage == "missing_record":
         path.unlink()
+    elif damage in {"missing_binding", "binding", "resealed_binding"}:
+        binding_path = path.parent / f"binding-{record['binding_hash']}.json"
+        if damage == "missing_binding":
+            binding_path.unlink()
+        else:
+            binding = read_sealed(binding_path)
+            binding["commit"] = "0" * 40
+            if damage == "resealed_binding":
+                binding.pop("seal_hash")
+                binding = seal(binding)
+            atomic_json(binding_path, binding)
     else:
         record["byte_offset"] += 1
         if damage in {"wrong_bit_target", "multiple_bit_mask", "reconstruction_hash"}:
@@ -333,3 +378,310 @@ def test_historical_repair_verifies_after_further_ordinary_ledger_updates(lane, 
     lane["budget"].settle("later", 5)
     assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 0
     assert len(json.loads(capsys.readouterr().out)["ledger_repairs"]) == 1
+
+
+
+def test_binding_command_pins_committed_real_grid_evidence(tmp_path, capsys):
+    output = tmp_path / "binding.json"
+    assert main(["ledger-repair-binding", str(DATA), "--study", "social-study", "--root", "social-grid-v1",
+                 "--lane", LANE, "--plan-hash", "a" * 64, "--commit", "8cbe359",
+                 "--approval-text", APPROVAL, "--output", str(output)]) == 0
+    report = json.loads(capsys.readouterr().out)
+    binding = read_sealed(output)
+    assert report["binding"] == binding and report["live_model_calls"] == 0
+    assert binding["kind"] == BINDING_KIND
+    assert binding["commit"] == "8cbe359fef80a26d79ffd1d7733e3116b47958f8"
+    assert binding["corrupt_sha256"] == "c36e197e5fe087106cb926f4056fbcb7cd154c38d7c173b820744c5a83ca524e"
+    assert binding["restored_sha256"] == "3a2f1ac6c96b8cabddf19a4620f6ba7317719042de69546bf07028a4e7f4f235"
+    assert (binding["byte_offset"], binding["bit_mask"]) == (36838, 0x20)
+    assert binding["identity_seal_hash"] == "fbc5a63a727670a07d9c5011ab2d1c5a1d8eef4346e2f20b3c3fff70553b2b30"
+    assert binding["journal"] == {
+        "count": 837, "final_hash": "1da94371017eab2d8d71689875ef6de93ef4047d505e7c0cecb11dd6870df970",
+        "sha256": "a56ccce6049ae9878198cffa7c70523717311bae0e4091cd427c0ec81b2af5f8"}
+
+
+@pytest.mark.parametrize("damage", ["dirty", "uncommitted", "zero", "several"])
+def test_binding_refuses_uncommitted_or_nonunique_evidence(lane, tmp_path, monkeypatch, damage):
+    evidence = lane["evidence"]
+    if damage == "dirty":
+        path = evidence / "budget-ledger.json"
+        path.write_bytes(flipped(path.read_bytes(), 0, 1))
+    elif damage == "uncommitted":
+        evidence = tmp_path / "outside-git"
+        evidence.mkdir()
+    else:
+        monkeypatch.setattr(ledger_repair, "single_bit_candidates", lambda *a, **k: [] if damage == "zero" else [{}, {}])
+    with pytest.raises(ValueError):
+        build_ledger_repair_binding(evidence, study="study", root="a4-test", lane_id=LANE,
+                                   plan_hash=lane["plan"]["seal_hash"], commit="HEAD", approval_text=APPROVAL)
+
+
+@pytest.mark.parametrize("field", sorted(ledger_repair.BINDING_FIELDS) + ["count", "final_hash", "sha256"])
+def test_every_changed_binding_value_refuses(lane, capsys, field):
+    corrupt_lane(lane)
+    binding = read_sealed(lane["binding"])
+    owner = binding["journal"] if field in {"count", "final_hash", "sha256"} else binding
+    value = owner[field]
+    owner[field] = value + 1 if type(value) is int else "changed"
+    atomic_json(lane["binding"], binding)
+    before = file_hashes(lane["root"])
+    assert command(lane, capsys)[0] == 2
+    assert file_hashes(lane["root"]) == before
+
+
+@pytest.mark.parametrize("field", ["study", "root", "lane_id", "plan_hash", "corrupt_sha256", "restored_sha256",
+                                   "byte_offset", "bit_mask", "identity_seal_hash", "count", "final_hash", "sha256",
+                                   "approval_text"])
+def test_resealed_binding_pins_are_compared_to_live_files(lane, capsys, field):
+    corrupt_lane(lane)
+    binding = read_sealed(lane["binding"])
+    binding.pop("seal_hash")
+    owner = binding["journal"] if field in {"count", "final_hash", "sha256"} else binding
+    value = owner[field]
+    if field == "bit_mask":
+        owner[field] = 1
+    elif type(value) is int:
+        owner[field] += 1
+    else:
+        owner[field] = "0" * 64 if len(value) == 64 else "other"
+    atomic_json(lane["binding"], seal(binding))
+    before = file_hashes(lane["root"])
+    assert command(lane, capsys)[0] == 2
+    assert file_hashes(lane["root"]) == before
+
+
+def rewrite_journal(path, edit):
+    records = list(iter_events(path))
+    edit(records)
+    previous = "0" * 64
+    for record in records:
+        record.pop("hash")
+        record["previous_hash"] = previous
+        record["hash"] = previous = content_hash(record)
+    path.write_bytes("".join(canonical_json(record) + "\n" for record in records).encode())
+
+
+@pytest.mark.parametrize("fabrication", ["rollback_unresolved", "admitted_at", "settlement", "ledger_id"])
+@pytest.mark.parametrize("binding", [False, True])
+def test_astra_fabrications_refuse_without_or_with_genuine_binding(lane, capsys, fabrication, binding):
+    journal_path = lane["directory"] / "journal.jsonl"
+    if fabrication == "rollback_unresolved":
+        # Legitimate observation crash window, followed by a fabricated active snapshot.
+        entry = lane["lane_plan"]["planned_order"][0]
+        reservation = entry["attempt_id"] + "~r2"
+        assert lane["budget"].admit(reservation)
+        journal = _Journal(journal_path, lane["lane_plan"]["seal_hash"], create=False)
+        try:
+            journal.append("reservation_admitted", reservation_id=reservation, attempt_id=entry["attempt_id"],
+                           entry_id=entry["entry_id"])
+        finally:
+            journal.close()
+        active = lane["path"].read_bytes()
+        lane["budget"].observe(reservation, "unknown-crash-window", None)
+        assert read_sealed(lane["path"])["attempts"][reservation]["status"] == "unresolved"
+        lane["path"].write_bytes(active)
+    else:
+        state = read_sealed(lane["path"])
+        state.pop("seal_hash")
+        if fabrication == "admitted_at":
+            state["attempts"][lane["reservation"]]["admitted_at"] += 1
+        elif fabrication == "settlement":
+            state["attempts"][lane["reservation"]]["actual"] = 1600
+            def lower(records):
+                next(record for record in records if record["kind"] == "usage_settled")["data"]["actual_tokens"] = 1600
+            rewrite_journal(journal_path, lower)
+        else:
+            marker_path = lane["path"].with_suffix(".json.identity.json")
+            marker = read_sealed(marker_path)
+            marker.pop("seal_hash")
+            marker["ledger_id"] = "0" * 32
+            marker = seal(marker)
+            atomic_json(marker_path, marker)
+            state["ledger_id"] = marker["ledger_id"]
+            state["identity_marker_hash"] = marker["seal_hash"]
+            def change_id(records):
+                next(record for record in records if record["kind"] == "ledger_created")["data"]["ledger_id"] = marker["ledger_id"]
+            rewrite_journal(journal_path, change_id)
+        atomic_json(lane["path"], seal(state))
+    corrupt_lane(lane)
+    # These inputs meet A4's local seal/history conditions.
+    marker = read_sealed(lane["path"].with_suffix(".json.identity.json"))
+    (candidate,) = single_bit_candidates(lane["path"].read_bytes(), marker, lane["lane_plan"]["caps"],
+                                        plan_hash=lane["lane_plan"]["seal_hash"])
+    _check_attempts(candidate["state"], list(iter_events(journal_path)), lane["lane_plan"]["caps"])
+    before = file_hashes(lane["root"])
+    if binding:
+        assert command(lane, capsys)[0] == 2
+    else:
+        with pytest.raises(SystemExit) as error:
+            main(["repair-ledger", str(lane["root"]), "--study", str(lane["study"]), "--lane", LANE,
+                  "--reason", "Single-bit storage corruption.", "--approval-text", APPROVAL])
+        assert error.value.code == 2
+        capsys.readouterr()
+    assert file_hashes(lane["root"]) == before
+
+
+@pytest.mark.parametrize("step", ["before_retention", "after_retention", "after_replacement",
+                                  "before_declaration", "before_completion"])
+def test_interrupted_repair_resumes_and_verification_requires_completion(lane, capsys, monkeypatch, step):
+    corrupt_lane(lane)
+    atomic = ledger_repair.atomic_json
+    retain = ledger_repair._retain_bytes
+    append = _Journal.append
+    with monkeypatch.context() as patch:
+        def interrupted_atomic(path, value):
+            if step == "before_completion" and value.get("kind") == REPAIR_KIND and value.get("status") == "complete":
+                raise OSError("interrupted before completion")
+            atomic(path, value)
+            if step == "after_replacement" and path == lane["path"]:
+                raise OSError("interrupted after replacement")
+        def interrupted_retain(path, raw):
+            if step == "before_retention":
+                raise OSError("interrupted before retention")
+            retain(path, raw)
+            if step == "after_retention":
+                raise OSError("interrupted after retention")
+        def interrupted_append(journal, kind, **data):
+            if step == "before_declaration" and kind == "ledger_repaired":
+                raise OSError("interrupted before declaration")
+            return append(journal, kind, **data)
+        patch.setattr(ledger_repair, "atomic_json", interrupted_atomic)
+        patch.setattr(ledger_repair, "_retain_bytes", interrupted_retain)
+        patch.setattr(_Journal, "append", interrupted_append)
+        assert command(lane, capsys)[0] == 2
+    prepared = read_sealed(lane["directory"] / "ledger-repairs" / "repair-1.json")
+    assert prepared["status"] == "prepared"
+    with pytest.raises(ValueError, match="prepared but not completed"):
+        ledger_repair.verify_root_ledger_repairs(lane["root"], lane["plan"],
+                                               live.lane_journals(lane["root"], lane["plan"]))
+    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 2
+    capsys.readouterr()
+    code, report = command(lane, capsys)
+    assert code == 0 and report["repair"]["status"] == "complete"
+    assert report["repair"]["recorded_utc"] == prepared["recorded_utc"]
+    assert lane["path"].read_bytes() == lane["original"]
+    assert len([record for record in iter_events(lane["directory"] / "journal.jsonl")
+                if record["kind"] == "ledger_repaired"]) == 1
+    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 0
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("damage", ["retained", "target", "prepared", "journal_tail", "journal_bytes", "binding"])
+def test_resumption_checks_all_partial_repair_evidence(lane, capsys, monkeypatch, damage):
+    corrupt_lane(lane)
+    with monkeypatch.context() as patch:
+        append = _Journal.append
+        def interrupted(journal, kind, **data):
+            if kind == "ledger_repaired":
+                raise OSError("interrupted declaration")
+            return append(journal, kind, **data)
+        patch.setattr(_Journal, "append", interrupted)
+        assert command(lane, capsys)[0] == 2
+    path = lane["directory"] / "ledger-repairs" / "repair-1.json"
+    prepared = read_sealed(path)
+    if damage == "retained":
+        retained = path.parent / f"{prepared['corrupt_sha256']}.corrupt"
+        retained.write_bytes(flipped(retained.read_bytes(), 0, 1))
+    elif damage == "target":
+        lane["path"].write_bytes(flipped(lane["original"], 0, 1))
+    elif damage == "prepared":
+        prepared.pop("seal_hash")
+        prepared["original_byte"] += 1
+        atomic_json(path, seal(prepared))
+    elif damage == "journal_tail":
+        journal = _Journal(lane["directory"] / "journal.jsonl", lane["lane_plan"]["seal_hash"], create=False)
+        try:
+            journal.append("operator_note", note="changed since checkpoint")
+        finally:
+            journal.close()
+    elif damage == "journal_bytes":
+        journal_path = lane["directory"] / "journal.jsonl"
+        journal_path.write_bytes(journal_path.read_bytes().replace(b'{', b'{ ', 1))
+    else:
+        binding_path = path.parent / f"binding-{prepared['binding_hash']}.json"
+        value = read_sealed(binding_path)
+        value.pop("seal_hash")
+        value["commit"] = "0" * 40
+        atomic_json(binding_path, seal(value))
+    before = file_hashes(lane["root"])
+    assert command(lane, capsys)[0] == 2
+    assert file_hashes(lane["root"]) == before
+
+
+@pytest.mark.parametrize("damage", ["retained", "binding"])
+def test_prior_roots_recheck_repairs_in_ledger_prepare_verify_and_export(lane, capsys, tmp_path, damage):
+    corrupt_lane(lane)
+    assert command(lane, capsys)[0] == 0
+    rows, fixtures, source = live.load_study(lane["study"], "smoke")
+    ledger = live.prior_root_ledger([lane["root"]], phase="smoke", source=source,
+                                  study_directory=lane["study"], bundle=fake_bundle())
+    successor_plan = live.build_assignment_plan("smoke", rows, fixtures, caps_record(), revision="successor",
+                                                source=source, gate_evidence={}, bundle=fake_bundle(),
+                                                consumed_attempts=ledger)
+    successor = lane["study"] / "roots" / "successor"
+    live.prepare_live_root(successor, successor_plan, study_directory=lane["study"],
+                           prior_roots=[lane["root"]], bundle=fake_bundle())
+    assert live.verify_live_root(successor, study_directory=lane["study"], prior_roots=[lane["root"]],
+                                 bundle=fake_bundle())["consumed_attempt_ledger"]["checked"]
+    record = read_sealed(lane["directory"] / "ledger-repairs" / "repair-1.json")
+    suffix = f"{record['corrupt_sha256']}.corrupt" if damage == "retained" else f"binding-{record['binding_hash']}.json"
+    (lane["directory"] / "ledger-repairs" / suffix).unlink()
+    with pytest.raises((OSError, ValueError)):
+        live.prior_root_ledger([lane["root"]], phase="smoke", source=source,
+                               study_directory=lane["study"], bundle=fake_bundle())
+    refused = lane["study"] / "roots" / "refused"
+    with pytest.raises((OSError, ValueError)):
+        live.prepare_live_root(refused, successor_plan, study_directory=lane["study"],
+                               prior_roots=[lane["root"]], bundle=fake_bundle())
+    assert not refused.exists()
+    with pytest.raises((OSError, ValueError)):
+        live.verify_live_root(successor, study_directory=lane["study"], prior_roots=[lane["root"]], bundle=fake_bundle())
+    assert main(["export-review", str(successor), "--study", str(lane["study"]), "--prior-root", str(lane["root"]),
+                 "--output", str(tmp_path / "export"), "--no-score"]) == 2
+    capsys.readouterr()
+    assert not (tmp_path / "export").exists()
+
+
+
+@pytest.mark.parametrize("location", ["caps_key", "caps_value", "caps_open", "caps_close", "identity_key", "syntax"])
+def test_binding_handles_single_bit_damage_without_parsing_corrupt_json(lane, tmp_path, location):
+    original = lane["original"]
+    offsets = {"caps_key": original.index(b'"caps"') + 2,
+               "caps_value": original.index(b'"reserved_tokens_per_trial":') + len(b'"reserved_tokens_per_trial":'),
+               "caps_open": original.index(b'"caps":') + len(b'"caps":'),
+               "caps_close": original.index(b',"identity_marker_hash"') - 1,
+               "identity_key": original.index(b'"identity_marker_hash"') + 2, "syntax": 1}
+    offset = offsets[location]
+    raw = flipped(original, offset, 1)
+    evidence = committed_evidence(tmp_path / "syntax-evidence", raw,
+                                  lane["path"].with_suffix(".json.identity.json").read_bytes(),
+                                  (lane["directory"] / "journal.jsonl").read_bytes())
+    binding = bind_lane(lane, evidence)
+    assert (binding["byte_offset"], binding["bit_mask"]) == (offset, 1)
+    assert binding["restored_sha256"] == hashlib.sha256(original).hexdigest()
+
+
+def test_second_repair_resumes_and_rechecks_first_repair(lane, capsys, tmp_path, monkeypatch):
+    corrupt_lane(lane)
+    assert command(lane, capsys)[0] == 0
+    raw = flipped(lane["path"].read_bytes(), len(lane["original"]) - 1, 1)
+    evidence = committed_evidence(tmp_path / "second-evidence", raw,
+                                  lane["path"].with_suffix(".json.identity.json").read_bytes(),
+                                  (lane["directory"] / "journal.jsonl").read_bytes())
+    bind_lane(lane, evidence)
+    lane["path"].write_bytes(raw)
+    with monkeypatch.context() as patch:
+        append = _Journal.append
+        def interrupted(journal, kind, **data):
+            if kind == "ledger_repaired":
+                raise OSError("interrupted second repair")
+            return append(journal, kind, **data)
+        patch.setattr(_Journal, "append", interrupted)
+        assert command(lane, capsys)[0] == 2
+    assert command(lane, capsys)[0] == 0
+    report = live.verify_live_root(lane["root"], study_directory=lane["study"], bundle=fake_bundle())
+    assert len(report["ledger_repairs"]) == 2
+    first = read_sealed(lane["directory"] / "ledger-repairs" / "repair-1.json")
+    (lane["directory"] / "ledger-repairs" / f"{first['corrupt_sha256']}.corrupt").unlink()
+    with pytest.raises(OSError):
+        live.verify_live_root(lane["root"], study_directory=lane["study"], bundle=fake_bundle())
