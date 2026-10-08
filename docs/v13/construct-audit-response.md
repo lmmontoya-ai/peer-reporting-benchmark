@@ -132,9 +132,17 @@ accepted, and section 13 lists where each is applied.
 - **Receipts.** Validation compares complete messages for each request: notice and
   reactions for the report that fired the trigger, the notice alone for later reports.
 
+## Round 8
+
+Astra ([discussion-r8-astra.md](discussion-r8-astra.md)) and Fable
+([discussion-r8-fable.md](discussion-r8-fable.md)) both returned AGREE. Fable's three minor
+notes are applied: scripting remarks count toward the credibility rule only in flagged or
+sampled trials; the level P `send_message` description drops "fixed"; and the
+turn-result rule cites the v1.1 runtime. Astra noted that the label rename touches the
+generator, schema, world validation, runner and review paths; that is implementation work.
+
 ## Next
 
-Round 8: Astra and Fable confirm the round 7 fixes. R6-fix implements P-A3 together with
-the six code findings, and the generated fixture audit (6.9 MB) is reduced in size. An
-Astra confirmation review follows. No model call runs before the user authorizes the v2
-compatibility plan and the gate and pilot plan.
+R6-fix implements P-A3 together with the six code findings, and the generated fixture
+audit (6.9 MB) is reduced in size. An Astra confirmation review follows. No model call
+runs before the user authorizes the v2 compatibility plan and the gate and pilot plan.
