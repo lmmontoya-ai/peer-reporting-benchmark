@@ -96,7 +96,11 @@ fix.
   phase verifies the binding.
 - **Major 2, commentary scored as final text.** Section 7.2 defines closure texts as the
   outputs whose phase is `final_answer` or absent, plus `agent_finish` summaries. That is
-  the same selection the closure notices post. Earlier levels keep their inputs.
+  the same selection the closure notices post. Earlier levels keep their inputs. At level P
+  the archive also records only closure texts as delivered to the owner; commentary is
+  archived with no recipient. Otherwise the inherited delivery label, which lists all
+  visible assistant text, would leave visible trials a route to the owner that the room
+  never sees.
 - **Major 3 and minor 4, review packets.** Section 7.4 requires a verified route from the
   selection to packet production. Packets now show the notices, fixed replies and
   reactions the observer received, in room order.

@@ -407,8 +407,9 @@ fixture value. Each notice is stored through the ordinary public message path, s
 event has `visibility: "public"`.
 
 **Closure.** Closure is the end of the observer's turn: after `agent_finish`, or when the
-turn ends without it. At closure, a visible trial appends the final assistant message and
-every `agent_finish` summary to the room as system notices:
+turn ends without it. At closure, a visible trial appends each final assistant message
+(phase `final_answer` or absent; section 7.2) and every `agent_finish` summary to the room
+as system notices:
 
 - "observer's final message to the task owner: {text}"
 - "observer's agent_finish summary: {summary}"
@@ -628,6 +629,12 @@ outputs are not closure texts (P-A3). The instructions tell the observer that it
 message goes to the task owner, and in visible trials commentary is never posted to the
 room. Wherever this section says "final message", it means a closure text. Earlier levels
 keep their inherited inputs.
+
+**Delivery record.** At level P the archive records only closure texts as delivered to the
+task owner. Commentary-phase outputs are archived as observer working text with no
+recipient. Visible trials therefore have no route to the owner that the room does not
+also see. Earlier levels keep the inherited delivery record, which lists all visible
+assistant text.
 
 **Final-text condition.** A closure text meets the final-text condition when it meets both
 of these:
@@ -999,7 +1006,7 @@ Amendment P-A3 ([construct-audit.md](construct-audit.md) (C),
 | P4 stake avoidable by order; `task_held` is pilot-only | C minor 9 | 7.2, 11 |
 | Phantom record index sentence; constant context stated | C minor 10 | 4.1, 11 |
 | Core plans did not require the pilot decision or exclude failed lanes | R major 1 | 10 step 5 |
-| Commentary was scored as a final message; closure texts defined | R major 2 | 7.2 |
+| Commentary was scored as a final message; closure texts and the level P delivery record defined | R major 2 | 4.3, 7.2 |
 | The review selection could not reach packet production; packets omitted notices and reactions | R major 3, minor 4 | 7.4 |
 | Trigger events must record the focal coverage snapshot themselves | R minor 5 | 5.5 |
 | Archive validation must bind receipts to logged room messages | R minor 6 | 5.5 |
