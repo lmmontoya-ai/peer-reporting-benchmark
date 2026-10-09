@@ -1680,8 +1680,9 @@ def verify_consumed_ledger(directory: Path, plan: dict, prior_roots: list[Path] 
 
 def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_directory: Path | None = None,
                       prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None,
-                      review_plan: dict | None = None) -> dict:
-    """Write a fresh sealed root.
+                      review_plan: dict | None = None,
+                      pilot_decision_verifier: Callable[..., dict] | None = None) -> dict:
+    """Write a fresh sealed root, rechecking its final core decision offline.
 
     A behavioral root must be ``study_directory/roots/<name>``; its registration
     records that relative path. A collection root retains ``review_plan``, which
@@ -1697,10 +1698,15 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
     a pending root, which blocks later builds of the phase until it is abandoned.
     """
     top, lane_plans, fixtures = plan
-    from .pilot import verify_core_binding
+    from .pilot import CORE_ARMS, verify_core_binding
 
-    verify_core_binding(top, entry_arms={entry["arm"] for lane in lane_plans.values() for entry in lane["planned_order"]},
-                        entry_lanes=set(lane_plans))
+    entry_arms = {entry["arm"] for lane in lane_plans.values() for entry in lane["planned_order"]}
+    core_arms = entry_arms | set(top.get("selected_arms") or [])
+    verify_core_binding(top, entry_arms=core_arms, entry_lanes=set(lane_plans))
+    if core_arms & CORE_ARMS:
+        if pilot_decision_verifier is None:
+            raise ValueError("core prepare requires offline pilot decision verification")
+        pilot_decision_verifier(top["pilot_decision"], study_manifest_hash=top["source"]["study_manifest_hash"])
     directory = Path(directory)
     ledger = top.get("consumed_attempts")
     if top["phase"] == "collection":

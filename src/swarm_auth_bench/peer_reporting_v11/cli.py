@@ -367,7 +367,8 @@ def _run(args: argparse.Namespace) -> dict:
                                 pilot_decision_verifier=decision_verifier)
         study = args.study if args.phase != "compatibility" else None
         return {**prepare_live_root(args.root, plan, study_directory=study, prior_roots=args.prior_roots,
-                                    bundle=bundle, review_plan=review), "selected_arms": plan[0]["selected_arms"]}
+                                    bundle=bundle, review_plan=review,
+                                    pilot_decision_verifier=decision_verifier), "selected_arms": plan[0]["selected_arms"]}
     if args.command == "verify":
         from .live import verify_live_root
 
