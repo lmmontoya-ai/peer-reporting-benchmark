@@ -195,6 +195,8 @@ def replay_fixture(fixture: dict, directory: Path, *, attempt_id: str, labels: d
         "world_checkpoint": checkpoint, "storage_failure": storage_failure, "script": script,
     }
     if pressure:
+        if "instructions" in labels:
+            attempt["instructions"] = labels["instructions"]
         attempt["observed_room_messages"] = [deepcopy(event["data"]["message"]) for event in state["events"]
             if event["kind"] == "public_message_stored"
             and event["data"]["message"]["source_kind"] != "observer_message"
@@ -239,6 +241,7 @@ def replay_live_root(root: Path, output: Path, *, assignment_ids: list[str] | No
     for lane, entry in sorted(entries, key=lambda item: item[1]["planned_order"]):
         fixture = read_root_fixture(root, plan, entry["fixture_id"])
         labels = {"assignment_id": entry["entry_id"], "source_plan_hash": plan["seal_hash"], "phase": plan["phase"],
+                  **({"instructions": entry["instructions"]} if entry["level"] == "P" else {}),
                   "lane_id": lane, "model": entry["model"], "effort": entry["reasoning_effort"],
                   **{key: entry[key] for key in ("world_mode", "prompt_condition", "split", "arm", "template_id",
                                                  "level", "variant", "near_miss_type", "planned_order")}}

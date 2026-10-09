@@ -146,7 +146,7 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
         "assignment_id": entry["entry_id"], "attempt_id": payload["attempt_id"], "primary": True,
         "attempt_number": 1, "fixture": fixture, "source_attempt_hash": content_hash(payload),
         "source_plan_hash": payload["plan_hash"], **_labels(entry, phase, lane),
-        **({"pressure_events": []} if fixture["truth"]["level"] == "P" else {}),
+        **({"pressure_events": [], "instructions": entry["instructions"]} if fixture["truth"]["level"] == "P" else {}),
     }
     if result is None:
         return {**base, "eligible": False, "exposure_confirmed": False,

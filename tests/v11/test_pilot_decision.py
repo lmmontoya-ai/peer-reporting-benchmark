@@ -1,7 +1,9 @@
 """Sealed pilot/core enforcement using hand-built offline observation doubles."""
 
+import json
 from copy import deepcopy
 from dataclasses import replace
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -20,10 +22,12 @@ from swarm_auth_bench.peer_reporting_v11.pilot import (
     validate_core_decision,
     verify_core_binding,
 )
+from swarm_auth_bench.peer_reporting_v11.review import validate_review_upload, write_review_packets
 from swarm_auth_bench.peer_reporting_v11.review_plan import pressure_review_selection
 from swarm_auth_bench.peer_reporting_v11.score import score_trial
 
 from .pressure_fakes import report
+from .review_helpers import review
 from .test_score_pressure import pressure_attempt
 
 
@@ -371,3 +375,57 @@ async def test_run_refuses_changed_decision_binding_before_runtime_creation(tmp_
     with pytest.raises(ValueError, match="hash binding"):
         await live.run_live_phase(root, caps_record=wp6_inputs["caps_record"], authorization={},
                                   runtime_factory=lambda *args: pytest.fail("runtime created before decision check"))
+
+
+def finished_packet(tmp_path, inputs):
+    source = Path(inputs["pilot_exports"][0]["path"])
+    selection = read_sealed(source)["pressure_review_selection"]
+    output = tmp_path / "finished-packets"
+    write_review_packets(source.parent, selection, output)
+    path = next((output / "reviewer").glob("*.json"))
+    return read_sealed(path), path.with_suffix(".html").read_text(encoding="utf-8"), read_sealed(
+        output / "controller" / path.name)
+
+
+@pytest.mark.parametrize("retained_in_attempt", [False, True])
+def test_finished_packet_displays_exact_frozen_live_assignment_instructions(tmp_path, decision_inputs, retained_in_attempt):
+    def changes(data, rows):
+        if retained_in_attempt:
+            for row in rows:
+                data[row["assignment_id"]]["instructions"] = row["instructions"]
+    packet, html, controller = finished_packet(tmp_path, decision_inputs[-1](changes))
+    frozen = next(row for row in decision_inputs[0]["assignments"]
+                  if row["assignment_id"] == controller["assignment_id"])
+    assert packet["common_instructions"].encode() == frozen["instructions"].encode()
+    assert "The trial allows at most" in packet["common_instructions"]
+    assert "This is an offline candidate" not in packet["common_instructions"]
+    assert "This is an offline candidate" not in html
+    if retained_in_attempt:
+        assert controller["attempt"]["instructions"] == packet["common_instructions"]
+
+
+def test_packet_refuses_invented_instruction_paragraph_in_resealed_attempt(tmp_path, decision_inputs):
+    def changes(data, rows):
+        for row in rows:
+            data[row["assignment_id"]]["instructions"] = row["instructions"] + "\n\nThis is an offline candidate."
+    inputs = decision_inputs[-1](changes)
+    with pytest.raises(ValueError, match="instructions differ.*frozen assignment"):
+        finished_packet(tmp_path, inputs)
+    assert not (tmp_path / "finished-packets").exists()
+
+
+def test_finished_html_has_descriptive_questions_and_valid_completed_upload(tmp_path, decision_inputs):
+    packet, html, controller = finished_packet(tmp_path, decision_inputs[-1]())
+    shown = unescape(html)
+    assert all(question in shown for question in packet["descriptive_codes"].values())
+    assert "For each question, answer yes or no." in shown
+    encoded = html.split("<h2>Response template</h2><pre>", 1)[1].split("</pre>", 1)[0]
+    upload = json.loads(unescape(encoded))
+    assert upload == {"review_packet_hash": packet["review_packet_hash"],
+                      "labels_by_output_id": packet["label_template"],
+                      "descriptive_codes": packet["descriptive_code_template"]}
+    upload["labels_by_output_id"] = {identifier: review() for identifier in upload["labels_by_output_id"]}
+    upload["descriptive_codes"] = {"authorization_engagement": "yes", "routing_awareness": "no", "scripting_remark": "no"}
+    validated = validate_review_upload(upload, packet, controller=controller)
+    assert validated["bindings_verified"] and not validated["missing_final_output_ids"]
+    assert validated["descriptive_codes"] == upload["descriptive_codes"]
