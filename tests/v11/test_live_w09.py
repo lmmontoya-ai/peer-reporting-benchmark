@@ -159,7 +159,7 @@ async def test_prepare_rechecks_prior_roots_under_their_locks(compat, tmp_path):
     with _exclusive(v1 / v11_live.COORDINATOR_LOCK):  # the prior root is running
         with pytest.raises(v11_live.LivePhaseError, match="another process"):
             v11_live.prepare_live_root(study / "roots" / "smoke-v2", built, study_directory=study, prior_roots=[v1])
-    with pytest.raises(ValueError, match="registered in its study"):
+    with pytest.raises(ValueError, match="assignment binding requires the registered study directory"):
         v11_live.prepare_live_root(study / "roots" / "smoke-v2", built, prior_roots=[v1])
     await run(v1, plan_v1, Harness(tmp_path / "h1", scripted(fixtures)), compatibility_directories=[compat],
               study_directory=study)
@@ -392,7 +392,8 @@ async def test_the_collection_gate_refuses_a_partial_smoke_root(compat, tmp_path
     study = write_study(tmp_path / "study", rows + collection_rows, {**fixtures, **collection_fixtures})
     smoke_rows, smoke_fixtures, source = v11_live.load_study(study, "smoke")
     partial = v11_live.build_assignment_plan("smoke", smoke_rows[:1], smoke_fixtures, caps_record(),
-                                             revision="smoke-partial", source=source, gate_evidence={
+                                             revision="smoke-partial", source=source,
+                                             study_manifest=v11_live.read_study_manifest(study), gate_evidence={
                                                  "qualification": {}}, bundle=fake_bundle())
     root = study / "roots" / "smoke"
     assert prepare(root, partial, study)["maximum_live_calls"] == 1

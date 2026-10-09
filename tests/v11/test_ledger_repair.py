@@ -87,6 +87,7 @@ def lane(tmp_path, monkeypatch):
     study = write_study(tmp_path / "study", rows, fixtures, caps=caps)
     _, _, source = live.load_study(study, "smoke")
     built = live.build_assignment_plan("smoke", rows, fixtures, caps, revision="a4-test", source=source,
+                                       study_manifest=live.read_study_manifest(study),
                                        gate_evidence={}, bundle=fake_bundle())
     root = study / "roots" / "a4-test"
     live.prepare_live_root(root, built, study_directory=study, bundle=fake_bundle())
@@ -774,6 +775,7 @@ def test_prior_roots_recheck_repairs_in_ledger_prepare_verify_and_export(lane, c
                                   study_directory=lane["study"], bundle=fake_bundle())
     successor_plan = live.build_assignment_plan("smoke", rows, fixtures, caps_record(), revision="successor",
                                                 source=source, gate_evidence={}, bundle=fake_bundle(),
+                                                study_manifest=live.read_study_manifest(lane["study"]),
                                                 consumed_attempts=ledger)
     successor = lane["study"] / "roots" / "successor"
     live.prepare_live_root(successor, successor_plan, study_directory=lane["study"],

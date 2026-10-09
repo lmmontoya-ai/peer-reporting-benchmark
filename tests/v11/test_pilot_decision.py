@@ -30,12 +30,16 @@ from swarm_auth_bench.peer_reporting_v11.score import score_trial
 
 from .pressure_fakes import report
 from .review_helpers import review
-from .review_root_helpers import register_review_root
+from .review_root_helpers import bind_review_root_observations, register_review_root
 from .test_score_pressure import pressure_attempt
 
 
 @pytest.fixture
-def decision_inputs(tmp_path, wp6_study):
+def decision_inputs(tmp_path, wp6_study, monkeypatch):
+    return make_decision_inputs(tmp_path, wp6_study, monkeypatch)
+
+
+def make_decision_inputs(tmp_path, wp6_study, monkeypatch):
     directory, manifest, _ = wp6_study
     fixtures = {}
     for row in manifest["assignments"]:
@@ -46,7 +50,7 @@ def decision_inputs(tmp_path, wp6_study):
     study = tmp_path / "decision-study"
     study.mkdir()
     atomic_json(study / live.STUDY_MANIFEST, manifest)
-    _, source_plan, registration = register_review_root(study, manifest, rows, "pilot")
+    root, source_plan, registration = register_review_root(study, manifest, rows, "pilot")
     # A non-ceiling P3 pilot, with every task answered correctly.
     silent = next(row["assignment_id"] for row in rows if row["pressure"] == "P3" and row["visibility"] == "visible"
                   and row["prevalence_k"] == 1 and row["variant"] == "violation")
@@ -67,7 +71,11 @@ def decision_inputs(tmp_path, wp6_study):
         raw["task_submissions"] = [{**f["truth"]["expected_task"], "request_id": "task"}]
         attempts[row["assignment_id"]] = raw
 
+    primary_rows = []
+    bind_review_root_observations(monkeypatch, root, source_plan, lambda: primary_rows)
+
     def write(changes=None):
+        nonlocal primary_rows
         data = deepcopy(attempts)
         if changes:
             changes(data, rows)
@@ -79,6 +87,8 @@ def decision_inputs(tmp_path, wp6_study):
             atomic_json(export / path, seal(raw))
             entries.append({"assignment_id": identifier, "status": "archived", "attempt_path": path,
                             "attempt_hash": content_hash(raw), "score": score_trial(raw), "excluded_from_analysis": False})
+        primary_rows = [{**{key: value for key, value in entry.items() if key not in ("attempt_path", "attempt_hash")},
+                         "attempt": data[entry["assignment_id"]]} for entry in entries]
         selection = pressure_review_selection([entry["score"] for entry in entries])
         atomic_json(export / "index.json", seal({"kind": "peer_reporting_v11_live_review_export",
             "study_manifest": manifest, "study_registration": registration, "phase": "calibration",
@@ -94,6 +104,7 @@ def core_build(decision_inputs, wp6_inputs, record):
     rows = [row for row in manifest["assignments"] if row["arm"] in CORE_ARMS]
     return live.build_assignment_plan("calibration", rows, fixtures, wp6_inputs["caps_record"], revision="core-double",
         source={"kind": "study_manifest", "study_manifest_hash": manifest["seal_hash"]}, gate_evidence={},
+        study_manifest=manifest,
         bundle=replace(load_bundle(), verify_fixture=lambda *args: []), selected_arms=sorted(CORE_ARMS), pilot_decision=record,
         pilot_decision_verifier=validate_core_decision)
 
@@ -324,12 +335,31 @@ def test_combined_export_counts_only_sampled_or_flagged_scripting_remarks(decisi
         build_pilot_decision(**inputs, confirmed_scripting_remarks=[unsampled])
 
 
-def test_decision_accepts_different_arms_in_separate_exports(tmp_path, decision_inputs):
+def test_decision_accepts_different_arms_in_separate_exports(tmp_path, decision_inputs, monkeypatch):
     inputs = decision_inputs[-1]()
     index = read_sealed(inputs["gate_exports"][0]["path"])
     groups = [{row["assignment_id"] for row in index["rows"] if row["score"]["arm"] == arm}
               for arm in sorted(GATE_ARMS | PILOT_ARMS)]
-    references = partition_export(inputs["gate_exports"][0], groups, tmp_path)
+    from .test_review_population import write_local_export
+
+    manifest = index["study_manifest"]
+    study = tmp_path / "separate-arms-study"
+    study.mkdir()
+    atomic_json(study / live.STUDY_MANIFEST, manifest)
+    references = []
+    for number, identifiers in enumerate(groups):
+        assignments = [row for row in manifest["assignments"] if row["assignment_id"] in identifiers]
+        root, plan, registration = register_review_root(study, manifest, assignments, f"arm-{number}")
+        rows = []
+        for entry in index["rows"]:
+            if entry["assignment_id"] in identifiers:
+                stored = read_sealed(Path(inputs["gate_exports"][0]["path"]).parent / entry["attempt_path"])
+                rows.append({**{key: value for key, value in entry.items() if key not in ("attempt_path", "attempt_hash")},
+                             "attempt": {key: value for key, value in stored.items() if key != "seal_hash"}})
+        bind_review_root_observations(monkeypatch, root, plan, lambda rows=rows: rows)
+        output = tmp_path / f"complete-arm-export-{number}"
+        write_local_export(output, study, manifest, plan, registration, rows)
+        references.append(export_reference(output))
     split = build_pilot_decision(gate_exports=references[:2], pilot_exports=references[2:])
     combined = build_pilot_decision(**inputs)
     assert split["rungs"] == combined["rungs"] and split["pooled_gate"] == combined["pooled_gate"]
@@ -378,6 +408,7 @@ async def test_run_refuses_changed_decision_binding_before_runtime_creation(tmp_
     root.mkdir()
     monkeypatch.setattr(live, "read_live_plan", lambda *args: top)
     monkeypatch.setattr(live, "planned_arms", lambda *args: CORE_ARMS)
+    monkeypatch.setattr(live, "check_root_assignment_binding", lambda *args: None)
     monkeypatch.setattr(live, "root_registration", lambda *args, **kwargs: None)
     monkeypatch.setattr(live, "validate_authorization", lambda *args, **kwargs: {})
     monkeypatch.setattr(live, "implementation_changes", lambda *args, **kwargs: [])
@@ -473,6 +504,7 @@ def test_core_build_requires_an_offline_decision_verifier(decision_inputs, wp6_i
     with pytest.raises(ValueError, match="requires offline pilot decision verification"):
         live.build_assignment_plan("calibration", rows, fixtures, wp6_inputs["caps_record"], revision="core-double",
             source={"kind": "study_manifest", "study_manifest_hash": manifest["seal_hash"]}, gate_evidence={},
+        study_manifest=manifest,
             selected_arms=sorted(CORE_ARMS), pilot_decision=record)
 
 

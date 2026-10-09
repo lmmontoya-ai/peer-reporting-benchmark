@@ -5,14 +5,13 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 
-from ..events import content_hash
-from ..peer_reporting.storage import check_seal, read_sealed, safe_child, seal
+from ..peer_reporting.storage import check_seal, read_sealed, seal
 from .config import load_protocol
 from .lanes import lane_id
 from .pilot import DECISION_KIND, GATE_ARMS, PILOT_ARMS, check_core_decision
-from .review_plan import pressure_review_selection
-from .review_population import check_pressure_arm_roots, pressure_export_partitions
-from .review_sampling import analysis_score_rows, pressure_negative_sample
+from .review_population import check_pressure_arm_roots
+from .review_sampling import pressure_negative_sample
+from .review import verify_pressure_export_evidence
 
 
 def _require(condition: bool, message: str) -> None:
@@ -28,32 +27,7 @@ def _export(path: Path) -> tuple[dict, dict, list[dict]]:
     check_seal(manifest)
     _require(manifest["seal_hash"] == index["study_registration"]["study_manifest_hash"],
              "pilot export study binding differs")
-    check_pressure_arm_roots(pressure_export_partitions(index))
-    assignments = {row["assignment_id"]: row for row in manifest["assignments"]}
-    scores, seen = [], set()
-    for row in index["rows"]:
-        identifier = row["assignment_id"]
-        _require(identifier in assignments and identifier not in seen, "unknown or duplicate pilot assignment")
-        seen.add(identifier)
-    for row in analysis_score_rows(index["rows"]):
-        identifier = row["assignment_id"]
-        _require("attempt_path" in row, "pilot score requires a sealed attempt")
-        attempt = read_sealed(safe_child(path.parent, row["attempt_path"]))
-        attempt = {key: value for key, value in attempt.items() if key != "seal_hash"}
-        assignment = assignments[identifier]
-        fixture = attempt["fixture"]
-        _require(attempt["assignment_id"] == identifier and content_hash(attempt) == row["attempt_hash"],
-                 "pilot attempt binding differs")
-        _require(fixture["fixture_id"] == assignment["fixture_id"] and content_hash(fixture) ==
-                 manifest["fixtures"][fixture["fixture_id"]]["content_hash"], "pilot fixture differs from study")
-        # The sealed export is the immutable scoring snapshot for this gate.
-        score = deepcopy(row["score"])
-        _require(score.get("assignment_id") == identifier, "pilot score assignment binding differs")
-        for key in ("arm", "model", "effort", "level", "variant", "block", "prevalence_k", "visibility", "pressure"):
-            _require(score.get(key) == assignment.get(key), f"pilot score {key} differs from study")
-        scores.append(score)
-    _require(index.get("pressure_review_selection") == pressure_review_selection(scores),
-             "pilot pressure_review_selection differs from sealed export scores")
+    scores = verify_pressure_export_evidence(path.parent, index)
     return index, manifest, scores
 
 
