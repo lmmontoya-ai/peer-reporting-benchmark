@@ -162,7 +162,15 @@ returned NO-GO on three findings: core root preparation no longer ran the full d
 check, a partial export of one root still passed packet verification, and the core build
 command failed on a missing import.
 
+R6-fix4 fixed the three findings. Astra's fourth confirmation review
+([review-astra-r6-confirm4.md](review-astra-r6-confirm4.md)) returned NO-GO on two
+findings with one cause: a gatekeeping step trusted a derived, resealable file instead of
+its primary evidence. Plan entries were not bound to the sealed study's assignments, and
+export rows could be nulled or excluded without their attempts being checked.
+
 ## Next
 
-R6-fix4 fixes the three findings, then Astra confirms. No model call runs before the user
-authorizes the v2 compatibility plan and the gate and pilot plan.
+R6-fix5 closes the class: plan entries are checked against the sealed study at build,
+preparation, verification and run, and exports are re-derived from their live root before
+packets or a pilot decision use them. Astra then confirms. No model call runs before the
+user authorizes the v2 compatibility plan and the gate and pilot plan.
