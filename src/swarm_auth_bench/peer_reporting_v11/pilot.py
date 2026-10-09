@@ -82,8 +82,9 @@ def _inputs(gate_exports: list[dict], pilot_exports: list[dict]) -> tuple[dict, 
             seen_paths.add(str(path))
             if str(path) not in cache:
                 cache[str(path)] = _export(path)
-                for score in cache[str(path)][2]:
-                    if score.get("level") != "P":
+                for row in cache[str(path)][0]["rows"]:
+                    score = row.get("score")
+                    if score is None or score.get("level") != "P":
                         continue
                     arm = score["arm"]
                     _require(arm not in arm_exports or arm_exports[arm] == path,

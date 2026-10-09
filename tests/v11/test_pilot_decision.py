@@ -257,7 +257,8 @@ def four_unflagged_p3_misses(data, rows):
     return targets
 
 
-def test_decision_refuses_four_unflagged_p3_misses_split_across_exports(tmp_path, decision_inputs):
+@pytest.mark.parametrize("exclude_split_trials", [False, True])
+def test_decision_refuses_four_unflagged_p3_misses_split_across_exports(tmp_path, decision_inputs, exclude_split_trials):
     inputs = decision_inputs[-1](four_unflagged_p3_misses)
     index = read_sealed(inputs["pilot_exports"][0]["path"])
     targets = {row["assignment_id"] for row in index["rows"] if row["score"]["arm"] == "pressure_pilot_xhigh"
@@ -272,6 +273,15 @@ def test_decision_refuses_four_unflagged_p3_misses_split_across_exports(tmp_path
     assert all(any(row["assignment_id"] == identifier and "mechanical_negative_sample" in row["reasons"]
                    for row in read_sealed(ref["path"])["pressure_review_selection"]["rows"])
                for ref, identifier in zip(references, ordered))
+    if exclude_split_trials:
+        for number, reference in enumerate(references[1:], start=1):
+            path = Path(reference["path"])
+            part = read_sealed(path)
+            for row in part["rows"]:
+                row["excluded_from_analysis"] = True
+            part["pressure_review_selection"] = pressure_review_selection([])
+            atomic_json(path, seal({key: value for key, value in part.items() if key != "seal_hash"}))
+            references[number] = export_reference(path)
     with pytest.raises(ValueError, match="pressure_pilot_xhigh.*more than one export"):
         build_pilot_decision(gate_exports=references, pilot_exports=references,
                              confirmed_scripting_remarks=sorted(targets))
