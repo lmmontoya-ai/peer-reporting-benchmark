@@ -288,7 +288,7 @@ async def test_a_rebuilt_study_is_a_new_instance_that_old_roots_cannot_serve(com
     assert seals[0] != seals[1]
     with pytest.raises(v11_live.GateError, match="another phase or study"):
         build_plan("collection", rebuilt, caps=SERIAL, compatibility_directories=[compat], smoke_directory=root)
-    with pytest.raises(v11_live.EvidenceError, match="another study instance"):
+    with pytest.raises(v11_live.EvidenceError, match="assignment binding names another sealed study"):
         v11_live.verify_live_root(root, bundle=fake_bundle(), study_directory=rebuilt)
     # The rebuilt study needs its own smoke; the original study still accepts its own smoke root.
     assert build_plan("smoke", rebuilt, caps=SERIAL, compatibility_directories=[compat])[0][
