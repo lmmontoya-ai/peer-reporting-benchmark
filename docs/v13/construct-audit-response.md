@@ -156,8 +156,13 @@ returned NO-GO because core review packets still sample within one export. The
 coordinator's full suite also found that R6-fix2 made the pilot module import a post-hoc
 review module, which the execution boundary test forbids.
 
+R6-fix3 restored the execution boundary and refused arms split across roots. Astra's
+third confirmation review ([review-astra-r6-confirm3.md](review-astra-r6-confirm3.md))
+returned NO-GO on three findings: core root preparation no longer ran the full decision
+check, a partial export of one root still passed packet verification, and the core build
+command failed on a missing import.
+
 ## Next
 
-R6-fix3 enforces the one-root-per-arm rule on the core review path and restores the
-execution boundary, then Astra confirms. No model call runs before the user authorizes the
-v2 compatibility plan and the gate and pilot plan.
+R6-fix4 fixes the three findings, then Astra confirms. No model call runs before the user
+authorizes the v2 compatibility plan and the gate and pilot plan.
