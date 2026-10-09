@@ -2186,6 +2186,8 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
     bundle = require_v11_tools(bundle or load_bundle())
     selected_arms = validate_arm_selection(validate_phase(phase), arms) if arms is not None else None
     if validate_phase(phase) == "compatibility":
+        if pilot_decision is not None:
+            raise ValueError("only a core plan binds a pilot decision")
         if prior_roots:
             raise ValueError("compatibility roots have no consumed-attempt ledger or prior roots")
         return build_compatibility_plan(caps_record, revision=revision, bundle=bundle,

@@ -536,3 +536,10 @@ def test_prepare_refuses_resealed_failed_gate_decision_swapped_after_build(tmp_p
                                pilot_decision_verifier=validate_core_decision)
     assert not root.exists()
     assert list((study / live.STUDY_REGISTRY).glob("*.json")) == registrations
+
+
+
+def test_compatibility_build_refuses_a_pilot_decision(wp6_inputs):
+    with pytest.raises(ValueError, match="only a core plan binds a pilot decision"):
+        live.build_phase_plan("compatibility", wp6_inputs["caps_record"], revision="non-core",
+                              pilot_decision={"decision": "proceed"})
