@@ -56,7 +56,20 @@ def registered_pressure_partitions(study_directory: Path, *, phase: str, study_m
                          "P review root assignment missing or duplicated")
                 seen.add(identifier)
                 entries.append(entry)
-        assignments = check_assignment_binding(entries, manifest=manifest, source=plan["source"], phase=phase)
+        # Historical entries leave fixture-only labels out of their byte format.
+        # Resolve omitted fixed labels from the primary sealed-study fixture.
+        fixtures = {}
+        aliases = {"assignment_id": "entry_id", "effort": "reasoning_effort"}
+        for entry in entries:
+            assignment = study_assignments[entry["entry_id"]]
+            if any(value is not None and aliases.get(key, key) not in entry
+                   for key, value in assignment.items()):
+                identifier = assignment["fixture_id"]
+                if identifier not in fixtures:
+                    stored = read_sealed(safe_child(study_directory, manifest["fixtures"][identifier]["path"]))
+                    fixtures[identifier] = {key: value for key, value in stored.items() if key != "seal_hash"}
+        assignments = check_assignment_binding(entries, manifest=manifest, source=plan["source"], phase=phase,
+                                                 fixtures=fixtures)
         partitions.append((plan["seal_hash"], assignments))
     _require(source_plan_hash in {identity for identity, _ in partitions},
              "P review source root is not registered in the study phase")

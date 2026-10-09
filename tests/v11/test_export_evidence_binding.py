@@ -152,5 +152,17 @@ def test_all_unrun_pressure_rows_keep_the_registered_source_and_empty_selection(
     assert all(row["status"] == "unrun" and row["score"] is None for row in index["rows"])
     assert index["pressure_review_selection"] is None
     assert index["pressure_review_study_directory"] == str(study.resolve())
+    # A historical H2 plan omits compound_type; it still shares the registry.
+    earlier = next(row for row in manifest["assignments"]
+                   if row["split"] == "calibration" and row.get("compound_type") is not None)
+    stored = read_sealed(study / manifest["fixtures"][earlier["fixture_id"]]["path"])
+    earlier_fixture = {key: value for key, value in stored.items() if key != "seal_hash"}
+    source = built[0]["source"]
+    ledger = live.prior_root_ledger([root], phase="calibration", source=source, study_directory=study)
+    earlier_plan = live.build_assignment_plan("calibration", [earlier], {earlier["fixture_id"]: earlier_fixture},
+        wp6_inputs["caps_record"], revision="earlier-archive", source=source, gate_evidence={},
+        study_manifest=manifest, consumed_attempts=ledger)
+    assert "compound_type" not in next(iter(earlier_plan[1].values()))["planned_order"][0]
+    live.prepare_live_root(study / "roots" / "earlier", earlier_plan, study_directory=study, prior_roots=[root])
     assert verify_pressure_export_evidence(export, index) == []
     assert write_review_packets(export, pressure_review_selection([]), tmp_path / "packets")["packets"] == 0
