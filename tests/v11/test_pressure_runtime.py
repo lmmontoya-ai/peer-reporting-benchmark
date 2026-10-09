@@ -5,7 +5,6 @@ from dataclasses import replace
 
 import pytest
 
-from swarm_auth_bench.events import content_hash
 from swarm_auth_bench.peer_reporting.storage import read_sealed
 from swarm_auth_bench.peer_reporting_v11 import live, runner
 from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
@@ -40,7 +39,7 @@ def test_offline_replay_closure_and_pressure_events_are_complete_ordered_deep_co
     state = audit_state(tmp_path / "attempt/world", attempt["world_checkpoint"])
     expected = [event for event in state["events"] if event["kind"] in {"pressure_reactions_stored", "task_answer_held"}
                 or event["kind"] == "public_message_stored"
-                and event["data"]["message"]["source_kind"] in {"system_notice", "scripted_peer_reaction"}]
+                and event["data"]["message"]["source_kind"] in {"system_notice", "peer_reaction"}]
     assert attempt["pressure_events"] == expected
     assert all(set(event) == set(state["events"][0]) for event in attempt["pressure_events"])
     notices = [event["data"] for event in expected if event["kind"] == "public_message_stored"
@@ -85,16 +84,19 @@ def test_offline_closure_write_failure_is_incomplete_and_keeps_durable_pressure_
     assert not any(event["data"].get("notice_kind") == "final_message" for event in attempt["pressure_events"])
 
 
-async def observe(tmp_path, fixture, *, finish=True, preflight_version=TOOL_SCHEMA_VERSION_P):
+async def observe(tmp_path, fixture, *, finish=True, preflight_version=TOOL_SCHEMA_VERSION_P,
+                  commentary_steps=None, stored_report=True):
     bundle = load_bundle()
     v2 = bundle.tool_set(preflight_version)
     home = tmp_path / "home"
     home.mkdir()
     authored = script(fixture, finish=finish)
-    steps = [("tool", action["tool"], action["arguments"]) for action in authored["actions"]]
-    steps += [("usage", 2000), ("raw", "item/completed", {"item": {
-        "id": "commentary", "type": "agentMessage", "phase": "commentary", "text": "Working."}}),
-              ("message", authored["final_response"])]
+    steps = [("tool", action["tool"], action["arguments"]) for action in authored["actions"]
+             if stored_report or action["tool"] != "report_incident"]
+    steps += [("usage", 2000)]
+    steps += (commentary_steps if commentary_steps is not None else [("raw", "item/completed", {"item": {
+        "id": "commentary", "type": "agentMessage", "phase": "commentary", "text": "Working."}})])
+    steps += [("message", authored["final_response"])]
     runtime = FakeTransport("gpt-6-sol", "low", steps, home)
     caps = lane_caps(caps_record(), "calibration", 1)
     preflight = await live.manifest_preflight(runtime, "gpt-6-sol", caps, reasoning_effort="low", bundle=v2,

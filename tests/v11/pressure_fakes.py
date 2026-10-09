@@ -32,6 +32,10 @@ def pressure_fixture(visibility="visible", pressure="P3"):
         "sender_ids": senders, "norm_speaker_ids": [], "sender_slots": [], "norm_slots": [],
         "norm_posts_present": False,
     }
+    for message in fixture["public"]["messages"]:
+        message["source_kind"] = "peer_message"
+    import json
+    fixture["packet"] = json.dumps(fixture["public"], sort_keys=True)
     return fixture
 
 

@@ -20,6 +20,7 @@ from ..events import content_hash
 from ..peer_reporting.score import TERMINATION_KINDS
 from ..peer_reporting.storage import atomic_json, read_sealed, safe_child, seal
 from .bundle import ProtocolBundle, load_bundle, tools_for_levels
+from .closure import closure_outputs, record_delivery
 from .config import SOCIAL_ARMS, SOCIAL_FIELDS, load_protocol, social_fixture_cells
 from .lanes import EFFORTS, PROMPT_CONDITIONS, TOOL_REQUEST_CAP, lane_id, validate_effort, validate_world_mode
 from .live import _tool_set_for_plan, read_live_plan, read_root_fixture
@@ -103,7 +104,7 @@ def _outputs(state: dict, script: dict, attempt_id: str) -> tuple[list[dict], li
                             "room_sequence": message["sequence"], "elapsed_seconds": event["elapsed_seconds"],
                             "controller_sequence": event["event_seq"], "audience": "release-room",
                             "delivery_status": "stored_offline_not_provider_delivered"})
-        elif message["source_kind"] == "scripted_peer_message":
+        elif message["source_kind"] in ("scripted_peer_message", "peer_message"):
             replies.append({**message, "sequence": event["event_seq"], "elapsed_seconds": event["elapsed_seconds"],
                             "delivery_status": "stored_offline_not_provider_delivered"})
     for request in state["requests"]:
@@ -123,6 +124,8 @@ def _outputs(state: dict, script: dict, attempt_id: str) -> tuple[list[dict], li
                         "sequence": sequence, "elapsed_seconds": None, "controller_sequence": sequence,
                         "audience": "simulated_task_owner", "delivery_status": "authored_offline_output"})
     outputs.sort(key=lambda output: output["controller_sequence"])
+    if state.get("level") == "P":
+        record_delivery([output for output in outputs if output["source_kind"] != "observer_message"], pressure=True)
     return outputs, replies
 
 
@@ -153,7 +156,9 @@ def replay_fixture(fixture: dict, directory: Path, *, attempt_id: str, labels: d
         if pressure and fixture["parameters"]["visibility"] == "visible":
             summaries = [request["arguments"]["summary"] for request in world.requests
                          if request["name"] == "agent_finish" and request.get("result") == {"status": "closed"}]
-            world.store_closure_notices([script["final_response"]] if script.get("final_response") else [], summaries)
+            selected = closure_outputs(_outputs(world.snapshot(), script, attempt_id)[0])
+            world.store_closure_notices([output["text"] for output in selected
+                                         if output["source_kind"] == "final_response"], summaries)
         checkpoint = world.checkpoint
         state = bundle.audit_state(world.directory, checkpoint)
     except Exception as error:  # durable evidence is audited, never assumed current
@@ -190,11 +195,15 @@ def replay_fixture(fixture: dict, directory: Path, *, attempt_id: str, labels: d
         "world_checkpoint": checkpoint, "storage_failure": storage_failure, "script": script,
     }
     if pressure:
+        attempt["observed_room_messages"] = [deepcopy(event["data"]["message"]) for event in state["events"]
+            if event["kind"] == "public_message_stored"
+            and event["data"]["message"]["source_kind"] != "observer_message"
+            and event["data"].get("notice_kind") not in ("final_message", "finish_summary")]
         attempt["pressure_events"] = [deepcopy(event) for event in state["events"]
                                       if event["kind"] in {"pressure_reactions_stored", "task_answer_held"}
                                       or event["kind"] == "public_message_stored"
                                       and event["data"]["message"]["source_kind"] in {
-                                          "system_notice", "scripted_peer_reaction"}]
+                                          "system_notice", "peer_reaction"}]
     atomic_json(directory / "attempt.json", seal(attempt))
     return attempt
 

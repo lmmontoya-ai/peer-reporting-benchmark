@@ -59,6 +59,7 @@ from ..runtime import (
     TurnResult,
 )
 from .bundle import ProtocolBundle, tools_for_levels
+from .closure import closure_outputs, record_delivery
 from .lanes import PROVIDER_STALLED, PROVIDER_UNAVAILABLE, validate_effort, validate_world_mode
 
 ADAPTER_VERSION = "peer-reporting-v11-live-runtime-v1"
@@ -182,6 +183,7 @@ class _Controller:
         self.exposure_receipt: dict | None = None
         self.assistant_items: dict[str, dict] = {}
         self.assistant_deltas: dict[str, dict] = {}
+        self.assistant_phases: dict[str, str] = {}
         self.usage_seen: set[str] = set()
         self.response_usage: dict[str, int | None] = {}
         self.observed_tokens: int | None = None
@@ -571,6 +573,9 @@ class _Controller:
                     self.emit("initial_packet_delivery_confirmed", receipt=self.exposure_receipt)
                     self.operations.put_nowait(("exposure", None, None))
             return
+        if method in {"item/started", "item/completed"} and item.get("type") == "agentMessage":
+            if type(item.get("id")) is str and item.get("phase") is not None:
+                self.assistant_phases[item["id"]] = item["phase"]
         if method == "item/completed" and item.get("type") == "dynamicToolCall":
             if not self._tool_receipt(raw):
                 self.pending_receipts.append(deepcopy(raw))
@@ -581,7 +586,7 @@ class _Controller:
                 existing = self.assistant_items.get(item_id)
                 first = self.assistant_deltas.get(item_id, {})
                 output = {"output_id": item_id, "source_kind": "final_response", "text": text,
-                          "phase": item.get("phase"), "complete": True,
+                          "phase": self.assistant_phases.get(item_id), "complete": True,
                           "elapsed_seconds": first.get("elapsed_seconds", self.elapsed()),
                           "arrival_event_seq": first.get("arrival_event_seq", len(self.events) - 1)}
                 if existing is not None and existing["text"] != text:
@@ -986,7 +991,7 @@ async def run_live_observer(
     for item_id, partial in controller.assistant_deltas.items():
         if item_id not in controller.assistant_items:
             outputs.append({"output_id": item_id, "source_kind": "final_response", **partial,
-                            "complete": False, "phase": None})
+                            "complete": False, "phase": controller.assistant_phases.get(item_id)})
     if result is not None and result.text and not outputs:
         outputs.append({"output_id": "turn-text-" + content_hash([attempt_id, result.turn_id])[:24],
                         "source_kind": "final_response", "text": result.text,
@@ -1003,18 +1008,16 @@ async def run_live_observer(
                             "elapsed_seconds": arrival["arrival_elapsed_seconds"],
                             "arrival_event_seq": arrival["arrival_event_seq"]})
     outputs.sort(key=lambda output: output["arrival_event_seq"])
+    record_delivery(outputs, pressure=(fixture.get("parameters") or {}).get("level") == "P")
     for output in outputs:
-        output["recipient"] = "simulated_task_owner"
-        output["delivery_policy"] = "all_visible_assistant_text_and_finish_summaries_to_task_owner"
         output.setdefault("delivery_evidence", "durably_stored_finish_request"
                           if output["source_kind"] == "finish_summary" else "completed_assistant_item"
                           if output.get("complete") else "visible_assistant_delta")
     if (fixture.get("parameters") or {}).get("level") == "P" and fixture["parameters"]["visibility"] == "visible":
         try:
             controller.world.store_closure_notices(
-                [output["text"] for output in outputs if output["source_kind"] == "final_response"
-                 and output.get("phase") in {None, "final_answer"}],
-                [output["text"] for output in outputs if output["source_kind"] == "finish_summary"])
+                [output["text"] for output in closure_outputs(outputs) if output["source_kind"] == "final_response"],
+                [output["text"] for output in closure_outputs(outputs) if output["source_kind"] == "finish_summary"])
             state, checkpoint = _audited_world(controller)
         except Exception as error:
             checkpoint = None
