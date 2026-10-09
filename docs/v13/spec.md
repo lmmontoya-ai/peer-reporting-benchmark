@@ -34,6 +34,11 @@ three minor notes are applied. Status: agreed 2026-10-08. The confirmation code 
 ([review-astra-r6-confirm.md](review-astra-r6-confirm.md)) added two clarifications, in
 sections 5.5 and 7.4.
 
+**Amendment P-A4 (2026-10-09, after the fifth confirmation code review).** Section 2.1
+states the evidence rule that every gate follows and where the code's protection ends.
+The user chose it after [review-astra-r6-confirm5.md](review-astra-r6-confirm5.md), the
+fifth review in a row to find a gate that trusted an edited and resealed file.
+
 This document is normative for revision 6. It adds one level, `P`, to the v1.1 package and
 changes nothing about earlier levels. The v1.1 rules in [../v11/spec.md](../v11/spec.md)
 and the level S rules in [../v12/spec.md](../v12/spec.md) apply wherever this document is
@@ -77,9 +82,55 @@ claim of the form "recognized the violation but withheld it" (section 11).
   levels keep `peer-reporting-v11-tools-v1` unchanged.
 - Level P uses the `neutral` prompt only, with the changes of section 4.1.
 - Runtime, caps rules, sealing, execution rules and amendments A3 and A4/A4.1 are
-  unchanged.
+  unchanged, except that section 2.1 adds a receipt after each level P root.
 - The arms `social_pilot_*`, `social_grid_*` and `social_anchor_xhigh` have run and join
   `closed_arms`.
+
+### 2.1 Evidence and trust boundary (amendment P-A4)
+
+A seal is a content hash, so anyone with write access can edit a sealed file and seal it
+again. A seal shows only that a file is unchanged since it was sealed, not that its
+content is right.
+
+**Primary evidence** is:
+
+- the sealed study: manifest, assignments, fixtures and instructions;
+- each lane's journal and archived attempts;
+- the user's approval texts and flag resolutions;
+- the evidence that an A4.1 binding names;
+- human review uploads and adjudication records, as submitted.
+
+Every other file is a **derived record**. Derived records include plans and lane plans,
+lane indexes, budget ledgers, root registrations, study pause records, consumed-attempt
+ledgers, exports, review selections, packets, review resolutions, pilot decisions, repair
+records and summaries.
+
+1. **Check before use.** Every step that admits, runs, exports, samples, scores or decides
+   checks each derived record it uses against primary evidence, or recomputes it, before
+   use. A value that a derived record copies from the study or the protocol, such as a
+   label, an execution policy or the smoke population, is read from the study or the
+   protocol, not from the copy.
+2. **Disagreement refuses.** A derived record that disagrees with primary evidence is
+   refused. The disagreement never becomes a missing, excluded, quarantined or unscored
+   observation.
+3. **Receipts.** The code checks primary evidence for internal consistency: journal hash
+   chains, attempt hashes, and fixtures and instructions against the study. It cannot
+   detect a consistent rewrite of primary evidence. That protection comes from a receipt.
+   - When a level P root or a tool set v2 compatibility root finishes, a receipt is
+     committed to the public repository before any of the root's trials is exported,
+     scored or reviewed.
+   - The receipt lists the SHA-256 of the study manifest, the root plan, and each lane
+     plan, journal and archived attempt. It holds hashes only.
+   - Every later step that reads the root's journals or attempts refuses unless the files
+     equal a receipt held in a local Git commit. These steps include export, the shared
+     re-derivation behind packets and the pilot decision, and the build of any root that
+     uses this root.
+   - As with A4.1, the code cannot establish that the commit was published. Pushing it
+     before export is a step outside the code, and it needs the user's approval like any
+     push.
+4. **Review scope.** A finding that needs a consistent rewrite of primary evidence after
+   its receipt is outside the code's protection, by item 3. A finding in which a derived
+   record that disagrees with primary evidence is accepted is a defect.
 
 ## 3 Level P world
 
@@ -1095,3 +1146,13 @@ Confirmation code review notes ([review-astra-r6-confirm.md](review-astra-r6-con
 |---|---|---|
 | The coverage snapshot of an ambiguous report was undefined; it is `null` | implementer question, R6-confirm | 5.5 |
 | The review sample and the pilot decision could sample different populations; one population per arm and phase | R6-confirm N1 | 7.4 |
+
+Amendment P-A4 ([review-astra-r6-confirm4.md](review-astra-r6-confirm4.md),
+[review-astra-r6-confirm5.md](review-astra-r6-confirm5.md)):
+
+| Item | Source | Applied in |
+|---|---|---|
+| Gates trusted derived records that can be edited and resealed; every gate checks them against primary evidence | R6-confirm4 A and B, R6-confirm5 N1 to N8 and N10 | 2.1 item 1 |
+| A disagreement between an index and the journal became a quarantined observation; a disagreement refuses | R6-confirm5 N1 | 2.1 item 2 |
+| Primary evidence can be rewritten consistently; a committed receipt protects each level P root before export | user decision after R6-confirm5 | 2.1 item 3 |
+| Review findings are judged against this boundary | user decision after R6-confirm5 | 2.1 item 4 |

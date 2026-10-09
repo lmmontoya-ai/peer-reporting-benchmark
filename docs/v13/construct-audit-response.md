@@ -168,9 +168,25 @@ findings with one cause: a gatekeeping step trusted a derived, resealable file i
 its primary evidence. Plan entries were not bound to the sealed study's assignments, and
 export rows could be nulled or excluded without their attempts being checked.
 
+R6-fix5 bound plan entries to the sealed study at build, preparation, verification and
+run, and re-derived exports from their live root before packets or a pilot decision used
+them. Astra's fifth confirmation review
+([review-astra-r6-confirm5.md](review-astra-r6-confirm5.md)) found finding A fixed and
+returned NO-GO on nine major findings and one minor finding. Each was another gate that
+trusted a record that can be edited and resealed: lane indexes, registry phase fields,
+packet text, review resolutions, the smoke population, pause records, a lane policy
+field, repair records added after export, and a repair binding's commit.
+
+Five rounds in a row found a new instance, because the spec never said which records the
+checks must trust. A seal is a content hash, so code alone cannot protect records that
+anyone with write access can rewrite and reseal. The user chose amendment P-A4 (spec
+section 2.1). Every gate checks derived records against primary evidence, and a
+disagreement refuses. Primary evidence is protected by a receipt of its hashes, committed
+when a root finishes and before any of its trials is exported. Reviews judge findings
+against this boundary.
+
 ## Next
 
-R6-fix5 closes the class: plan entries are checked against the sealed study at build,
-preparation, verification and run, and exports are re-derived from their live root before
-packets or a pilot decision use them. Astra then confirms. No model call runs before the
-user authorizes the v2 compatibility plan and the gate and pilot plan.
+R6-fix6 fixes all ten findings and implements P-A4's receipts. Astra then confirms against
+section 2.1. No model call runs before the user authorizes the v2 compatibility plan and
+the gate and pilot plan.
