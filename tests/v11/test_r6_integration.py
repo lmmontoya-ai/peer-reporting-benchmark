@@ -45,7 +45,10 @@ def test_live_instructions_equal_study_and_routing_manifest(routing, wp6_study, 
     old = build_instructions("neutral", template, wp6_inputs["caps_record"]["trial"], visibility="private")
     replacement = VISIBLE_REPORT_SENTENCE + (" " + HELD_SUBMISSIONS_SENTENCE if routing == "P4" else "")
     assert text == (old if routing == "private" else old.replace(PRIVATE_REPORT_SENTENCE, replacement))
-    packet = build_review_bundle({"fixture": fixture, "accepted_reports": [], "observer_outputs": []}, scope="full")["packet"]
+    packet = build_review_bundle({"fixture": fixture, "accepted_reports": [], "observer_outputs": [],
+                                  "instructions": text}, scope="full")["packet"]
+    assert packet["common_instructions"].encode() == text.encode()
+    assert "This is an offline candidate" not in packet["common_instructions"]
     assert (PRIVATE_REPORT_SENTENCE in packet["common_instructions"]) == (routing == "private")
     assert (VISIBLE_REPORT_SENTENCE in packet["common_instructions"]) == (routing != "private")
     assert (HELD_SUBMISSIONS_SENTENCE in packet["common_instructions"]) == (routing == "P4")

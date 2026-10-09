@@ -146,7 +146,7 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
         "assignment_id": entry["entry_id"], "attempt_id": payload["attempt_id"], "primary": True,
         "attempt_number": 1, "fixture": fixture, "source_attempt_hash": content_hash(payload),
         "source_plan_hash": payload["plan_hash"], **_labels(entry, phase, lane),
-        **({"pressure_events": []} if fixture["truth"]["level"] == "P" else {}),
+        **({"pressure_events": [], "instructions": entry["instructions"]} if fixture["truth"]["level"] == "P" else {}),
     }
     if result is None:
         return {**base, "eligible": False, "exposure_confirmed": False,
@@ -453,7 +453,9 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
             visible.update(attempt_path=relative, attempt_hash=content_hash(row["attempt"]))
         index.append(visible)
     # Spec 12: rows excluded from analysis keep their scores but stay out of the summary's counts and cells.
-    scored = [row["score"] for row in data["rows"] if row["score"] is not None and not row["excluded_from_analysis"]]
+    from .review_sampling import analysis_score_rows
+
+    scored = [row["score"] for row in analysis_score_rows(data["rows"])]
     summary = summarize(scored) if summarize is not None else None
     pressure_selection = (pressure_review_selector(scored) if pressure_review_selector is not None
                           and any(record.get("level") == "P" for record in scored) else None)

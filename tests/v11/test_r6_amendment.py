@@ -7,7 +7,7 @@ import pytest
 from swarm_auth_bench.peer_reporting_v11.closure import P_DELIVERY_POLICY, closure_outputs
 from swarm_auth_bench.peer_reporting_v11.review_plan import pressure_review_selection
 from swarm_auth_bench.peer_reporting_v11.score import score_trial, summarize
-from swarm_auth_bench.peer_reporting_v11.world import audit_state
+from swarm_auth_bench.peer_reporting_v11.world import V11World, audit_state
 
 from .pressure_fakes import post, report
 from .test_pressure_fixtures import fixture, record
@@ -116,6 +116,78 @@ def test_each_trigger_stores_its_own_focal_coverage_snapshot(tmp_path):
                   if event["kind"] == "pressure_reactions_stored")["data"].update(focal_reported_before_reaction=True))
     with pytest.raises(ValueError, match="snapshot"):
         audit_state(world.directory)
+
+
+def test_ambiguous_focal_coverage_snapshot_is_null_until_a_definite_report(tmp_path):
+    f, world = make_world(tmp_path)
+    world.dispatch("report_incident", report(f, operation_ids=[], incident_ref=None, action="work",
+                                             summary="Please review this actor's work."))
+    world.dispatch("report_incident", report(f, "definite"))
+    world.dispatch("send_message", post(text=f["truth"]["focal_operation_id"]))
+    triggers = [event["data"] for event in world.events if event["kind"] == "pressure_reactions_stored"]
+    assert [event["focal_reported_before_reaction"] for event in triggers] == [None, True]
+    assert audit_state(world.directory, world.checkpoint) == world.snapshot()
+    rewrite_state(world, lambda state: next(event for event in state["events"]
+                  if event["kind"] == "pressure_reactions_stored")["data"].update(focal_reported_before_reaction=False))
+    with pytest.raises(ValueError, match="snapshot"):
+        audit_state(world.directory)
+
+
+@pytest.mark.parametrize("name", ["report_incident", "send_message"])
+@pytest.mark.parametrize("visibility", ["private", "visible"])
+@pytest.mark.parametrize("repeat", [False, True])
+@pytest.mark.parametrize("replacement", [{"status": "error", "error": "closed"}, None])
+def test_rehashed_error_and_null_receipts_cannot_hide_original_or_repeated_effects(
+        tmp_path, name, visibility, repeat, replacement):
+    f, world = make_world(tmp_path, visibility=visibility)
+    args = report(f) if name == "report_incident" else post(text=f["truth"]["focal_operation_id"])
+    original = world.dispatch(name, args)
+    if repeat:
+        assert world.dispatch(name, args) == original
+    arrival = 2 if repeat else 1
+
+    def mutate(state):
+        state["requests"][arrival - 1]["result"] = deepcopy(replacement)
+        for event in state["events"]:
+            if event["arrival_seq"] == arrival and "result" in event["data"]:
+                event["data"]["result"] = deepcopy(replacement)
+        if not repeat and replacement is not None:
+            next(iter(state["idempotency"].values()))["receipt"] = deepcopy(replacement)
+    rewrite_state(world, mutate)
+    with pytest.raises(ValueError, match="receipt"):
+        audit_state(world.directory)
+
+
+@pytest.mark.parametrize("name", ["report_incident", "send_message"])
+@pytest.mark.parametrize("failure", ["schema", "unauthorized", "closed", "conflict"])
+def test_legitimate_failure_receipts_without_effects_remain_valid(tmp_path, name, failure):
+    f, world = make_world(tmp_path)
+    args = report(f) if name == "report_incident" else post(text=f["truth"]["focal_operation_id"])
+    actor = "observer"
+    if failure == "closed":
+        world.close()
+    elif failure == "schema":
+        args["extra"] = True
+    elif failure == "unauthorized":
+        actor = f["truth"]["pressure"]["sender_ids"][0]
+    else:
+        world.dispatch(name, args)
+        args = {**args, "summary" if name == "report_incident" else "text": "Different."}
+    before = world.snapshot()
+    assert world.dispatch(name, args, actor_id=actor)["status"] == "error"
+    assert world.reports == before["reports"] and world.messages == before["messages"]
+    assert audit_state(world.directory, world.checkpoint) == world.snapshot()
+
+
+def test_unavailable_report_store_and_pending_receipts_remain_valid(tmp_path):
+    f, _ = make_world(tmp_path)
+    world = V11World(f, tmp_path / "unavailable", world_mode="report_store_unavailable")
+    assert world.dispatch("report_incident", report(f))["status"] == "deferred"
+    assert audit_state(world.directory, world.checkpoint) == world.snapshot()
+    assert world.confirm_exposure(f["packet"])
+    assert world.result_for(1) == {"status": "error", "error": "report_store_unavailable"}
+    assert not world.reports
+    assert audit_state(world.directory, world.checkpoint) == world.snapshot()
 
 
 def test_two_reports_return_notice_and_reactions_then_notice_only_and_original_repeats(tmp_path):

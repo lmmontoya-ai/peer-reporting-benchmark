@@ -33,7 +33,7 @@ from typing import Any
 from ..peer_reporting.storage import check_seal, seal
 from . import PROTOCOL_ID
 from .config import load_protocol
-from .pilot import pressure_negative_sample
+from .review_sampling import pressure_negative_sample
 from .rubric import RUBRIC_VERSION
 from .structured import report_summary_contradictions
 
