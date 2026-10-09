@@ -451,7 +451,9 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
                       for value in journaled_authorizations(journals)}
     manifest = read_study_manifest(study_directory)
     identifiers = {row["assignment_id"] for row in data["rows"]}
-    if any(row["level"] == "P" and row["assignment_id"] in identifiers for row in manifest["assignments"]):
+    contains_pressure = any(row["level"] == "P" and row["assignment_id"] in identifiers
+                            for row in manifest["assignments"])
+    if contains_pressure:
         partitions = registered_pressure_partitions(Path(study_directory), phase=plan["phase"],
             study_manifest_hash=registration["study_manifest_hash"], source_plan_hash=plan["seal_hash"])
         check_pressure_arm_roots(partitions)
@@ -488,7 +490,7 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
         "selected_arms": selected_arms,
         **({"pressure_review_selection": pressure_selection,
             "pressure_review_study_directory": str(Path(study_directory).resolve())}
-           if pressure_selection is not None else {}),
+           if contains_pressure else {}),
         # Review packets recompute the frozen plan against the sealed manifest this root was built from.
         "study_manifest": manifest,
         "analysis_exclusions": exclusions, "analysis_exclusion_count": len(exclusions),

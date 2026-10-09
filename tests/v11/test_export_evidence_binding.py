@@ -123,3 +123,34 @@ def test_consumers_refuse_resealed_derived_evidence(tmp_path, monkeypatch, core_
             reference = export_reference(path)
             build_pilot_decision(gate_exports=[reference], pilot_exports=[reference])
     assert not (tmp_path / "packets").exists()
+
+
+def test_all_unrun_pressure_rows_keep_the_registered_source_and_empty_selection(tmp_path, wp6_study, wp6_inputs):
+    from swarm_auth_bench.peer_reporting_v11 import live
+    from swarm_auth_bench.peer_reporting_v11.live_review import export_live_review
+    from swarm_auth_bench.peer_reporting_v11.review import verify_pressure_export_evidence
+    from swarm_auth_bench.peer_reporting_v11.score import score_trial
+
+    study = tmp_path / "study"
+    shutil.copytree(wp6_study[0], study)
+    manifest = read_sealed(study / live.STUDY_MANIFEST)
+    assignments = [row for row in manifest["assignments"]
+                   if row["arm"] in ("pressure_gate_xhigh", "pressure_gate_low")]
+    fixtures = {identifier: {key: value for key, value in read_sealed(
+        study / manifest["fixtures"][identifier]["path"]).items() if key != "seal_hash"}
+        for identifier in {row["fixture_id"] for row in assignments}}
+    built = live.build_assignment_plan("calibration", assignments, fixtures, wp6_inputs["caps_record"],
+        revision="all-unrun-pressure", source={"kind": "study_manifest", "study_manifest_hash": manifest["seal_hash"]},
+        gate_evidence={}, study_manifest=manifest)
+    root = study / "roots" / "unrun"
+    live.prepare_live_root(root, built, study_directory=study)
+    export = tmp_path / "export"
+    export_live_review(root, export, study_directory=study, scorer=score_trial,
+                       pressure_review_selector=pressure_review_selection)
+    index = read_sealed(export / "index.json")
+    assert len(index["rows"]) == 24
+    assert all(row["status"] == "unrun" and row["score"] is None for row in index["rows"])
+    assert index["pressure_review_selection"] is None
+    assert index["pressure_review_study_directory"] == str(study.resolve())
+    assert verify_pressure_export_evidence(export, index) == []
+    assert write_review_packets(export, pressure_review_selection([]), tmp_path / "packets")["packets"] == 0
