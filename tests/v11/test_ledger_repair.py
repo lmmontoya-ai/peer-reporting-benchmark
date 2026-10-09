@@ -349,14 +349,14 @@ def test_repair_refuses_ambiguous_candidates_before_journal_comparison(lane, cap
 
 @pytest.mark.parametrize("location", ["json_quote", "seal_key", "seal_digest", "seal_quote", "newline", "utf8"])
 def test_search_matches_brute_force_for_syntax_seal_newline_and_utf8(lane, location):
-    lane["budget"].admit("Ã©")
+    lane["budget"].admit("é")
     original = lane["path"].read_bytes()
     marker = read_sealed(lane["path"].with_suffix(".json.identity.json"))
     caps, plan_hash = lane["lane_plan"]["caps"], lane["lane_plan"]["seal_hash"]
     offsets = {"json_quote": 1, "seal_key": original.index(b'"seal_hash"') + 2,
                "seal_digest": original.index(b'"seal_hash":"') + len(b'"seal_hash":"'),
                "seal_quote": original.index(b',"started_at"') - 1,
-               "newline": len(original) - 1, "utf8": original.index("Ã©".encode())}
+               "newline": len(original) - 1, "utf8": original.index("é".encode())}
     corrupt = flipped(original, offsets[location], 0x80 if location == "utf8" else 1)
     expected = []
     for offset in range(len(corrupt)):
