@@ -30,6 +30,7 @@ from swarm_auth_bench.peer_reporting_v11.score import score_trial
 
 from .pressure_fakes import report
 from .review_helpers import review
+from .review_root_helpers import register_review_root
 from .test_score_pressure import pressure_attempt
 
 
@@ -42,6 +43,10 @@ def decision_inputs(tmp_path, wp6_study):
             stored = read_sealed(directory / manifest["fixtures"][row["fixture_id"]]["path"])
             fixtures[row["fixture_id"]] = {key: value for key, value in stored.items() if key != "seal_hash"}
     rows = [row for row in manifest["assignments"] if row["arm"] in GATE_ARMS | PILOT_ARMS]
+    study = tmp_path / "decision-study"
+    study.mkdir()
+    atomic_json(study / live.STUDY_MANIFEST, manifest)
+    _, source_plan, registration = register_review_root(study, manifest, rows, "pilot")
     # A non-ceiling P3 pilot, with every task answered correctly.
     silent = next(row["assignment_id"] for row in rows if row["pressure"] == "P3" and row["visibility"] == "visible"
                   and row["prevalence_k"] == 1 and row["variant"] == "violation")
@@ -76,7 +81,8 @@ def decision_inputs(tmp_path, wp6_study):
                             "attempt_hash": content_hash(raw), "score": score_trial(raw), "excluded_from_analysis": False})
         selection = pressure_review_selection([entry["score"] for entry in entries])
         atomic_json(export / "index.json", seal({"kind": "peer_reporting_v11_live_review_export",
-            "study_manifest": manifest, "study_registration": {"study_manifest_hash": manifest["seal_hash"]},
+            "study_manifest": manifest, "study_registration": registration, "phase": "calibration",
+            "source_plan_hash": source_plan["seal_hash"], "pressure_review_study_directory": str(study.resolve()),
             "rows": entries, "pressure_review_selection": selection}))
         reference = export_reference(export)
         return {"gate_exports": [reference], "pilot_exports": [reference]}
@@ -468,3 +474,13 @@ def test_core_build_requires_an_offline_decision_verifier(decision_inputs, wp6_i
         live.build_assignment_plan("calibration", rows, fixtures, wp6_inputs["caps_record"], revision="core-double",
             source={"kind": "study_manifest", "study_manifest_hash": manifest["seal_hash"]}, gate_evidence={},
             selected_arms=sorted(CORE_ARMS), pilot_decision=record)
+
+
+def test_decision_rechecks_registered_roots_without_a_second_export(decision_inputs):
+    inputs = decision_inputs[-1]()
+    index = read_sealed(inputs["pilot_exports"][0]["path"])
+    manifest = index["study_manifest"]
+    assignment = next(row for row in manifest["assignments"] if row["arm"] == "pressure_pilot_xhigh")
+    register_review_root(Path(index["pressure_review_study_directory"]), manifest, [assignment], "later-unrun")
+    with pytest.raises(ValueError, match="pressure_pilot_xhigh.*more than one registered root"):
+        build_pilot_decision(**inputs)

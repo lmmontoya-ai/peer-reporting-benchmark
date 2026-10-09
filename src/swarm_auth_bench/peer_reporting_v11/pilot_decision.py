@@ -11,6 +11,7 @@ from .config import load_protocol
 from .lanes import lane_id
 from .pilot import DECISION_KIND, GATE_ARMS, PILOT_ARMS, check_core_decision
 from .review_plan import pressure_review_selection
+from .review_population import check_pressure_arm_roots, pressure_export_partitions
 from .review_sampling import analysis_score_rows, pressure_negative_sample
 
 
@@ -27,6 +28,7 @@ def _export(path: Path) -> tuple[dict, dict, list[dict]]:
     check_seal(manifest)
     _require(manifest["seal_hash"] == index["study_registration"]["study_manifest_hash"],
              "pilot export study binding differs")
+    check_pressure_arm_roots(pressure_export_partitions(index))
     assignments = {row["assignment_id"]: row for row in manifest["assignments"]}
     scores, seen = [], set()
     for row in index["rows"]:
@@ -66,7 +68,7 @@ def export_reference(directory: Path) -> dict:
 def _inputs(gate_exports: list[dict], pilot_exports: list[dict]) -> tuple[dict, dict[str, dict]]:
     _require(bool(gate_exports) and bool(pilot_exports), "decision requires sealed gate and pilot exports")
     manifest, scores = None, {}
-    cache, arm_exports = {}, {}
+    cache, export_partitions = {}, []
     for references, arms in ((gate_exports, GATE_ARMS), (pilot_exports, PILOT_ARMS)):
         seen_paths = set()
         for reference in references:
@@ -78,14 +80,10 @@ def _inputs(gate_exports: list[dict], pilot_exports: list[dict]) -> tuple[dict, 
             seen_paths.add(str(path))
             if str(path) not in cache:
                 cache[str(path)] = _export(path)
-                for row in cache[str(path)][0]["rows"]:
-                    score = row.get("score")
-                    if score is None or score.get("level") != "P":
-                        continue
-                    arm = score["arm"]
-                    _require(arm not in arm_exports or arm_exports[arm] == path,
-                             f"level P arm {arm} has scored trials in more than one export")
-                    arm_exports[arm] = path
+                assignments = {row["assignment_id"]: row for row in cache[str(path)][1]["assignments"]}
+                export_partitions.append((str(path), [assignments[row["assignment_id"]]
+                                                     for row in cache[str(path)][0]["rows"]]))
+                check_pressure_arm_roots(export_partitions, unit="export")
             index, supplied, records = cache[str(path)]
             _require(index["seal_hash"] == reference["seal_hash"], "pilot export hash differs from decision record")
             _require(manifest is None or manifest["seal_hash"] == supplied["seal_hash"], "pilot exports come from different studies")

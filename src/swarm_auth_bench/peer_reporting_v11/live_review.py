@@ -78,6 +78,7 @@ from .live import (
     verify_consumed_ledger,
 )
 from .phase import _PhaseState
+from .review_population import check_pressure_arm_roots, registered_pressure_partitions
 
 ADAPTER_VERSION = "peer-reporting-v11-live-review-v1"
 EXPORT_KIND = "peer_reporting_v11_live_review_export"
@@ -442,6 +443,16 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     evidence = data["authorization_evidence"]
     authorizations = {value: evidence[value] if value in evidence else authorization_error(directory, plan, value)
                       for value in journaled_authorizations(journals)}
+    # Spec 12: rows excluded from analysis keep their scores but stay out of the summary's counts and cells.
+    from .review_sampling import analysis_score_rows
+
+    scored = [row["score"] for row in analysis_score_rows(data["rows"])]
+    summary = summarize(scored) if summarize is not None else None
+    pressure_selection = (pressure_review_selector(scored) if pressure_review_selector is not None
+                          and any(record.get("level") == "P" for record in scored) else None)
+    if pressure_selection is not None:
+        check_pressure_arm_roots(registered_pressure_partitions(Path(study_directory), phase=plan["phase"],
+            study_manifest_hash=registration["study_manifest_hash"], source_plan_hash=plan["seal_hash"]))
     output.mkdir(parents=True, exist_ok=False)
     (output / "attempts").mkdir()
     index = []
@@ -452,13 +463,6 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
             atomic_json(safe_child(output, relative), seal(row["attempt"]))
             visible.update(attempt_path=relative, attempt_hash=content_hash(row["attempt"]))
         index.append(visible)
-    # Spec 12: rows excluded from analysis keep their scores but stay out of the summary's counts and cells.
-    from .review_sampling import analysis_score_rows
-
-    scored = [row["score"] for row in analysis_score_rows(data["rows"])]
-    summary = summarize(scored) if summarize is not None else None
-    pressure_selection = (pressure_review_selector(scored) if pressure_review_selector is not None
-                          and any(record.get("level") == "P" for record in scored) else None)
     if pressure_selection is not None:
         atomic_json(output / "pressure-review-selection.json", pressure_selection)
     exclusions = sorted(row["assignment_id"] for row in data["rows"] if row["excluded_from_analysis"])
@@ -472,7 +476,9 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
         "study_registry": study_registry_listing(study_directory), "start_claims": start_claims,
         "authorization_evidence": authorizations, "review_plan_hash": review_plan_hash,
         "selected_arms": selected_arms,
-        **({"pressure_review_selection": pressure_selection} if pressure_selection is not None else {}),
+        **({"pressure_review_selection": pressure_selection,
+            "pressure_review_study_directory": str(Path(study_directory).resolve())}
+           if pressure_selection is not None else {}),
         # Review packets recompute the frozen plan against the sealed manifest this root was built from.
         "study_manifest": read_study_manifest(study_directory),
         "analysis_exclusions": exclusions, "analysis_exclusion_count": len(exclusions),
