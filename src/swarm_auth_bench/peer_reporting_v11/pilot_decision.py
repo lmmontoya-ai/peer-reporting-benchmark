@@ -9,9 +9,9 @@ from ..peer_reporting.storage import check_seal, read_sealed, seal
 from .config import load_protocol
 from .lanes import lane_id
 from .pilot import DECISION_KIND, GATE_ARMS, PILOT_ARMS, check_core_decision
+from .review import verify_pressure_export_evidence
 from .review_population import check_pressure_arm_roots
 from .review_sampling import pressure_negative_sample
-from .review import verify_pressure_export_evidence
 
 
 def _require(condition: bool, message: str) -> None:
@@ -19,7 +19,9 @@ def _require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
-def _export(path: Path) -> tuple[dict, dict, list[dict]]:
+def _export(path: Path,
+        receipt_directory: Path | None = None,
+        repair_evidence_directory: Path | None = None) -> tuple[dict, dict, list[dict]]:
     index = read_sealed(path)
     _require(index.get("kind") == "peer_reporting_v11_live_review_export", "not a sealed score export")
     manifest = index.get("study_manifest")
@@ -27,7 +29,8 @@ def _export(path: Path) -> tuple[dict, dict, list[dict]]:
     check_seal(manifest)
     _require(manifest["seal_hash"] == index["study_registration"]["study_manifest_hash"],
              "pilot export study binding differs")
-    scores = verify_pressure_export_evidence(path.parent, index)
+    scores = verify_pressure_export_evidence(path.parent, index,
+        receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
     return index, manifest, scores
 
 
@@ -39,7 +42,9 @@ def export_reference(directory: Path) -> dict:
     return {"path": str(path.resolve()), "seal_hash": index["seal_hash"]}
 
 
-def _inputs(gate_exports: list[dict], pilot_exports: list[dict]) -> tuple[dict, dict[str, dict]]:
+def _inputs(gate_exports: list[dict], pilot_exports: list[dict],
+        receipt_directory: Path | None = None,
+        repair_evidence_directory: Path | None = None) -> tuple[dict, dict[str, dict]]:
     _require(bool(gate_exports) and bool(pilot_exports), "decision requires sealed gate and pilot exports")
     manifest, scores = None, {}
     cache, export_partitions = {}, []
@@ -53,7 +58,8 @@ def _inputs(gate_exports: list[dict], pilot_exports: list[dict]) -> tuple[dict, 
             _require(str(path) not in seen_paths, "pilot export paths must be absolute and distinct")
             seen_paths.add(str(path))
             if str(path) not in cache:
-                cache[str(path)] = _export(path)
+                cache[str(path)] = _export(path,
+                    receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
                 assignments = {row["assignment_id"]: row for row in cache[str(path)][1]["assignments"]}
                 export_partitions.append((str(path), [assignments[row["assignment_id"]]
                                                      for row in cache[str(path)][0]["rows"]]))
@@ -74,9 +80,12 @@ def _inputs(gate_exports: list[dict], pilot_exports: list[dict]) -> tuple[dict, 
 def build_pilot_decision(*, gate_exports: list[dict], pilot_exports: list[dict],
                          flag_resolutions: dict[str, str] | None = None,
                          confirmed_scripting_remarks: list[str] | None = None,
-                         ceiling_choice: str | None = None) -> dict:
+                         ceiling_choice: str | None = None,
+                             receipt_directory: Path | None = None,
+                             repair_evidence_directory: Path | None = None) -> dict:
     """Compute steps 2 to 4; omitted flag resolutions are explicitly unresolved."""
-    manifest, scores = _inputs(gate_exports, pilot_exports)
+    manifest, scores = _inputs(gate_exports, pilot_exports,
+        receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
     assignments = [row for row in manifest["assignments"] if row["arm"] in GATE_ARMS | PILOT_ARMS]
     lanes = sorted({lane_id(row["model"], row["effort"]) for row in assignments})
     _require(len(lanes) == 6, "pilot decision requires the six planned lanes")
@@ -138,13 +147,16 @@ def build_pilot_decision(*, gate_exports: list[dict], pilot_exports: list[dict],
                      for row in assignments if row["arm"] in PILOT_ARMS and not eligible(row)]})
 
 
-def validate_core_decision(record: dict, *, study_manifest_hash: str) -> dict:
+def validate_core_decision(record: dict, *, study_manifest_hash: str,
+        receipt_directory: Path | None = None, repair_evidence_directory: Path | None = None) -> dict:
     _require(type(record) is dict and record.get("kind") == DECISION_KIND, "core requires a pilot decision record")
     check_seal(record)
     _require(record["study_manifest_hash"] == study_manifest_hash, "core pilot decision belongs to another study")
     expected = build_pilot_decision(gate_exports=record["gate_exports"], pilot_exports=record["pilot_exports"],
                                     flag_resolutions=record["flag_resolutions"],
                                     confirmed_scripting_remarks=record["confirmed_scripting_remarks"],
-                                    ceiling_choice=record["ceiling_choice"])
+                                    ceiling_choice=record["ceiling_choice"],
+                                        receipt_directory=receipt_directory,
+                                        repair_evidence_directory=repair_evidence_directory)
     _require(record == expected, "pilot decision record differs from recomputed counts, flags, Psel or decision")
     return check_core_decision(record, study_manifest_hash=study_manifest_hash)

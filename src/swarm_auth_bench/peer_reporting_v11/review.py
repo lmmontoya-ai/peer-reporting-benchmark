@@ -228,7 +228,8 @@ def _view(attempt: Any) -> dict[str, Any]:
 
 
 def build_review_bundle(attempt: dict, *, scope: str, withheld: Iterable[str] = (),
-                        delivered_instructions: str | None = None) -> dict[str, Any]:
+                        delivered_instructions: str | None = None,
+                        retained_bindings: dict | None = None, packet_id: str | None = None) -> dict[str, Any]:
     """Return {"packet": masked reviewer packet, "bindings": private bindings} for one attempt.
 
     ``scope`` (a ``review_plan.SCOPES`` key) decides which outputs get labels;
@@ -271,7 +272,11 @@ def build_review_bundle(attempt: dict, *, scope: str, withheld: Iterable[str] = 
     _require(not reused, f"output IDs reuse public fixture strings {reused}")
     peer_ids = {message.get("event_id") for message in view["peer_messages"]}
     taken = set(public_strings)
-    review_ids = {raw_id: _fresh_id("output", taken) for raw_id in view["entries"]}
+    retained = retained_bindings or {}
+    retained_ids = {entry["raw_output_id"]: identifier for identifier, entry in
+                    {**retained.get("outputs", {}), **retained.get("context_outputs", {})}.items()}
+    review_ids = {raw_id: retained_ids[raw_id] if retained_bindings is not None else _fresh_id("output", taken)
+                  for raw_id in view["entries"]}
     references: dict[str, str] = {}
 
     def mask(value: Any, path: str, masked: list[str]) -> Any:
@@ -280,7 +285,10 @@ def build_review_bundle(attempt: dict, *, scope: str, withheld: Iterable[str] = 
         if value in review_ids:
             replacement = review_ids[value]
         elif value in identifying or value in peer_ids or _GENERATED_HEX.search(value):
-            replacement = references.setdefault(value, _fresh_id("ref", taken))
+            if value not in references:
+                retained_refs = {raw: identifier for identifier, raw in retained.get("references", {}).items()}
+                references[value] = retained_refs[value] if retained_bindings is not None else _fresh_id("ref", taken)
+            replacement = references[value]
         else:
             return value
         masked.append(path)
@@ -329,7 +337,8 @@ def build_review_bundle(attempt: dict, *, scope: str, withheld: Iterable[str] = 
     for request in view["unstored"]:
         masked: list[str] = []
         result = request.get("result") if type(request.get("result")) is dict else {}
-        identifier = _fresh_id("attempt", taken)
+        identifier = next(identifier for identifier, entry in retained["unstored_report_attempts"].items()
+                          if entry == {"arrival_seq": request.get("arrival_seq"), "content_hash": content_hash(request)})             if retained_bindings is not None else _fresh_id("attempt", taken)
         attempts_shown.append({"context_id": identifier, "tool": "report_incident",
                                "arguments": mask_arguments(request.get("arguments"), masked),
                                "result": {key: result[key] for key in ("status", "error", "field", "rule", "limit")
@@ -369,7 +378,7 @@ def build_review_bundle(attempt: dict, *, scope: str, withheld: Iterable[str] = 
     checked = record_check(public, fetchable)
     body = {
         "packet_version": REVIEW_PACKET_VERSION, "rubric_version": RUBRIC_VERSION,
-        "review_packet_id": _fresh_id("packet", taken),
+        "review_packet_id": packet_id if retained_bindings is not None else _fresh_id("packet", taken),
         "common_instructions": instructions,
         "instructions_note": "Every observer received these instructions. Some observers also received further "
                              "guidance that is not shown, so do not judge whether the observer followed it.",
@@ -511,6 +520,17 @@ def validate_review_upload(upload: Any, packet: Any, *, controller: dict | None 
                  "controller bindings belong to another packet")
         bound = check_bindings(controller["review_bindings"], controller["attempt"])
         _require(set(bound) == labeled, "packet outputs differ from the bound outputs")
+        try:
+            rebuilt = build_review_bundle(controller["attempt"], scope=controller["review_bindings"]["review_scope"],
+                                          retained_bindings=controller["review_bindings"],
+                                          packet_id=packet["review_packet_id"])
+        except (KeyError, StopIteration) as error:
+            raise ValueError("retained packet masking map differs from the primary attempt") from error
+        def evidence(record):
+            return {key: value for key, value in record.items()
+                    if key not in {"blinding", "review_packet_hash", "seal_hash"}}
+        _require(canonical_json(evidence(packet)) == canonical_json(evidence(rebuilt["packet"])),
+                 "review packet content differs from the primary attempt")
         result["bindings_verified"] = True
     return result
 
@@ -573,7 +593,7 @@ def _endpoint(entries: list[dict], kinds: Iterable[str], positive: Callable[[dic
 
 
 def human_endpoints(attempt: dict, bindings: dict, resolved: Mapping[str, dict], *, structured: dict | None = None,
-                    allow_replay: bool = False) -> dict[str, Any]:
+                    allow_replay: bool = False, second_review: bool | None = None) -> dict[str, Any]:
     """Combine final human labels with the attempt's truth into the human-reviewed endpoints.
 
     ``resolved`` maps review output IDs to ``rubric.resolve_output`` results (see
@@ -584,6 +604,7 @@ def human_endpoints(attempt: dict, bindings: dict, resolved: Mapping[str, dict],
     """
     bound = check_bindings(bindings, attempt)
     _require(set(resolved) <= set(bound), "resolved labels name outputs that are not bound for review")
+    _require(not resolved or type(second_review) is bool, "resolved labels require the bound second-review rule")
     expected_score = score_trial(attempt, allow_replay=allow_replay)
     if structured is not None:
         # A supplied replay score historically opts into the counterfactual view.
@@ -599,6 +620,21 @@ def human_endpoints(attempt: dict, bindings: dict, resolved: Mapping[str, dict],
     entries = []
     for identifier, entry in bound.items():
         result = resolved.get(identifier) or {"status": "unreviewed", "resolution": None, "labels": None}
+        if identifier in resolved:
+            from .rubric import resolve_output
+
+            reviews = result.get("initial_reviews", [])
+            targets = packet_targets({"claim_targets": {
+                "operations": [op["operation_id"] for op in truth["operations"]],
+                "actors": [peer["agent_id"] for peer in attempt["fixture"]["public"]["roster"]], "other": UNIDENTIFIED}})
+            expected = resolve_output(reviews, targets=targets, second_review=second_review,
+                                      adjudication=result.get("adjudication"),
+                                      record_conflict=any(_expected_support(claim["target"], truth)
+                                                         not in (None, claim["supported"])
+                                                         for review in reviews if authoritative(review)
+                                                         for claim in review["labels"]["unauthorized_claims"]))
+            _require(canonical_json(result) == canonical_json(expected),
+                     "review resolution differs from submitted reviews and adjudication")
         labels = result["labels"] if result["status"] == "final" else None
         conflicts = []
         if labels is not None:
@@ -776,7 +812,8 @@ def render_packet_html(packet: Mapping[str, Any]) -> str:
 
 
 
-def verify_pressure_export_evidence(export_directory: Path, index: dict) -> list[dict]:
+def verify_pressure_export_evidence(export_directory: Path, index: dict,
+        receipt_directory: Path | None = None, repair_evidence_directory: Path | None = None) -> list[dict]:
     """Re-derive every exported row from the registered live root before filtering.
 
     An export retains the root's entire planned population. Every row, including
@@ -793,6 +830,9 @@ def verify_pressure_export_evidence(export_directory: Path, index: dict) -> list
                         if record["plan_hash"] == index["source_plan_hash"])
     root = registered_root_path(study, registration)
     plan = live_review.read_live_plan(root)
+    from .receipts import check_receipt
+
+    check_receipt(root, receipt_directory, study_directory=study)
     checked = live_review.root_registration(study, plan, directory=root, require_finalized=False)
     _require(all(index["study_registration"].get(key) == checked[key]
                  for key in ("plan_hash", "phase", "study_manifest_hash", "root_path")),
@@ -803,7 +843,16 @@ def verify_pressure_export_evidence(export_directory: Path, index: dict) -> list
     prior = [registered_root_path(study, record) for record in registered_roots(study)
              if record["plan_hash"] in {item["plan_hash"]
                  for item in (plan.get("consumed_attempts") or {}).get("prior_roots", [])}]
-    live_review.verify_consumed_ledger(root, plan, prior, study_directory=study)
+    live_review.verify_consumed_ledger(root, plan, prior, study_directory=study,
+        receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+    from .ledger_repair import verify_root_ledger_repairs
+
+    repairs = verify_root_ledger_repairs(root, plan, journals, evidence_directory=repair_evidence_directory)
+    _require(index.get("ledger_repairs", []) == repairs, "P export ledger repairs differ from the current root")
+    declarations = [{"kind": "ledger_repaired", "lane_id": repair["lane_id"], "repair_hash": repair["seal_hash"]}
+                    for repair in repairs]
+    _require(index.get("declared_deviations", []) == declarations,
+             "P export ledger repair declarations differ from the current root")
     amendments = live_review.study_amendments(study) if plan["phase"] == "smoke" else []
     data = live_review.inspect_live_root(root, scorer=score_trial, amendments=amendments)
     _require(not data["amendment_errors"], "; ".join(data["amendment_errors"]))
@@ -847,17 +896,21 @@ def verify_pressure_export_evidence(export_directory: Path, index: dict) -> list
     return scores
 
 
-def verify_pressure_packet_selection(export_directory: Path, index: dict, selection: dict) -> dict:
+def verify_pressure_packet_selection(export_directory: Path, index: dict, selection: dict,
+        receipt_directory: Path | None = None, repair_evidence_directory: Path | None = None) -> dict:
     """Bind outcome-selected P packets to primary live-root evidence."""
     check_seal(selection)
-    scores = verify_pressure_export_evidence(export_directory, index)
+    scores = verify_pressure_export_evidence(export_directory, index,
+        receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
     expected = pressure_review_selection(scores)
     _require(selection == expected, "P selection differs from sealed export scores")
     return {row["assignment_id"]: row for row in selection["rows"]}
 
 
 def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
-                         load_template: Callable[[str], dict] | None = None) -> dict[str, Any]:
+                         load_template: Callable[[str], dict] | None = None,
+                             receipt_directory: Path | None = None,
+                             repair_evidence_directory: Path | None = None) -> dict[str, Any]:
     """Write reviewer packets for every planned assignment with an exported attempt.
 
     ``reviewer/`` holds the only files a reviewer may see (sealed JSON packets and
@@ -883,7 +936,8 @@ def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
                             for row in manifest.get("assignments", []))
     _require(not contains_pressure or pressure, "level P export requires its pressure review selection")
     if pressure:
-        rows = verify_pressure_packet_selection(export_directory, index, plan)
+        rows = verify_pressure_packet_selection(export_directory, index, plan,
+            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
     else:
         rows = None
     _require(index["study_registration"]["study_manifest_hash"] ==

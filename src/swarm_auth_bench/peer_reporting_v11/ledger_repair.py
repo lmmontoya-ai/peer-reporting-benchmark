@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import tempfile
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -238,25 +237,29 @@ def _evidence_caps(corrupt: bytes, marker: dict) -> dict:
 
 
 def _committed_evidence(directory: Path, commit: str) -> tuple[str, dict[str, bytes]]:
-    """Read the named Git snapshot and reject dirty or uncommitted evidence."""
-    def git(*args: str) -> bytes:
-        result = subprocess.run(["git", "-C", str(directory), *args], capture_output=True, check=False)
-        if result.returncode:
-            raise EvidenceError("ledger repair binding requires evidence in the named Git commit")
-        return result.stdout
+    from .git_evidence import committed_files
 
-    repository = Path(os.fsdecode(git("rev-parse", "--show-toplevel").strip())).resolve()
-    relative = directory.resolve().relative_to(repository).as_posix()
-    resolved = git("rev-parse", "--verify", "--end-of-options", f"{commit}^{{commit}}").decode().strip()
-    evidence = {}
-    for name in (LEDGER_FILE, LEDGER_FILE + ".identity.json", JOURNAL_FILE):
-        path = safe_child(directory, name)
-        raw = path.read_bytes()
-        git_path = name if relative == "." else f"{relative}/{name}"
-        if raw != git("show", f"{resolved}:{git_path}"):
-            raise EvidenceError(f"binding evidence {name} differs from the named Git commit")
-        evidence[name] = raw
-    return resolved, evidence
+    return committed_files(directory, commit, (LEDGER_FILE, LEDGER_FILE + ".identity.json", JOURNAL_FILE))
+
+
+def check_binding_evidence(binding: dict, evidence_directory: Path | list[Path] | tuple | None) -> None:
+    """Rebuild the binding from an explicitly supplied committed evidence location."""
+    if evidence_directory is None:
+        raise EvidenceError("ledger repair requires its committed evidence directory")
+    directories = evidence_directory if isinstance(evidence_directory, (list, tuple)) else [evidence_directory]
+    failures = []
+    for directory in directories:
+        try:
+            expected = build_ledger_repair_binding(directory, study=binding["study"], root=binding["root"],
+                                                 lane_id=binding["lane_id"], plan_hash=binding["plan_hash"],
+                                                 commit=binding["commit"], approval_text=binding["approval_text"])
+            if canonical_json(expected) == canonical_json(binding):
+                return
+            failures.append("binding differs from the named committed evidence")
+        except (OSError, ValueError) as error:
+            failures.append(str(error))
+    raise EvidenceError("ledger repair binding requires matching evidence in its named Git commit: "
+                        + "; ".join(failures))
 
 
 def build_ledger_repair_binding(evidence_directory: Path, *, study: str, root: str, lane_id: str,
@@ -443,7 +446,7 @@ def _bound_candidate(corrupt: bytes, binding: dict, marker: dict, caps: dict) ->
 
 
 def verify_root_ledger_repairs(directory: Path, plan: dict, journals: dict[str, list[dict]], *,
-                               _pending_path: Path | None = None) -> list[dict]:
+                               _pending_path: Path | None = None, evidence_directory: Path | None = None) -> list[dict]:
     """Check completed records, approved bindings, retained bytes and journal prefixes."""
     reports = []
     for lane in plan["lanes"]:
@@ -465,6 +468,7 @@ def verify_root_ledger_repairs(directory: Path, plan: dict, journals: dict[str, 
                 raise EvidenceError("ledger repair lane plan mismatch")
             marker = read_sealed(lane_dir / (LEDGER_FILE + ".identity.json"))
             _check_binding_context(binding, directory, plan, lane, marker)
+            check_binding_evidence(binding, evidence_directory)
             _check_journal_binding(binding, lane_dir / JOURNAL_FILE, journal)
             count = binding["journal"]["count"]
             if entry["sequence"] != count or entry["previous_hash"] != binding["journal"]["final_hash"]:
@@ -502,9 +506,15 @@ def _retain_bytes(path: Path, raw: bytes) -> None:
 
 
 def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reason: str,
-                  approval_text: str, binding_path: Path) -> dict:
+                  approval_text: str, binding_path: Path, evidence_directory: Path | None = None) -> dict:
     """Prepare or finish one approved repair under root, lane and ledger locks."""
-    from .live import COORDINATOR_LOCK, check_abandoned_root, check_root_assignment_binding, read_live_plan, root_registration
+    from .live import (
+        COORDINATOR_LOCK,
+        check_abandoned_root,
+        check_root_assignment_binding,
+        read_live_plan,
+        root_registration,
+    )
     from .phase import INDEX_KIND, PLAN_KIND
 
     for description, text in (("reason", reason), ("approval text", approval_text)):
@@ -512,6 +522,7 @@ def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reaso
             raise ValueError(f"a ledger repair needs nonempty {description}")
     binding = read_sealed(binding_path)
     _validate_binding(binding)
+    check_binding_evidence(binding, evidence_directory)
     if approval_text != binding["approval_text"]:
         raise EvidenceError("repair approval text differs from approved binding")
     directory = Path(directory)
@@ -561,7 +572,7 @@ def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reaso
             stack.callback(journal.close)
             records = journal.records
             _check_journal_binding(binding, journal_path, records, tail=[])
-            verify_root_ledger_repairs(directory, {**plan, "lanes": [lane]}, {lane_id: records})
+            verify_root_ledger_repairs(directory, {**plan, "lanes": [lane]}, {lane_id: records}, evidence_directory=evidence_directory)
             corrupt = target
             tail = b""
         checkpoint = index["journal"]
@@ -600,7 +611,7 @@ def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reaso
         if pending:
             # Other historical repairs must remain intact while this one resumes.
             verify_root_ledger_repairs(directory, {**plan, "lanes": [lane]},
-                                       {lane_id: records}, _pending_path=path)
+                                       {lane_id: records}, _pending_path=path, evidence_directory=evidence_directory)
         binding_copy = _binding_path(lane_dir, binding["seal_hash"])
         if binding_copy.exists() and read_sealed(binding_copy) != binding:
             raise EvidenceError("existing retained ledger repair binding differs")

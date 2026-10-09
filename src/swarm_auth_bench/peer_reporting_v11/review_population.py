@@ -8,7 +8,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..peer_reporting.storage import read_sealed, safe_child
-from .live import check_assignment_binding, read_live_plan, read_study_manifest, registered_root_path, registered_roots
+from .live import (
+    check_assignment_binding,
+    read_live_plan,
+    read_study_manifest,
+    registered_root_path,
+    registered_roots,
+)
 
 
 def _require(condition: bool, message: str) -> None:
@@ -37,14 +43,16 @@ def registered_pressure_partitions(study_directory: Path, *, phase: str, study_m
     study_assignments = {row["assignment_id"]: row for row in manifest["assignments"]}
     partitions = []
     for registration in registered_roots(study_directory):
-        if registration["phase"] != phase:
-            continue
         root = registered_root_path(study_directory, registration)
+        if registration["state"] == "abandoned" and not (root / "live-plan.json").exists():
+            continue
         plan = read_live_plan(root)
-        _require(plan["seal_hash"] == registration["plan_hash"] and plan["phase"] == phase
+        _require(plan["seal_hash"] == registration["plan_hash"] and plan["phase"] == registration["phase"]
                  and plan["source"]["study_manifest_hash"] == study_manifest_hash
                  and registration["study_manifest_hash"] == study_manifest_hash,
                  "P review root plan differs from its study registration")
+        if plan["phase"] != phase:
+            continue
         entries, seen = [], set()
         for lane in plan["lanes"]:
             lane_plan = read_sealed(safe_child(root, lane["path"]) / "phase-plan.json")

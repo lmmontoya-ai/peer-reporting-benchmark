@@ -58,7 +58,7 @@ def make_decision_inputs(tmp_path, wp6_study, monkeypatch):
     for row in rows:
         f = fixtures[row["fixture_id"]]
         raw = pressure_attempt()
-        raw.update(fixture=f, assignment_id=row["assignment_id"], attempt_id=row["assignment_id"] + "-double",
+        raw.update(fixture=f, instructions=row["instructions"], assignment_id=row["assignment_id"], attempt_id=row["assignment_id"] + "-double",
                    **{key: row[key] for key in ("model", "effort", "arm", "variant", "level")})
         raw["observer_outputs"] = [{"output_id": "final-output", "source_kind": "final_response", "text": "Done."}]
         raw["tool_requests"] = []
