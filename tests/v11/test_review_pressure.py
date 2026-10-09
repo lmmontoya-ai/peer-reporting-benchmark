@@ -11,7 +11,7 @@ from swarm_auth_bench.peer_reporting.storage import check_seal, read_sealed
 from swarm_auth_bench.peer_reporting_v11 import live_review
 from swarm_auth_bench.peer_reporting_v11.cli import main
 from swarm_auth_bench.peer_reporting_v11.config import load_protocol
-from swarm_auth_bench.peer_reporting_v11.review import build_review_bundle
+from swarm_auth_bench.peer_reporting_v11.review import build_review_bundle, validate_review_upload
 from swarm_auth_bench.peer_reporting_v11.review_plan import REVIEW_SEED, pressure_review_selection, rank
 from swarm_auth_bench.peer_reporting_v11.score import PRESSURE_ENDPOINTS, score_trial, summarize
 from swarm_auth_bench.peer_reporting_v11.structured import report_summary_contradictions
@@ -119,7 +119,7 @@ def room_event(kind, source=None, sequence=1):
 def test_c5_event_filter_keeps_order_all_keys_and_deep_copies():
     events = [room_event("public_message_stored", "observer_message", 1),
               room_event("public_message_stored", "system_notice", 2),
-              room_event("public_message_stored", "scripted_peer_reaction", 3),
+              room_event("public_message_stored", "peer_reaction", 3),
               room_event("pressure_reactions_stored", sequence=4),
               room_event("public_message_stored", "scripted_peer_message", 5),
               {"kind": "task_answer_held", "visibility": "controller", "arrival_seq": 2,
@@ -142,7 +142,7 @@ def test_normalize_attempt_captures_c5_only_for_p_and_keeps_notices_out_of_outpu
              "world_mode": "normal", "prompt_condition": "neutral", "arm": "pressure_core_xhigh",
              "planned_order": 1, "instructions": "instructions", "instructions_and_roles_hash": "roles"}
     world_events = [room_event("public_message_stored", "system_notice", 1),
-                    room_event("public_message_stored", "scripted_peer_reaction", 2),
+                    room_event("public_message_stored", "peer_reaction", 2),
                     room_event("pressure_reactions_stored", sequence=3),
                     room_event("public_message_stored", "scripted_peer_message", 4)]
     world = {"trial_id": "attempt", "events": world_events, "exposure_confirmed": True,
@@ -155,7 +155,7 @@ def test_normalize_attempt_captures_c5_only_for_p_and_keeps_notices_out_of_outpu
               "initial_receipt": None, "exposure_confirmed": True, "runtime_closed": True, "queue_reconciled": True,
               "infrastructure_failures": [], "termination_kind": "natural_end", "tool_requests": [],
               "peer_reply_evidence": {"acknowledged_reply_event_ids": []}, "execution_kind": "live_model",
-              "observer_outputs": [{"source_kind": "system_notice"}, {"source_kind": "scripted_peer_reaction"},
+              "observer_outputs": [{"source_kind": "system_notice"}, {"source_kind": "peer_reaction"},
                   {"source_kind": "final_response", "arrival_event_seq": 7, "delivery_evidence": "complete",
                    "elapsed_seconds": 2.0, "text": "Done"}], "tool_receipts": []}
     payload = {"observer_result": None if incomplete else result, "attempt_id": "attempt", "plan_hash": "plan",
@@ -249,3 +249,20 @@ def test_cli_injects_pressure_selector_only_in_the_offline_export_branch(tmp_pat
     assert main(["export-review", str(tmp_path / "root"), "--output", str(tmp_path / "export"),
                  "--study", str(tmp_path / "study")]) == 0
     assert calls[0]["pressure_review_selector"] is pressure_review_selection
+
+def test_p_review_descriptive_codes_are_required_and_validated(tmp_path):
+    from .test_pressure_fixtures import fixture as pressure_fixture
+
+    f = pressure_fixture()
+    from swarm_auth_bench.peer_reporting_v11.runner import replay_fixture
+
+    from .pressure_fakes import labels
+
+    attempt = replay_fixture(f, tmp_path / "replay", attempt_id="review-codes", labels=labels())
+    packet = build_review_bundle(attempt, scope="full")["packet"]
+    upload = {"review_packet_hash": packet["review_packet_hash"], "labels_by_output_id": {},
+              "descriptive_codes": dict.fromkeys(packet["descriptive_codes"], "no")}
+    assert validate_review_upload(upload, packet)["descriptive_codes"] == upload["descriptive_codes"]
+    upload["descriptive_codes"].pop("routing_awareness")
+    with pytest.raises(ValueError, match="descriptive_codes"):
+        validate_review_upload(upload, packet)

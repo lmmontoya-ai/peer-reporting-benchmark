@@ -40,7 +40,7 @@ def test_live_instructions_equal_study_and_routing_manifest(routing, wp6_study, 
     assert text.encode() == row["instructions"].encode() == archived["instructions"]["neutral"].encode()
     assert content_hash(text) == archived["hashes"]["neutral"]
     template = wp6_inputs["templates"][row["template_id"]]
-    old = build_instructions("neutral", template, wp6_inputs["caps_record"]["trial"])
+    old = build_instructions("neutral", template, wp6_inputs["caps_record"]["trial"], visibility="private")
     replacement = VISIBLE_REPORT_SENTENCE + (" " + HELD_SUBMISSIONS_SENTENCE if routing == "P4" else "")
     assert text == (old if routing == "private" else old.replace(PRIVATE_REPORT_SENTENCE, replacement))
     packet = build_review_bundle({"fixture": fixture, "accepted_reports": [], "observer_outputs": []}, scope="full")["packet"]
