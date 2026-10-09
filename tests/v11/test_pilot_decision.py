@@ -17,10 +17,12 @@ from swarm_auth_bench.peer_reporting_v11.pilot import (
     CORE_ARMS,
     GATE_ARMS,
     PILOT_ARMS,
+    verify_core_binding,
+)
+from swarm_auth_bench.peer_reporting_v11.pilot_decision import (
     build_pilot_decision,
     export_reference,
     validate_core_decision,
-    verify_core_binding,
 )
 from swarm_auth_bench.peer_reporting_v11.review import validate_review_upload, write_review_packets
 from swarm_auth_bench.peer_reporting_v11.review_plan import pressure_review_selection
@@ -86,7 +88,8 @@ def core_build(decision_inputs, wp6_inputs, record):
     rows = [row for row in manifest["assignments"] if row["arm"] in CORE_ARMS]
     return live.build_assignment_plan("calibration", rows, fixtures, wp6_inputs["caps_record"], revision="core-double",
         source={"kind": "study_manifest", "study_manifest_hash": manifest["seal_hash"]}, gate_evidence={},
-        bundle=replace(load_bundle(), verify_fixture=lambda *args: []), selected_arms=sorted(CORE_ARMS), pilot_decision=record)
+        bundle=replace(load_bundle(), verify_fixture=lambda *args: []), selected_arms=sorted(CORE_ARMS), pilot_decision=record,
+        pilot_decision_verifier=validate_core_decision)
 
 
 def misses(raw):
@@ -429,3 +432,39 @@ def test_finished_html_has_descriptive_questions_and_valid_completed_upload(tmp_
     validated = validate_review_upload(upload, packet, controller=controller)
     assert validated["bindings_verified"] and not validated["missing_final_output_ids"]
     assert validated["descriptive_codes"] == upload["descriptive_codes"]
+
+
+def test_runtime_binding_does_not_load_post_hoc_code_or_read_exports(tmp_path, decision_inputs, wp6_inputs):
+    import subprocess
+    import sys
+
+    record = build_pilot_decision(**decision_inputs[-1]())
+    top, _, _ = core_build(decision_inputs, wp6_inputs, record)
+    path = tmp_path / "core-plan.json"
+    atomic_json(path, seal(top))
+    code = """
+import sys
+from pathlib import Path
+from swarm_auth_bench.peer_reporting.storage import read_sealed
+from swarm_auth_bench.peer_reporting_v11 import live, phase
+from swarm_auth_bench.peer_reporting_v11.pilot import verify_core_binding
+plan = read_sealed(sys.argv[1])
+# Scoring exports are not execution inputs once the offline build seals the decision.
+for reference in plan["pilot_decision"]["gate_exports"] + plan["pilot_decision"]["pilot_exports"]:
+    Path(reference["path"]).unlink(missing_ok=True)
+verify_core_binding(plan)
+for name in phase.POST_HOC_MODULES:
+    module = "swarm_auth_bench." + name.removesuffix(".py").replace("/", ".")
+    assert module not in sys.modules, module
+"""
+    subprocess.run([sys.executable, "-c", code, str(path)], check=True, capture_output=True, text=True)
+
+
+def test_core_build_requires_an_offline_decision_verifier(decision_inputs, wp6_inputs):
+    record = build_pilot_decision(**decision_inputs[-1]())
+    manifest, fixtures, *_ = decision_inputs
+    rows = [row for row in manifest["assignments"] if row["arm"] in CORE_ARMS]
+    with pytest.raises(ValueError, match="requires offline pilot decision verification"):
+        live.build_assignment_plan("calibration", rows, fixtures, wp6_inputs["caps_record"], revision="core-double",
+            source={"kind": "study_manifest", "study_manifest_hash": manifest["seal_hash"]}, gate_evidence={},
+            selected_arms=sorted(CORE_ARMS), pilot_decision=record)
