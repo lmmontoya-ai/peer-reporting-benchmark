@@ -57,8 +57,8 @@ from .bundle import ProtocolBundle, load_bundle
 from .lanes import PROVIDER_PAUSE_CLASSIFICATIONS
 from .live import (
     CONFIGURATION_CHECKS,
-    _tool_set_for_plan,
     _row_valid,
+    _tool_set_for_plan,
     authorization_error,
     check_abandoned_root,
     check_arm_selection,
@@ -105,7 +105,21 @@ def pressure_events(world: dict) -> list[dict]:
     return [deepcopy(event) for event in world["events"]
             if event["kind"] in ("pressure_reactions_stored", "task_answer_held")
             or (event["kind"] == "public_message_stored"
-                and event["data"]["message"]["source_kind"] in ("system_notice", "scripted_peer_reaction"))]
+                and event["data"]["message"]["source_kind"] in ("system_notice", "peer_reaction"))]
+
+
+def received_room_messages(world: dict, receipts: list[dict]) -> list[dict]:
+    """Room order, restricted to inline or read_channel messages in confirmed receipts."""
+    received = {}
+    for receipt in receipts:
+        result = receipt.get("result") or {}
+        for message in result.get("room_events", []) + result.get("messages", []):
+            received[message["event_id"]] = message
+    return [deepcopy(event["data"]["message"]) for event in world["events"]
+            if event["kind"] == "public_message_stored"
+            and event["data"]["message"]["source_kind"] != "observer_message"
+            and event["data"].get("notice_kind") not in ("final_message", "finish_summary")
+            and received.get(event["data"]["message"]["event_id"]) == event["data"]["message"]]
 
 
 def report_attempts(tool_requests: list[dict]) -> list[dict]:
@@ -212,20 +226,22 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
                             "room_sequence": message["sequence"], "elapsed_seconds": event["elapsed_seconds"],
                             "controller_sequence": arrival["arrival_event_seq"], "audience": "release-room",
                             "delivery_status": "durably_stored_public_message"})
-        elif message["source_kind"] == "scripted_peer_message":
+        elif message["source_kind"] in ("scripted_peer_message", "peer_message"):
             replies.append({**message, "sequence": event["event_seq"], "elapsed_seconds": event["elapsed_seconds"],
                             "delivery_status": "read_channel_receipt_confirmed" if message["event_id"] in acknowledged
                             else "stored_reply_without_confirmed_read_receipt"})
     for original in result["observer_outputs"]:
-        if original["source_kind"] in ("system_notice", "scripted_peer_reaction"):
+        if original["source_kind"] in ("system_notice", "peer_reaction"):
             continue
         output = deepcopy(original)
         output.update(sequence=original["arrival_event_seq"], controller_sequence=original["arrival_event_seq"],
-                      reply_to=None, audience="simulated_task_owner", delivery_status=original["delivery_evidence"])
+                      reply_to=None, audience=original.get("recipient", "simulated_task_owner"), delivery_status=original["delivery_evidence"])
         outputs.append(output)
     outputs.sort(key=lambda output: (output["controller_sequence"], output["elapsed_seconds"]))
     return {**base, "eligible": eligible, "exposure_confirmed": exposure, "termination_kind": termination,
-            **({"pressure_events": pressure_events(world)} if fixture["truth"]["level"] == "P" else {}),
+            **({"pressure_events": pressure_events(world),
+                "observed_room_messages": received_room_messages(world, result["tool_receipts"])}
+               if fixture["truth"]["level"] == "P" else {}),
             **({"overload_stage": result["overload_stage"]} if "overload_stage" in result else {}),
             "accepted_reports": [{"report_id": report["report_id"], "payload": deepcopy(report["report"])}
                                  for report in world["reports"]],
@@ -441,6 +457,8 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     summary = summarize(scored) if summarize is not None else None
     pressure_selection = (pressure_review_selector(scored) if pressure_review_selector is not None
                           and any(record.get("level") == "P" for record in scored) else None)
+    if pressure_selection is not None:
+        atomic_json(output / "pressure-review-selection.json", pressure_selection)
     exclusions = sorted(row["assignment_id"] for row in data["rows"] if row["excluded_from_analysis"])
     atomic_json(output / "index.json", seal({
         "kind": EXPORT_KIND, "adapter_version": ADAPTER_VERSION, "phase": data["phase"],

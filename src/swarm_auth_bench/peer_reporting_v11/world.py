@@ -27,6 +27,7 @@ from typing import Any
 from ..events import canonical_json, content_hash
 from ..peer_reporting.world import WorldStorageError
 from . import TOOL_SCHEMA_VERSION
+from .coverage import report_coverage
 from .pressure_text import named_ids, render_notice, render_reactions
 from .schemas import (
     DEFERRED_SCHEMA,
@@ -189,8 +190,11 @@ def _audit_pressure_context(context: dict[str, Any]) -> None:
     _audit_fields(context, {
         "visibility": (str,), "pressure": (str,), "roster_peer_ids": (list,),
         "sender_ids": (list,), "operation_ids": (list,), "report_triggered": (bool,),
-        "post_triggered": (bool,), "closure_notices_stored": (bool,),
+        "post_triggered": (bool,), "closure_notices_stored": (bool,), "coverage_truth": (dict,),
     }, "pressure context")
+    _audit_fields(context["coverage_truth"], {"focal_operation_id": (str,), "operations": (list,),
+                                            "operation_stems": (dict,), "innocent_actor_ids": (list,)},
+                  "pressure coverage truth")
     if (context["visibility"] not in {"private", "visible"}
             or context["pressure"] not in {"none", "neutral", "P1", "P2", "P3", "P4"}
             or context["pressure"] == "P4" and context["visibility"] != "visible"):
@@ -209,10 +213,20 @@ def _audit_pressure_context(context: dict[str, Any]) -> None:
 def _audit_pressure_message(message: dict, context: dict, observer_id: str) -> None:
     kind, sender = message["source_kind"], message["sender_id"]
     expected = ({"room"} if kind == "system_notice" else {observer_id} if kind == "observer_message"
-                else set(context["sender_ids"]) if kind == "scripted_peer_reaction"
+                else set(context["sender_ids"]) if kind == "peer_reaction"
                 else set(context["roster_peer_ids"]))
     if sender not in expected or (kind == "system_notice" and context["visibility"] != "visible"):
         raise ValueError("invalid level P message provenance")
+
+
+def _focal_coverage_snapshot(reports: list[dict], truth: dict) -> bool | None:
+    coverage = [report_coverage(report["report"], truth) for report in reports]
+    focal = truth["focal_operation_id"]
+    if any(focal in item["covered_operation_ids"] for item in coverage):
+        return True
+    if any(item["coverage_ambiguous"] and focal in item["candidate_operation_ids"] for item in coverage):
+        return None
+    return False
 
 
 def _audit_pressure_events(state: dict) -> None:
@@ -259,7 +273,7 @@ def _audit_pressure_events(state: dict) -> None:
         elif kind == "pressure_reactions_stored":
             _audit_fields(data, {"trigger": (str,), "trigger_event_id": (str,),
                                  "listed_operation_ids": (list,), "reaction_type": (str,),
-                                 "reaction_event_ids": (list,)}, "pressure reaction event")
+                                 "reaction_event_ids": (list,), "focal_reported_before_reaction": (bool, type(None))}, "pressure reaction event")
             trigger = data["trigger"]
             parent = seen_public.get(data["trigger_event_id"])
             expected_kind = "system_notice" if trigger == "report" else "observer_message"
@@ -281,12 +295,17 @@ def _audit_pressure_events(state: dict) -> None:
                     or data["listed_operation_ids"] != listed or data["reaction_type"] != reaction_type
                     or len(data["reaction_event_ids"]) != 3 or len(set(data["reaction_event_ids"])) != 3):
                 raise ValueError("invalid level P reaction data")
+            covered = _focal_coverage_snapshot([report for report in state["reports"]
+                                               if report["arrival_seq"] <= event["arrival_seq"]],
+                                              context["coverage_truth"])
+            if data["focal_reported_before_reaction"] != covered:
+                raise ValueError("level P reaction focal coverage snapshot differs from stored reports")
             previous = parent["data"]["message"]["sequence"]
             for identifier, sender, text in zip(data["reaction_event_ids"], context["sender_ids"], expected_texts):
                 reaction = seen_public.get(identifier)
                 message = messages.get(identifier)
                 if (reaction is None or reaction["arrival_seq"] != event["arrival_seq"]
-                        or message["source_kind"] != "scripted_peer_reaction" or message["sender_id"] != sender
+                        or message["source_kind"] != "peer_reaction" or message["sender_id"] != sender
                         or message["text"] != text or message["reply_to"] != data["trigger_event_id"]
                         or message["recipient"] is not None or message["sequence"] <= previous):
                     raise ValueError("invalid level P reaction message or ordering")
@@ -304,6 +323,70 @@ def _audit_pressure_events(state: dict) -> None:
             or closure_kinds != sorted(closure_kinds, key=lambda kind: kind == "finish_summary")
             or closure_kinds and not context["closure_notices_stored"]):
         raise ValueError("level P trigger or closure state differs from events")
+    _audit_pressure_receipts(state)
+
+
+def _audit_pressure_receipts(state: dict) -> None:
+    """Recompute each successful receipt from complete ordered public messages."""
+    public = {}
+    triggers = {}
+    for event in state["events"]:
+        if event["kind"] == "public_message_stored" and event["arrival_seq"] is not None:
+            public.setdefault(event["arrival_seq"], []).append(event["data"]["message"])
+        if event["kind"] == "pressure_reactions_stored":
+            triggers[event["arrival_seq"]] = event["data"]["trigger"]
+    saved = {}
+    fired = set()
+    context = state["pressure"]
+    for request in state["requests"]:
+        name, result, args, arrival = (request[key] for key in ("name", "result", "arguments", "arrival_seq"))
+        if name not in ("report_incident", "send_message") or not result or result.get("status") != "stored":
+            continue
+        key = canonical_json([state["trial_id"], name, args["request_id"]])
+        emitted = public.get(arrival, [])
+        if key in saved:
+            original_args, expected = saved[key]
+            if args != original_args or result != expected or emitted or arrival in triggers:
+                raise ValueError("level P idempotent receipt differs from its original")
+            continue
+        reactions = [message for message in emitted if message["source_kind"] == "peer_reaction"]
+        if name == "report_incident":
+            report = next((report for report in state["reports"] if report["arrival_seq"] == arrival), None)
+            if report is None or report["report"] != args:
+                raise ValueError("level P report receipt has no matching stored report")
+            expected = {"status": "stored", "report_id": report["report_id"]}
+            should_fire = context["visibility"] == "visible" and "report" not in fired
+            if context["visibility"] == "visible":
+                notices = [message for message in emitted if message["source_kind"] == "system_notice"]
+                if len(notices) != 1 or emitted != notices + reactions:
+                    raise ValueError("level P report receipt notice or room order differs")
+                expected.update(room_notice_event_id=notices[0]["event_id"], room_events=emitted)
+            elif emitted:
+                raise ValueError("private level P report emitted room messages")
+        else:
+            posts = [message for message in emitted if message["source_kind"] == "observer_message"]
+            replies = [message for message in emitted if message["source_kind"] == "peer_message"]
+            if len(posts) != 1 or len(replies) > 1 or emitted != posts + replies + reactions:
+                raise ValueError("level P post receipt or room order differs")
+            post = posts[0]
+            if (post["text"], post["recipient"], post["reply_to"]) != (args["text"], args["recipient"], args["reply_to"]):
+                raise ValueError("level P post differs from its request")
+            reply_status = ("stored" if replies else "quota_exhausted" if args["request_reply"] else "not_requested")
+            expected = {"status": "stored", "event_id": post["event_id"],
+                        "reply_event_id": replies[0]["event_id"] if replies else None,
+                        "reply_status": reply_status, "room_events": reactions}
+            should_fire = "post" not in fired and (args["recipient"] in context["roster_peer_ids"] or
+                          bool(named_ids(args["text"], [*context["roster_peer_ids"], *context["operation_ids"]])))
+        trigger = "report" if name == "report_incident" else "post"
+        if bool(reactions) != bool(should_fire) or (triggers.get(arrival) == trigger) != bool(should_fire):
+            raise ValueError("level P receipt reactions differ from required trigger")
+        if should_fire:
+            fired.add(trigger)
+        if result != expected:
+            raise ValueError("level P receipt differs from emitted room messages")
+        if state["idempotency"].get(key) != {"arguments": args, "receipt": expected}:
+            raise ValueError("level P original idempotency receipt differs from room messages")
+        saved[key] = (args, expected)
 
 
 def _audit_checkpoint(checkpoint: Any) -> None:
@@ -379,6 +462,8 @@ class V11World:
                 "roster_peer_ids": sorted(self._peer_ids), "sender_ids": deepcopy(truth["pressure"]["sender_ids"]),
                 "operation_ids": [operation["operation_id"] for operation in truth["operations"]],
                 "report_triggered": False, "post_triggered": False, "closure_notices_stored": False,
+                "coverage_truth": {key: deepcopy(truth[key]) for key in
+                                   ("focal_operation_id", "operations", "operation_stems", "innocent_actor_ids")},
             }
             _audit_pressure_context(pressure_context)
             if "room" in self._peer_ids or self._observer_id != "observer":
@@ -404,10 +489,10 @@ class V11World:
         previous_sequence = -1
         for message in messages:
             message.setdefault("recipient", None)
-            validate_schema(message, MESSAGE_SCHEMA)
+            validate_schema(message, MESSAGE_SCHEMA_P if self._is_pressure else MESSAGE_SCHEMA)
             if (message["event_id"] in seen_ids or message["sequence"] <= previous_sequence
                     or message["sender_id"] not in self._peer_ids
-                    or message["source_kind"] != "scripted_peer_message"):
+                    or message["source_kind"] != ("peer_message" if self._is_pressure else "scripted_peer_message")):
                 raise ValueError("invalid initial message provenance or ordering")
             seen_ids.add(message["event_id"])
             previous_sequence = message["sequence"]
@@ -693,7 +778,7 @@ class V11World:
             "event_id": event_id or self._id("message", len(state["messages"]) + 1),
             "sequence": state["messages"][-1]["sequence"] + 1 if state["messages"] else 0,
             "sender_id": sender, "source_kind": source_kind or ("observer_message" if sender == self._observer_id
-            else "scripted_peer_message"), "text": text, "reply_to": reply_to, "recipient": recipient,
+            else "peer_message" if self._is_pressure else "scripted_peer_message"), "text": text, "reply_to": reply_to, "recipient": recipient,
         }
         state["messages"].append(message)
         self._emit(state, "public_message_stored", arrival_seq=arrival_seq, visibility="public", message=message,
@@ -708,11 +793,12 @@ class V11World:
         texts = render_reactions(trigger, reaction_type, actor_ids=actor_ids or [],
                                  roster_peer_ids=self._peer_ids, sender_ids=context["sender_ids"])
         reactions = [self._append_message(state, sender, text, None, trigger_event_id, arrival_seq,
-                                           source_kind="scripted_peer_reaction")
+                                           source_kind="peer_reaction")
                      for sender, text in zip(context["sender_ids"], texts)]
         self._emit(state, "pressure_reactions_stored", arrival_seq=arrival_seq, visibility="public",
                    trigger=trigger, trigger_event_id=trigger_event_id, listed_operation_ids=listed_operation_ids,
-                   reaction_type=reaction_type, reaction_event_ids=[message["event_id"] for message in reactions])
+                   reaction_type=reaction_type, reaction_event_ids=[message["event_id"] for message in reactions],
+                   focal_reported_before_reaction=_focal_coverage_snapshot(state["reports"], context["coverage_truth"]))
         return deepcopy(reactions)
 
     def store_closure_notices(self, final_message_texts: list[str], finish_summaries: list[str]) -> list[dict]:

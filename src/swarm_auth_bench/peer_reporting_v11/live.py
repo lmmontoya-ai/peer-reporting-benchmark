@@ -117,7 +117,6 @@ from ..peer_reporting.storage import atomic_json, check_seal, read_sealed, safe_
 from ..runtime import SUPPORTED_CODEX_VERSION
 from . import PROTOCOL_ID, SPECIFICATION_REVISION, live_runtime
 from .bundle import ProtocolBundle, load_bundle, require_v11_tools, tools_for_levels
-from .schemas import TOOL_SCHEMA_VERSION_P
 from .lanes import (
     BOUNDED_USAGE,
     PROMPT_CONDITIONS,
@@ -158,6 +157,7 @@ from .phase import (
     run_lanes,
     verify_lane_phase,
 )
+from .schemas import TOOL_SCHEMA_VERSION_P
 
 TOP_PLAN_KIND = "peer_reporting_v11_live_plan"
 LIVE_PLAN_FILE = "live-plan.json"
@@ -754,17 +754,31 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
 def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict], caps_record: dict, *,
                           revision: str, source: dict, gate_evidence: dict, bundle: ProtocolBundle | None = None,
                           consumed_attempts: dict | None = None, smoke_assignment_ids: list[str] | None = None,
-                          review_plan_hash: str | None = None, selected_arms: list[str] | None = None
+                          review_plan_hash: str | None = None, selected_arms: list[str] | None = None,
+                          pilot_decision: dict | None = None
                           ) -> tuple[dict, dict, dict]:
     """Seal calibration, smoke, or collection rows into lanes. Nothing is written or called."""
     bundle = tools_for_levels(require_v11_tools(bundle or load_bundle()), [row.get("level") for row in rows])
     caps_record = validate_caps_record(caps_record, require_frozen=False)
+    from .pilot import CORE_ARMS, validate_core_decision
+
+    core = any(row["arm"] in CORE_ARMS for row in rows)
+    if core:
+        pilot_decision = validate_core_decision(pilot_decision, study_manifest_hash=source["study_manifest_hash"])
+        rows = [row for row in rows if row["arm"] not in CORE_ARMS
+                or lane_id(row["model"], row["effort"]) in pilot_decision["eligible_lanes"]]
+    elif pilot_decision is not None:
+        raise ValueError("only a core plan binds a pilot decision")
     entries = validate_assignment_rows(phase, rows, fixtures, caps_record, bundle)
     used = {entry["fixture_id"]: fixtures[entry["fixture_id"]] for entry in entries}
-    return _assemble(phase, revision, caps_record, bundle, entries, used, source=source,
+    result = _assemble(phase, revision, caps_record, bundle, entries, used, source=source,
                      gate_evidence=gate_evidence, consumed_attempts=consumed_attempts or _empty_ledger(),
                      smoke_assignment_ids=smoke_assignment_ids, review_plan_hash=review_plan_hash,
                      selected_arms=selected_arms)
+    if core:
+        result[0]["pilot_decision"] = deepcopy(pilot_decision)
+        result[0]["pilot_decision_hash"] = pilot_decision["seal_hash"]
+    return result
 
 
 def validate_arm_selection(phase: str, arms: Any) -> list[str]:
@@ -1676,6 +1690,10 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
     a pending root, which blocks later builds of the phase until it is abandoned.
     """
     top, lane_plans, fixtures = plan
+    from .pilot import verify_core_binding
+
+    verify_core_binding(top, entry_arms={entry["arm"] for lane in lane_plans.values() for entry in lane["planned_order"]},
+                        entry_lanes=set(lane_plans))
     directory = Path(directory)
     ledger = top.get("consumed_attempts")
     if top["phase"] == "collection":
@@ -1899,6 +1917,9 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
     directory = Path(directory)
     plan = read_live_plan(directory)
     bundle = _tool_set_for_plan(plan, bundle)
+    from .pilot import verify_core_binding
+
+    verify_core_binding(plan, entry_arms=planned_arms(directory, plan))
     if plan.get("consumed_attempts") is None:
         if study_directory is not None:
             raise ValueError("compatibility roots have no study registration")
@@ -2129,7 +2150,8 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
                      prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None,
                      study_verifier: Callable[[Path, dict], Any] | None = None,
                      review_plan: dict | None = None, arms: list[str] | tuple | None = None,
-                     tool_schema_version: str | None = None) -> tuple[dict, dict, dict]:
+                     tool_schema_version: str | None = None,
+                     pilot_decision: dict | None = None) -> tuple[dict, dict, dict]:
     """Build a phase plan; behavioral phases bind their study, its consumed-attempt ledger, and their gates.
 
     A behavioral plan requires the study manifest's caps hash, tool manifest hash,
@@ -2168,6 +2190,10 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
         review_plan_hash = check_review_plan(review_plan, study_manifest_hash=manifest["seal_hash"])
     elif review_plan is not None:
         raise ValueError("only a collection plan binds a review plan")
+    from .pilot import CORE_ARMS, validate_core_decision
+
+    if selected_arms and set(selected_arms) & CORE_ARMS:
+        validate_core_decision(pilot_decision, study_manifest_hash=manifest["seal_hash"])
     report = (study_verifier or verify_sealed_study)(Path(study_directory), caps_record)
     if type(report) is not dict or report.get("valid") is not True:
         raise EvidenceError(f"study verification failed: {(report or {}).get('errors')}")
@@ -2210,7 +2236,7 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
     return build_assignment_plan(phase, rows, fixtures, caps_record, revision=revision, source=source,
                                  gate_evidence=gates["evidence"], bundle=bundle, consumed_attempts=ledger,
                                  smoke_assignment_ids=smoke_ids, review_plan_hash=review_plan_hash,
-                                 selected_arms=selected_arms)
+                                 selected_arms=selected_arms, pilot_decision=pilot_decision)
 
 
 # Coordinator

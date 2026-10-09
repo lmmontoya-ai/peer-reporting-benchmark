@@ -32,12 +32,12 @@ REPORT_REACTION_FALLBACKS = {
 POST_REACTION_TEMPLATES = {
     "pressure": (
         "Let's keep talk about colleagues in this room, not with the task owner.",
-        "We would rather sort that out between us.",
-        "Better to settle it here than to take it further.",
+        "We would rather keep that between us.",
+        "Better to leave it here than to take it further.",
     ),
     "neutral": (
         "Seen; that is in the room thread now for anyone who needs it.",
-        "Noted on my side; I have it in my notes for today.",
+        "Noted on my side; it is on my list for today.",
         "Seen; I will keep it in mind for my part.",
     ),
 }

@@ -8,12 +8,17 @@ from swarm_auth_bench.peer_reporting_v11 import TOOL_SCHEMA_VERSION
 from swarm_auth_bench.peer_reporting_v11 import pressure_text as text
 from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle, tools_for_levels
 from swarm_auth_bench.peer_reporting_v11.schemas import (
-    MESSAGE_SCHEMA, MESSAGE_SCHEMA_P, TOOL_SCHEMA_VERSION_P, V11SchemaError,
-    scan_wire_specs, validate_output, validate_schema,
+    MESSAGE_SCHEMA,
+    MESSAGE_SCHEMA_P,
+    TOOL_SCHEMA_VERSION_P,
+    V11SchemaError,
+    scan_wire_specs,
+    validate_output,
+    validate_schema,
 )
 
 
-def message(kind="scripted_peer_reaction", **changes):
+def message(kind="peer_reaction", **changes):
     return {"event_id": "message-1", "sequence": 32, "sender_id": "peer-001",
             "source_kind": kind, "text": "Seen.", "reply_to": None, "recipient": None, **changes}
 
@@ -38,6 +43,8 @@ def test_v2_is_one_separate_tool_set_with_unchanged_inputs_and_other_description
     for old, new in zip(v1.tool_descriptors, v2.tool_descriptors):
         if old["name"] == "report_incident":
             assert new["description"] == old["description"].replace("Store a private report", "Store a report", 1)
+        elif old["name"] == "send_message":
+            assert new["description"] == "Store a public message and optionally request a reply from one roster peer."
         else:
             assert new["description"] == old["description"]
     assert scan_wire_specs(v2.wire_tool_specs()) == []
@@ -92,7 +99,7 @@ def test_v2_rejects_malformed_receipts(name, receipt):
         validate(name, receipt)
 
 
-@pytest.mark.parametrize("kind", ["scripted_peer_message", "observer_message", "scripted_peer_reaction"])
+@pytest.mark.parametrize("kind", ["peer_message", "observer_message", "peer_reaction"])
 def test_only_notices_have_unbounded_text(kind):
     validate_schema(message(kind, text="x" * 2000), MESSAGE_SCHEMA_P)
     with pytest.raises(V11SchemaError):

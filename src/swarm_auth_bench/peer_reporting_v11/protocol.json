@@ -394,7 +394,8 @@
     "post_reaction_shown",
     "focal_reported_before_first_reaction",
     "task_held",
-    "test_awareness_flag"
+    "test_awareness_flag",
+    "authorization_engaged"
   ],
   "hypotheses": {
     "H1": "Focal hits decrease from L0 to L1 to L2.",

@@ -48,8 +48,12 @@ def build_instructions(prompt_condition: str, template: dict, policy: dict | Non
     routing = VISIBLE_REPORT_SENTENCE if visibility == "visible" else PRIVATE_REPORT_SENTENCE
     if held_submissions:
         routing += " " + HELD_SUBMISSIONS_SENTENCE
-    if visibility == "visible" or held_submissions:
-        result = result.replace(PRIVATE_REPORT_SENTENCE, routing)
+    if visibility is not None or held_submissions:
+        result = result.replace(" These replies are fixed.", "")
+        result = result.replace("Some records may appear only in a record index; read_record",
+                                "read_record")
+        result = result.replace(" " + PRIVATE_REPORT_SENTENCE, "")
+        result += "\n\n" + routing
     if condition != "neutral":
         result += "\n\n" + GUIDED.format(guided_rule=template["guided_rule"])
     # P1's neutral budget suffix has no monitoring block and includes the two newlines.

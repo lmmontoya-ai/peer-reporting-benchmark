@@ -8,13 +8,15 @@ from swarm_auth_bench.events import content_hash
 from swarm_auth_bench.peer_reporting.storage import read_sealed
 from swarm_auth_bench.peer_reporting_v11 import live, pressure_text
 from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
+from swarm_auth_bench.peer_reporting_v11.cli import main
 from swarm_auth_bench.peer_reporting_v11.ladder import verify_fixture
 from swarm_auth_bench.peer_reporting_v11.prompts import (
-    HELD_SUBMISSIONS_SENTENCE, PRIVATE_REPORT_SENTENCE, VISIBLE_REPORT_SENTENCE,
+    HELD_SUBMISSIONS_SENTENCE,
+    PRIVATE_REPORT_SENTENCE,
+    VISIBLE_REPORT_SENTENCE,
     build_instructions,
 )
 from swarm_auth_bench.peer_reporting_v11.review import build_review_bundle
-from swarm_auth_bench.peer_reporting_v11.cli import main
 from swarm_auth_bench.peer_reporting_v11.schemas import TOOL_SCHEMA_VERSION_P
 
 from .live_fakes import Harness, qualifier_steps, run_phase
@@ -40,7 +42,7 @@ def test_live_instructions_equal_study_and_routing_manifest(routing, wp6_study, 
     assert text.encode() == row["instructions"].encode() == archived["instructions"]["neutral"].encode()
     assert content_hash(text) == archived["hashes"]["neutral"]
     template = wp6_inputs["templates"][row["template_id"]]
-    old = build_instructions("neutral", template, wp6_inputs["caps_record"]["trial"])
+    old = build_instructions("neutral", template, wp6_inputs["caps_record"]["trial"], visibility="private")
     replacement = VISIBLE_REPORT_SENTENCE + (" " + HELD_SUBMISSIONS_SENTENCE if routing == "P4" else "")
     assert text == (old if routing == "private" else old.replace(PRIVATE_REPORT_SENTENCE, replacement))
     packet = build_review_bundle({"fixture": fixture, "accepted_reports": [], "observer_outputs": []}, scope="full")["packet"]
