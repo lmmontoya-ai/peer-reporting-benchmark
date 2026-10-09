@@ -335,12 +335,31 @@ def test_combined_export_counts_only_sampled_or_flagged_scripting_remarks(decisi
         build_pilot_decision(**inputs, confirmed_scripting_remarks=[unsampled])
 
 
-def test_decision_accepts_different_arms_in_separate_exports(tmp_path, decision_inputs):
+def test_decision_accepts_different_arms_in_separate_exports(tmp_path, decision_inputs, monkeypatch):
     inputs = decision_inputs[-1]()
     index = read_sealed(inputs["gate_exports"][0]["path"])
     groups = [{row["assignment_id"] for row in index["rows"] if row["score"]["arm"] == arm}
               for arm in sorted(GATE_ARMS | PILOT_ARMS)]
-    references = partition_export(inputs["gate_exports"][0], groups, tmp_path)
+    from .test_review_population import write_local_export
+
+    manifest = index["study_manifest"]
+    study = tmp_path / "separate-arms-study"
+    study.mkdir()
+    atomic_json(study / live.STUDY_MANIFEST, manifest)
+    references = []
+    for number, identifiers in enumerate(groups):
+        assignments = [row for row in manifest["assignments"] if row["assignment_id"] in identifiers]
+        root, plan, registration = register_review_root(study, manifest, assignments, f"arm-{number}")
+        rows = []
+        for entry in index["rows"]:
+            if entry["assignment_id"] in identifiers:
+                stored = read_sealed(Path(inputs["gate_exports"][0]["path"]).parent / entry["attempt_path"])
+                rows.append({**{key: value for key, value in entry.items() if key not in ("attempt_path", "attempt_hash")},
+                             "attempt": {key: value for key, value in stored.items() if key != "seal_hash"}})
+        bind_review_root_observations(monkeypatch, root, plan, lambda rows=rows: rows)
+        output = tmp_path / f"complete-arm-export-{number}"
+        write_local_export(output, study, manifest, plan, registration, rows)
+        references.append(export_reference(output))
     split = build_pilot_decision(gate_exports=references[:2], pilot_exports=references[2:])
     combined = build_pilot_decision(**inputs)
     assert split["rungs"] == combined["rungs"] and split["pooled_gate"] == combined["pooled_gate"]

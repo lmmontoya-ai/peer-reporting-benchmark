@@ -238,3 +238,29 @@ def test_pilot_builder_refuses_same_root_partitioned_exports(decision_inputs):
     reference = export_reference(path)
     with pytest.raises(ValueError, match="pressure_pilot_xhigh.*omits planned assignments"):
         build_pilot_decision(gate_exports=[reference], pilot_exports=[reference])
+
+
+@pytest.mark.parametrize("field", ["model", "effort", "instructions", "fixture_id", "variant"])
+def test_registered_population_binds_all_primary_assignment_labels(core_review_inputs, field):
+    study, manifest, assignments, _ = core_review_inputs
+    root, top, _ = register_review_root(study, manifest, assignments, "combined")
+    lane = top["lanes"][0]
+    path = root / lane["path"] / "phase-plan.json"
+    plan = read_sealed(path)
+    entry = plan["planned_order"][0]
+    entry["reasoning_effort" if field == "effort" else field] = "changed"
+    plan = seal({key: value for key, value in plan.items() if key != "seal_hash"})
+    atomic_json(path, plan)
+    lane["plan_hash"] = plan["seal_hash"]
+    top = seal({key: value for key, value in top.items() if key != "seal_hash"})
+    atomic_json(root / live.LIVE_PLAN_FILE, top)
+    atomic_json(study / live.STUDY_REGISTRY / f"{top['seal_hash']}.json", seal({"kind": live.REGISTRY_KIND,
+        "plan_hash": top["seal_hash"], "phase": "calibration", "study_manifest_hash": manifest["seal_hash"],
+        "root_path": "roots/combined"}))
+    # Remove the stale registration so both plans and registry agree with the tampered identity.
+    for previous in (study / live.STUDY_REGISTRY).glob("*.json"):
+        if previous.stem != top["seal_hash"]:
+            previous.unlink()
+    with pytest.raises(ValueError, match="assignment .* differs from sealed study"):
+        registered_pressure_partitions(study, phase="calibration", study_manifest_hash=manifest["seal_hash"],
+                                       source_plan_hash=top["seal_hash"])

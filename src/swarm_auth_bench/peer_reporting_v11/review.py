@@ -29,7 +29,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from ..events import content_hash
+from ..events import canonical_json, content_hash
 from ..peer_reporting.score import _GENERATED_HEX, _attempt_hash, _fresh_id, _normalized, _strings
 from ..peer_reporting.storage import atomic_json, check_seal, read_sealed, safe_child, seal
 from . import PROTOCOL_ID
@@ -584,7 +584,14 @@ def human_endpoints(attempt: dict, bindings: dict, resolved: Mapping[str, dict],
     """
     bound = check_bindings(bindings, attempt)
     _require(set(resolved) <= set(bound), "resolved labels name outputs that are not bound for review")
-    structured = structured if structured is not None else score_trial(attempt, allow_replay=allow_replay)
+    expected_score = score_trial(attempt, allow_replay=allow_replay)
+    if structured is not None:
+        # A supplied replay score historically opts into the counterfactual view.
+        # Verify that view too; live attempts have the same score in either mode.
+        _require(canonical_json(structured) == canonical_json(expected_score)
+                 or canonical_json(structured) == canonical_json(score_trial(attempt, allow_replay=True)),
+                 "structured score differs from the primary attempt")
+    structured = structured if structured is not None else expected_score
     truth = attempt["fixture"]["truth"]
     focal = truth.get("focal_operation_id")
     focal_targets = {focal} | {operation["actor_id"] for operation in truth["operations"]
@@ -772,9 +779,8 @@ def render_packet_html(packet: Mapping[str, Any]) -> str:
 def verify_pressure_export_evidence(export_directory: Path, index: dict) -> list[dict]:
     """Re-derive every exported row from the registered live root before filtering.
 
-    Whole arms can be exported separately. Every represented arm must retain its
-    full planned population, and every retained row, including unscored and
-    excluded rows, must equal the live archive's current evidence.
+    An export retains the root's entire planned population. Every row, including
+    unscored and excluded rows, must equal the live archive's current evidence.
     """
     from . import live_review
     from .live import read_study_manifest, registered_root_path, registered_roots
@@ -804,6 +810,8 @@ def verify_pressure_export_evidence(export_directory: Path, index: dict) -> list
     _require(data["plan_hash"] == index["source_plan_hash"] and data["phase"] == index["phase"],
              "P export inspection differs from its live root")
     expected = {row["assignment_id"]: row for row in data["rows"]}
+    _require({row["assignment_id"] for row in index["rows"]} == set(expected),
+             "P export omits planned assignments from its registered live root")
     assignments = {row["assignment_id"]: row for row in manifest["assignments"]}
     verified = []
     for row in index["rows"]:
@@ -823,8 +831,8 @@ def verify_pressure_export_evidence(export_directory: Path, index: dict) -> list
             visible.update(attempt_path=f"attempts/{identifier}.json", attempt_hash=content_hash(attempt))
             stored = read_sealed(safe_child(export_directory, visible["attempt_path"]))
             archived = {key: value for key, value in stored.items() if key != "seal_hash"}
-            _require(archived == attempt, f"{identifier}: P exported attempt differs from registered live root")
-        _require(row == visible, f"{identifier}: P exported row differs from registered live root")
+            _require(content_hash(archived) == content_hash(attempt), f"{identifier}: P exported attempt differs from registered live root")
+        _require(canonical_json(row) == canonical_json(visible), f"{identifier}: P exported row differs from registered live root")
         verified.append(primary)
     exclusions = sorted(row["assignment_id"] for row in verified if row["excluded_from_analysis"])
     for key, expected_value in (("analysis_exclusions", exclusions), ("analysis_exclusion_count", len(exclusions))):
@@ -869,6 +877,11 @@ def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
     index = read_sealed(export_directory / "index.json")
     _require(index.get("kind") == EXPORT_KIND, "not a v1.1 live review export")
     pressure = plan.get("kind") == "peer_reporting_v11_pressure_review_selection"
+    manifest = index.get("study_manifest") or {}
+    identifiers = {row["assignment_id"] for row in index["rows"]}
+    contains_pressure = any(row["level"] == "P" and row["assignment_id"] in identifiers
+                            for row in manifest.get("assignments", []))
+    _require(not contains_pressure or pressure, "level P export requires its pressure review selection")
     if pressure:
         rows = verify_pressure_packet_selection(export_directory, index, plan)
     else:

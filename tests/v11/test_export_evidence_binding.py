@@ -85,7 +85,7 @@ def test_pilot_cannot_suppress_two_unchanged_flagged_attempts(tmp_path, decision
     assert {name: (path.parent / name).read_bytes() for name in before} == before
 
 
-@pytest.mark.parametrize("mutation", ["score", "eligibility", "attempt_hash", "attempt", "status", "selection"])
+@pytest.mark.parametrize("mutation", ["score", "eligibility", "attempt_hash", "attempt", "status", "selection", "json_type"])
 @pytest.mark.parametrize("consumer", ["packets", "pilot"])
 def test_consumers_refuse_resealed_derived_evidence(tmp_path, monkeypatch, core_review_inputs, mutation, consumer):
     study, manifest, assignments, attempts = core_review_inputs
@@ -108,6 +108,8 @@ def test_consumers_refuse_resealed_derived_evidence(tmp_path, monkeypatch, core_
         atomic_json(target, seal({key: value for key, value in raw.items() if key != "seal_hash"}))
     elif mutation == "status":
         row["status"] = "unrun"
+    elif mutation == "json_type":
+        row["excluded_from_analysis"] = 0
     selection = reseal_index(path, index)
     if mutation == "selection":
         selection["rows"][0]["reasons"] = ["invented"]

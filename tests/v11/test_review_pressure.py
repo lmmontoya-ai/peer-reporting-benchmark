@@ -247,7 +247,7 @@ def test_live_export_serializes_pressure_events_scores_summary_and_selection(tmp
             "tool_schema_version": bundle.schema_version, "tool_manifest_hash": bundle.tool_manifest_hash,
             "tool_descriptors_hash": bundle.tool_descriptors_hash, "wire_tool_specs_hash": bundle.wire_tool_specs_hash}
     for name, result in {
-        "read_live_plan": plan, "root_registration": {"study_manifest_hash": "study"}, "check_abandoned_root": None,
+        "read_live_plan": plan, "root_registration": {"study_manifest_hash": "study"}, "check_abandoned_root": None, "check_root_assignment_binding": None,
         "lane_journals": {}, "check_start_claims": [], "verify_consumed_ledger": [],
         "planned_arms": ["pressure_core_xhigh"], "check_arm_selection": ["pressure_core_xhigh"],
         "journaled_authorizations": [], "study_registry_listing": [],

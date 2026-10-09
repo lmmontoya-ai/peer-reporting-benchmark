@@ -19,7 +19,9 @@ def register_review_root(study, manifest, assignments, name):
     for identifier, rows in sorted(groups.items()):
         relative = f"lanes/{identifier}"
         entries = [{**{key: value for key, value in row.items() if key not in ("assignment_id", "effort")},
-                    "entry_id": row["assignment_id"], "reasoning_effort": row["effort"]} for row in rows]
+                    "entry_id": row["assignment_id"], "reasoning_effort": row["effort"],
+                    "attempt_id": row["assignment_id"] + live.ATTEMPT_SUFFIX,
+                    "fixture_hash": manifest["fixtures"][row["fixture_id"]]["content_hash"]} for row in rows]
         plan = seal({"phase": "calibration", "planned_order": entries})
         (root / relative).mkdir(parents=True)
         atomic_json(root / relative / "phase-plan.json", plan)
@@ -53,6 +55,7 @@ def bind_review_root_observations(monkeypatch, root, plan, rows):
             return original(*args, **kwargs)
         monkeypatch.setattr(live_review, name, call)
 
+    patch("check_root_assignment_binding", lambda *a, **k: None)
     patch("check_abandoned_root", lambda *a, **k: None)
     patch("lane_journals", lambda *a, **k: {lane["lane_id"]: [] for lane in plan["lanes"]})
     patch("check_start_claims", lambda *a, **k: [], position=2)

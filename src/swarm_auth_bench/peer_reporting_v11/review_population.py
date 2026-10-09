@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..peer_reporting.storage import read_sealed, safe_child
-from .live import read_live_plan, read_study_manifest, registered_root_path, registered_roots
+from .live import check_assignment_binding, read_live_plan, read_study_manifest, registered_root_path, registered_roots
 
 
 def _require(condition: bool, message: str) -> None:
@@ -45,7 +45,7 @@ def registered_pressure_partitions(study_directory: Path, *, phase: str, study_m
                  and plan["source"]["study_manifest_hash"] == study_manifest_hash
                  and registration["study_manifest_hash"] == study_manifest_hash,
                  "P review root plan differs from its study registration")
-        assignments, seen = [], set()
+        entries, seen = [], set()
         for lane in plan["lanes"]:
             lane_plan = read_sealed(safe_child(root, lane["path"]) / "phase-plan.json")
             _require(lane_plan["seal_hash"] == lane["plan_hash"] and lane_plan["phase"] == phase,
@@ -55,10 +55,8 @@ def registered_pressure_partitions(study_directory: Path, *, phase: str, study_m
                 _require(identifier not in seen and identifier in study_assignments,
                          "P review root assignment missing or duplicated")
                 seen.add(identifier)
-                assignment = study_assignments[identifier]
-                _require(entry["arm"] == assignment["arm"] and entry["level"] == assignment["level"],
-                         "P review root assignment differs from its study")
-                assignments.append(assignment)
+                entries.append(entry)
+        assignments = check_assignment_binding(entries, manifest=manifest, source=plan["source"], phase=phase)
         partitions.append((plan["seal_hash"], assignments))
     _require(source_plan_hash in {identity for identity, _ in partitions},
              "P review source root is not registered in the study phase")

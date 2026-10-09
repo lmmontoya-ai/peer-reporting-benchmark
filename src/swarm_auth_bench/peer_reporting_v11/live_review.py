@@ -63,6 +63,7 @@ from .live import (
     check_abandoned_root,
     check_arm_selection,
     check_retained_review_plan,
+    check_root_assignment_binding,
     check_start_claims,
     evaluate_transport,
     journaled_authorizations,
@@ -431,6 +432,7 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     bundle = _tool_set_for_plan(plan, bundle)
     _require(plan["phase"] != "compatibility",
              "compatibility attempts are engineering checks, not behavioral observations")
+    check_root_assignment_binding(directory, plan, study_directory)
     registration = root_registration(study_directory, plan, directory=directory, require_finalized=False)
     check_abandoned_root(directory, registration)
     journals = lane_journals(directory, plan)

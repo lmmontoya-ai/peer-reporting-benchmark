@@ -782,7 +782,7 @@ def check_assignment_binding(rows: list[dict], *, manifest: dict, source: dict, 
             actual = row.get(label)
             if entry and label not in row and fixture is not None:
                 actual = fixture.get("parameters", {}).get(key)
-            if actual != expected:
+            if canonical_json(actual) != canonical_json(expected):
                 raise EvidenceError(f"{identifier}: assignment {key} differs from sealed study")
         reference = manifest["fixtures"][assignment["fixture_id"]]
         if fixture is not None and content_hash(fixture) != reference["content_hash"]:
@@ -801,15 +801,35 @@ def check_assignment_binding(rows: list[dict], *, manifest: dict, source: dict, 
 def check_plan_assignment_binding(plan: dict, lane_plans: dict[str, dict], manifest: dict,
                                   fixtures: dict[str, dict]) -> list[dict]:
     """Check study entries and their execution lanes before a root is used."""
-    rows = []
+    if plan["caps_hash"] != manifest["caps_hash"] or content_hash(plan["caps"]) != manifest["caps_hash"]:
+        raise EvidenceError("plan caps differ from its sealed study")
+    rows, seen_lanes = [], set()
     for lane in plan["lanes"]:
-        lane_plan = lane_plans[lane["lane_id"]]
-        for entry in lane_plan["planned_order"]:
+        identifier = lane["lane_id"]
+        lane_plan = lane_plans[identifier]
+        if (identifier in seen_lanes or seal(_plain(lane_plan))["seal_hash"] != lane["plan_hash"]
+                or lane_plan["phase"] != plan["phase"] or lane_plan["lane_id"] != identifier
+                or lane_plan["model"] != lane["model"]
+                or lane_plan["reasoning_effort"] != lane["reasoning_effort"]
+                or type(lane["planned_calls"]) is not int
+                or type(lane_plan["maximum_live_calls"]) is not int
+                or len(lane_plan["planned_order"]) != lane["planned_calls"]
+                or lane_plan["maximum_live_calls"] != lane["planned_calls"]
+                or canonical_json(lane_plan["caps"]) != canonical_json(lane_caps(plan["caps"], plan["phase"], lane["planned_calls"]))):
+            raise EvidenceError(f"lane {identifier} differs from its sealed execution lane")
+        seen_lanes.add(identifier)
+        for position, entry in enumerate(lane_plan["planned_order"]):
+            if type(entry.get("planned_index")) is not int or entry["planned_index"] != position:
+                raise EvidenceError(f"{entry['entry_id']}: assignment index differs from its execution lane")
             if (lane_id(entry["model"], entry["reasoning_effort"]) != lane["lane_id"]
                     or entry["model"] != lane_plan["model"]
                     or entry["reasoning_effort"] != lane_plan["reasoning_effort"]):
                 raise EvidenceError(f"{entry['entry_id']}: assignment differs from its execution lane")
             rows.append(entry)
+    if (not rows or type(plan["maximum_live_calls"]) is not int or len(rows) != plan["maximum_live_calls"]
+            or canonical_json(plan["calls_by_lane"]) != canonical_json({lane["lane_id"]: lane["planned_calls"] for lane in plan["lanes"]})
+            or canonical_json(plan["global_max_concurrency"]) != canonical_json(plan["caps"]["global_max_concurrency"])):
+        raise EvidenceError("assignment count differs from the sealed execution lanes")
     canonical = check_assignment_binding(rows, manifest=manifest, source=plan["source"], phase=plan["phase"],
                                          fixtures=fixtures)
     from .pilot import verify_core_binding
@@ -820,7 +840,11 @@ def check_plan_assignment_binding(plan: dict, lane_plans: dict[str, dict], manif
 
 
 def check_root_assignment_binding(directory: Path, plan: dict, study_directory: Path | None) -> None:
+    if (plan["phase"] == "compatibility") != (plan.get("consumed_attempts") is None):
+        raise EvidenceError("behavioral plans require their study consumed-attempt ledger")
     if "study_manifest_hash" not in plan["source"]:
+        if plan["phase"] != "compatibility":
+            raise EvidenceError("behavioral plans require their sealed study binding")
         return
     if study_directory is None:
         raise EvidenceError("assignment binding requires the registered study directory")
@@ -853,6 +877,8 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
     if "study_manifest_hash" in source:
         if study_manifest is None:
             raise EvidenceError("study-bound build requires its sealed study manifest")
+        if content_hash(caps_record) != study_manifest["caps_hash"]:
+            raise EvidenceError("plan caps differ from its sealed study")
         canonical = check_assignment_binding(rows, manifest=study_manifest, source=source, phase=phase,
                                              fixtures=fixtures)
     core = any(row["arm"] in CORE_ARMS for row in canonical)
@@ -1502,7 +1528,7 @@ def abandon_root(study_directory: Path, plan_hash: str, *, reason: str, root: Pa
                     stack.enter_context(_exclusive(lane_dir / LOCK_FILE))
             started = set(_journal_starts(root))
             if plan is not None:
-                _, consumed = consumed_attempts_in_root(root, bundle=bundle)
+                _, consumed = consumed_attempts_in_root(root, bundle=bundle, study_directory=study_directory)
                 started |= consumed
             if superseded_by(root, {"seal_hash": plan_hash}):
                 raise ValueError("this root is already superseded by a later root")
@@ -1654,7 +1680,8 @@ def superseded_by(directory: Path, plan: dict) -> list[str]:
     return hashes
 
 
-def consumed_attempts_in_root(directory: Path, *, bundle: ProtocolBundle | None = None) -> tuple[dict, set[str]]:
+def consumed_attempts_in_root(directory: Path, *, bundle: ProtocolBundle | None = None,
+                              study_directory: Path | None = None) -> tuple[dict, set[str]]:
     """A root's plan and every attempt with a journaled ``attempt_started`` in any of its lanes.
 
     Each lane's journal hash chain, index checkpoint, budget history and repairs are
@@ -1664,6 +1691,9 @@ def consumed_attempts_in_root(directory: Path, *, bundle: ProtocolBundle | None 
     plan = read_live_plan(directory)
     if bundle is not None:
         bundle = _tool_set_for_plan(plan, bundle)
+    check_root_assignment_binding(directory, plan, study_directory)
+    if plan["phase"] != "compatibility":
+        root_registration(study_directory, plan, directory=directory, require_finalized=False)
     consumed: set[str] = set()
     journals = {}
     for lane in plan["lanes"]:
@@ -1688,7 +1718,7 @@ def prior_root_ledger(prior_roots: list[Path] | tuple, *, phase: str, source: di
     records, consumed_all, seen = [], set(), set()
     registrations = {entry["plan_hash"]: entry for entry in registered_roots(study_directory)}
     for root in prior_roots:
-        plan, consumed = consumed_attempts_in_root(root, bundle=bundle)
+        plan, consumed = consumed_attempts_in_root(root, bundle=bundle, study_directory=study_directory)
         if plan["seal_hash"] in seen:
             raise ValueError(f"prior root {root} is listed twice")
         if plan["phase"] != phase or plan.get("source") != source:
@@ -1731,6 +1761,9 @@ def verify_consumed_ledger(directory: Path, plan: dict, prior_roots: list[Path] 
     With ``study_directory``, each must also sit at its registered path and agree
     with the study's start ledger. No planned attempt may appear among the consumed attempts.
     """
+    check_root_assignment_binding(directory, plan, study_directory)
+    if plan["phase"] != "compatibility":
+        root_registration(study_directory, plan, directory=directory, require_finalized=False)
     ledger = plan.get("consumed_attempts")
     if ledger is None:
         if prior_roots:
@@ -1740,7 +1773,7 @@ def verify_consumed_ledger(directory: Path, plan: dict, prior_roots: list[Path] 
     supplied: set[str] = set()
     consumed_all: set[str] = set()
     for root in prior_roots:
-        prior_plan, consumed = consumed_attempts_in_root(root, bundle=bundle)
+        prior_plan, consumed = consumed_attempts_in_root(root, bundle=bundle, study_directory=study_directory)
         identity = prior_plan["seal_hash"]
         if identity not in sealed or identity in supplied:
             raise EvidenceError(f"{root} is not a prior root sealed in this plan, or it is listed twice")
@@ -1789,6 +1822,9 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
     a pending root, which blocks later builds of the phase until it is abandoned.
     """
     top, lane_plans, fixtures = plan
+    if top["phase"] != "compatibility" and ("study_manifest_hash" not in top["source"]
+                                              or top.get("consumed_attempts") is None):
+        raise EvidenceError("behavioral plans require their sealed study binding and consumed-attempt ledger")
     if "study_manifest_hash" in top["source"]:
         if study_directory is None:
             raise EvidenceError("assignment binding requires the registered study directory")
@@ -1839,7 +1875,7 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
                 stack.enter_context(_exclusive(root / COORDINATOR_LOCK))  # a running prior root refuses
                 for lane in prior_plan["lanes"]:
                     stack.enter_context(_exclusive(safe_child(root, lane["path"]) / LOCK_FILE))
-                prior_plan, consumed = consumed_attempts_in_root(root, bundle=bundle)
+                prior_plan, consumed = consumed_attempts_in_root(root, bundle=bundle, study_directory=study_directory)
                 identity = prior_plan["seal_hash"]
                 if identity not in sealed or identity in supplied:
                     raise ValueError(f"{root} is not a prior root sealed in this plan, or it is listed twice")
