@@ -1,6 +1,8 @@
 """Core build regressions through python -m, using sealed offline gate evidence."""
 
+import asyncio
 import json
+from collections import deque
 import shutil
 import subprocess
 import sys
@@ -15,8 +17,56 @@ from swarm_auth_bench.peer_reporting_v11.pilot_decision import build_pilot_decis
 from swarm_auth_bench.peer_reporting_v11.schemas import TOOL_SCHEMA_VERSION_P
 
 from .live_fakes import Harness, qualifier_steps, run_phase
-from .test_pilot_decision import decision_inputs as decision_inputs
-from .test_pilot_decision import misses
+from .r6_observers import observer
+
+
+
+@pytest.fixture(scope="session")
+def real_pilot_decision(tmp_path_factory, wp6_study, wp6_inputs):
+    """Real registered archives from fake transport, readable by an unmodified CLI subprocess."""
+    from swarm_auth_bench.peer_reporting_v11.live_review import export_live_review
+    from swarm_auth_bench.peer_reporting_v11.review_plan import pressure_review_selection
+    from swarm_auth_bench.peer_reporting_v11.score import score_trial
+
+    base = tmp_path_factory.mktemp("cli-pilot-evidence")
+    study = base / "study"
+    shutil.copytree(wp6_study[0], study)
+    caps, bundle = wp6_inputs["caps_record"], load_bundle()
+    compatibility = base / "compatibility"
+    built = live.build_compatibility_plan(caps, revision="cli-pilot-compat", bundle=bundle,
+                                          tool_schema_version=TOOL_SCHEMA_VERSION_P)
+    live.prepare_live_root(compatibility, built, bundle=bundle)
+    top = live.read_live_plan(compatibility)
+    harness = Harness(base / "compat-homes", lambda *args: qualifier_steps(next(iter(built[2].values()))))
+    assert asyncio.run(run_phase(compatibility, top, harness, bundle=bundle))["status"] == "complete"
+    arms = ["pressure_gate_xhigh", "pressure_gate_low", "pressure_pilot_xhigh", "pressure_pilot_low"]
+    built = live.build_phase_plan("calibration", caps, revision="cli-pilot", study_directory=study,
+                                  compatibility_directories=[compatibility], arms=arms, bundle=bundle)
+    root = study / "roots" / "pilot"
+    live.prepare_live_root(root, built, study_directory=study, bundle=bundle)
+    top = live.read_live_plan(root)
+    queues = {(lane["model"], lane["reasoning_effort"]): deque(
+        read_sealed(root / lane["path"] / "phase-plan.json")["planned_order"]) for lane in top["lanes"]}
+    silent = next(entry["entry_id"] for entries in queues.values() for entry in entries
+                  if entry["pressure"] == "P3" and entry["visibility"] == "visible"
+                  and entry["prevalence_k"] == 1 and entry["variant"] == "violation")
+    def script(model, effort):
+        entry = queues[model, effort].popleft()
+        raw = observer(built[2][entry["fixture_id"]], "silent" if entry["entry_id"] == silent else "hit")
+        actions = [("tool", action["tool"], action["arguments"]) for action in raw["actions"]]
+        actions.insert(-1, ("usage", 2000))
+        return actions + [("message", raw["final_response"])]
+    harness = Harness(base / "pilot-homes", script)
+    assert asyncio.run(run_phase(root, top, harness, bundle=bundle, study_directory=study,
+                                 compatibility_directories=[compatibility]))["status"] == "complete"
+    output = base / "export"
+    export_live_review(root, output, study_directory=study, scorer=score_trial,
+                       pressure_review_selector=pressure_review_selection)
+    index = read_sealed(output / "index.json")
+    reference = {"path": str((output / "index.json").resolve()), "seal_hash": index["seal_hash"]}
+    record = build_pilot_decision(gate_exports=[reference], pilot_exports=[reference])
+    assert record["decision"] == "proceed" and record["Psel"] == "P3" and not record["ceiling"]
+    return record
 
 
 def build_cli(root, study, caps, *, decision=None, compatibility=None):
@@ -32,8 +82,8 @@ def build_cli(root, study, caps, *, decision=None, compatibility=None):
     return result.returncode, json.loads(result.stdout)
 
 
-async def test_core_build_cli_prepares_valid_sealed_decision(tmp_path, decision_inputs, wp6_inputs, wp6_study):
-    record = build_pilot_decision(**decision_inputs[-1]())
+async def test_core_build_cli_prepares_valid_sealed_decision(tmp_path, real_pilot_decision, wp6_inputs, wp6_study):
+    record = real_pilot_decision
     decision = tmp_path / "decision.json"
     atomic_json(decision, record)
     caps = tmp_path / "caps.json"
@@ -64,15 +114,15 @@ async def test_core_build_cli_prepares_valid_sealed_decision(tmp_path, decision_
 @pytest.mark.parametrize("case,message", [("missing", "requires a pilot decision"),
                                          ("stop", "stop pilot decision"),
                                          ("tampered", "differs from recomputed")])
-def test_core_build_cli_controls_decision_refusals(tmp_path, decision_inputs, wp6_inputs, wp6_study, case, message):
+def test_core_build_cli_controls_decision_refusals(tmp_path, real_pilot_decision, wp6_inputs, wp6_study, case, message):
     caps = tmp_path / "caps.json"
     atomic_json(caps, wp6_inputs["caps_record"])
     decision = None
     if case != "missing":
-        def failed_gate(data, rows):
-            for row in rows:
-                misses(data[row["assignment_id"]])
-        record = build_pilot_decision(**decision_inputs[-1](failed_gate if case == "stop" else None))
+        record = deepcopy(real_pilot_decision)
+        if case == "stop":
+            record["decision"] = "stop"
+            record = seal({key: value for key, value in record.items() if key != "seal_hash"})
         if case == "tampered":
             record = deepcopy(record)
             record["pooled_gate"]["hits"] -= 1

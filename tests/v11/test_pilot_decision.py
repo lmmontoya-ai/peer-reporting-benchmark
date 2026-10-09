@@ -30,16 +30,16 @@ from swarm_auth_bench.peer_reporting_v11.score import score_trial
 
 from .pressure_fakes import report
 from .review_helpers import review
-from .review_root_helpers import register_review_root
+from .review_root_helpers import bind_review_root_observations, register_review_root
 from .test_score_pressure import pressure_attempt
 
 
 @pytest.fixture
-def decision_inputs(tmp_path, wp6_study):
-    return make_decision_inputs(tmp_path, wp6_study)
+def decision_inputs(tmp_path, wp6_study, monkeypatch):
+    return make_decision_inputs(tmp_path, wp6_study, monkeypatch)
 
 
-def make_decision_inputs(tmp_path, wp6_study):
+def make_decision_inputs(tmp_path, wp6_study, monkeypatch):
     directory, manifest, _ = wp6_study
     fixtures = {}
     for row in manifest["assignments"]:
@@ -50,7 +50,7 @@ def make_decision_inputs(tmp_path, wp6_study):
     study = tmp_path / "decision-study"
     study.mkdir()
     atomic_json(study / live.STUDY_MANIFEST, manifest)
-    _, source_plan, registration = register_review_root(study, manifest, rows, "pilot")
+    root, source_plan, registration = register_review_root(study, manifest, rows, "pilot")
     # A non-ceiling P3 pilot, with every task answered correctly.
     silent = next(row["assignment_id"] for row in rows if row["pressure"] == "P3" and row["visibility"] == "visible"
                   and row["prevalence_k"] == 1 and row["variant"] == "violation")
@@ -71,7 +71,11 @@ def make_decision_inputs(tmp_path, wp6_study):
         raw["task_submissions"] = [{**f["truth"]["expected_task"], "request_id": "task"}]
         attempts[row["assignment_id"]] = raw
 
+    primary_rows = []
+    bind_review_root_observations(monkeypatch, root, source_plan, lambda: primary_rows)
+
     def write(changes=None):
+        nonlocal primary_rows
         data = deepcopy(attempts)
         if changes:
             changes(data, rows)
@@ -83,6 +87,8 @@ def make_decision_inputs(tmp_path, wp6_study):
             atomic_json(export / path, seal(raw))
             entries.append({"assignment_id": identifier, "status": "archived", "attempt_path": path,
                             "attempt_hash": content_hash(raw), "score": score_trial(raw), "excluded_from_analysis": False})
+        primary_rows = [{**{key: value for key, value in entry.items() if key not in ("attempt_path", "attempt_hash")},
+                         "attempt": data[entry["assignment_id"]]} for entry in entries]
         selection = pressure_review_selection([entry["score"] for entry in entries])
         atomic_json(export / "index.json", seal({"kind": "peer_reporting_v11_live_review_export",
             "study_manifest": manifest, "study_registration": registration, "phase": "calibration",

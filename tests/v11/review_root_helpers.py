@@ -37,3 +37,33 @@ def register_review_root(study, manifest, assignments, name):
         "study_manifest_hash": manifest["seal_hash"], "root_path": f"roots/{name}"}))
     return root, plan, {"plan_hash": plan["seal_hash"], "phase": "calibration",
                        "study_manifest_hash": manifest["seal_hash"], "root_path": f"roots/{name}"}
+
+
+def bind_review_root_observations(monkeypatch, root, plan, rows):
+    """Inject primary archive observations for plan-only unit doubles, never export rows."""
+    from copy import deepcopy
+    from pathlib import Path
+    from swarm_auth_bench.peer_reporting_v11 import live_review
+
+    def patch(name, primary, position=0):
+        original = getattr(live_review, name)
+        def call(*args, **kwargs):
+            if Path(args[position]).resolve() == root.resolve():
+                return primary(*args, **kwargs)
+            return original(*args, **kwargs)
+        monkeypatch.setattr(live_review, name, call)
+
+    patch("check_abandoned_root", lambda *a, **k: None)
+    patch("lane_journals", lambda *a, **k: {lane["lane_id"]: [] for lane in plan["lanes"]})
+    patch("check_start_claims", lambda *a, **k: [], position=2)
+    patch("verify_consumed_ledger", lambda *a, **k: [])
+    def inspect(*args, scorer=None, **kwargs):
+        observations = deepcopy(rows())
+        if scorer is not None:
+            for row in observations:
+                if row["attempt"] is not None and row["score"] is not None:
+                    row["score"] = scorer(row["attempt"])
+        return {"phase": "calibration", "plan_hash": plan["seal_hash"], "amendment_errors": [], "lane_errors": [],
+                "authorization_evidence": {}, "status_counts": {"archived": len(observations)},
+                "verified_model_observations": 0, "planned_count": len(observations), "rows": observations}
+    patch("inspect_live_root", inspect)

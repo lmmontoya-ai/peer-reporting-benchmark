@@ -16,7 +16,7 @@ from swarm_auth_bench.peer_reporting_v11.review_population import (
 from swarm_auth_bench.peer_reporting_v11.schemas import TOOL_SCHEMA_VERSION_P
 from swarm_auth_bench.peer_reporting_v11.score import score_trial
 
-from .review_root_helpers import register_review_root
+from .review_root_helpers import bind_review_root_observations, register_review_root
 from .test_pilot_decision import decision_inputs as decision_inputs
 from .test_score_pressure import pressure_attempt
 
@@ -86,11 +86,7 @@ def export_root(monkeypatch, root, plan, study, output, rows):
         "check_arm_selection": sorted(live.planned_arms(root, plan)),
     }.items():
         monkeypatch.setattr(live_review, name, lambda *args, _result=result, **kwargs: _result)
-    def inspect(directory, **kwargs):
-        return {"phase": "calibration", "plan_hash": plan["seal_hash"], "amendment_errors": [], "lane_errors": [],
-                "authorization_evidence": {}, "status_counts": {"archived": len(rows)},
-                "verified_model_observations": 0, "planned_count": len(rows), "rows": rows}
-    monkeypatch.setattr(live_review, "inspect_live_root", inspect)
+    bind_review_root_observations(monkeypatch, root, plan, lambda: rows)
     return live_review.export_live_review(root, output, study_directory=study,
         bundle=load_bundle().tool_set(TOOL_SCHEMA_VERSION_P), scorer=score_trial,
         pressure_review_selector=pressure_review_selection)

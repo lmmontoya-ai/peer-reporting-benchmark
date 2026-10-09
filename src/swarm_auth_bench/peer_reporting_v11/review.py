@@ -768,43 +768,83 @@ def render_packet_html(packet: Mapping[str, Any]) -> str:
             "vertical-align:top}</style></head><body>" + body + "</body></html>")
 
 
-def verify_pressure_packet_selection(export_directory: Path, index: dict, selection: dict) -> dict:
-    """Bind outcome-selected P packets to the sealed export, study, attempts and scores."""
-    check_seal(selection)
-    manifest = index.get("study_manifest")
-    _require(type(manifest) is dict, "P review export requires a sealed study manifest")
-    check_seal(manifest)
-    _require(manifest["seal_hash"] == index["study_registration"]["study_manifest_hash"],
-             "P export study binding differs")
+
+def verify_pressure_export_evidence(export_directory: Path, index: dict) -> list[dict]:
+    """Re-derive every exported row from the registered live root before filtering.
+
+    Whole arms can be exported separately. Every represented arm must retain its
+    full planned population, and every retained row, including unscored and
+    excluded rows, must equal the live archive's current evidence.
+    """
+    from . import live_review
+    from .live import read_study_manifest, registered_root_path, registered_roots
+
     check_pressure_arm_roots(pressure_export_partitions(index))
+    study = Path(index["pressure_review_study_directory"])
+    manifest = read_study_manifest(study)
+    _require(index.get("study_manifest") == manifest, "P export study manifest differs from its live study")
+    registration = next(record for record in registered_roots(study)
+                        if record["plan_hash"] == index["source_plan_hash"])
+    root = registered_root_path(study, registration)
+    plan = live_review.read_live_plan(root)
+    checked = live_review.root_registration(study, plan, directory=root, require_finalized=False)
+    _require(all(index["study_registration"].get(key) == checked[key]
+                 for key in ("plan_hash", "phase", "study_manifest_hash", "root_path")),
+             "P export registration differs from its live root")
+    live_review.check_abandoned_root(root, checked)
+    journals = live_review.lane_journals(root, plan)
+    live_review.check_start_claims(study, plan, root, journals)
+    prior = [registered_root_path(study, record) for record in registered_roots(study)
+             if record["plan_hash"] in {item["plan_hash"]
+                 for item in (plan.get("consumed_attempts") or {}).get("prior_roots", [])}]
+    live_review.verify_consumed_ledger(root, plan, prior, study_directory=study)
+    amendments = live_review.study_amendments(study) if plan["phase"] == "smoke" else []
+    data = live_review.inspect_live_root(root, scorer=score_trial, amendments=amendments)
+    _require(not data["amendment_errors"], "; ".join(data["amendment_errors"]))
+    _require(data["plan_hash"] == index["source_plan_hash"] and data["phase"] == index["phase"],
+             "P export inspection differs from its live root")
+    expected = {row["assignment_id"]: row for row in data["rows"]}
     assignments = {row["assignment_id"]: row for row in manifest["assignments"]}
-    scores = []
-    seen = set()
+    verified = []
     for row in index["rows"]:
         identifier = row["assignment_id"]
-        _require(identifier not in seen and identifier in assignments, "P export assignment missing or duplicated")
-        seen.add(identifier)
-    for row in analysis_score_rows(index["rows"]):
-        identifier = row["assignment_id"]
-        _require("attempt_path" in row, "P score has no sealed attempt")
-        stored = read_sealed(safe_child(export_directory, row["attempt_path"]))
-        attempt = {key: value for key, value in stored.items() if key != "seal_hash"}
-        _require(content_hash(attempt) == row["attempt_hash"], "P attempt hash differs")
-        assignment = assignments[identifier]
-        fixture = attempt["fixture"]
-        _require("instructions" not in attempt or attempt["instructions"] == assignment["instructions"],
-                 "P attempt instructions differ from its frozen assignment")
-        _require(attempt["assignment_id"] == identifier and fixture["fixture_id"] == assignment["fixture_id"]
-                 and content_hash(fixture) == manifest["fixtures"][assignment["fixture_id"]]["content_hash"],
-                 "P attempt fixture differs from study")
-        score = score_trial(attempt)
-        for key in ("arm", "model", "effort", "variant", "level", "block", "prevalence_k", "visibility", "pressure"):
-            _require(score.get(key) == assignment.get(key), f"P score {key} differs from study")
-        _require(score == row["score"], "P exported score differs from sealed attempt")
-        scores.append(score)
+        _require(identifier in expected, "P export row is absent from its live root")
+        primary = expected[identifier]
+        visible = {key: value for key, value in primary.items() if key != "attempt"}
+        attempt = primary["attempt"]
+        if attempt is not None:
+            assignment = assignments[identifier]
+            _require("instructions" not in attempt or attempt["instructions"] == assignment["instructions"],
+                     "P attempt instructions differ from its frozen assignment")
+            _require(attempt["assignment_id"] == identifier
+                     and attempt["fixture"]["fixture_id"] == assignment["fixture_id"]
+                     and content_hash(attempt["fixture"]) == manifest["fixtures"][assignment["fixture_id"]]["content_hash"],
+                     "P attempt fixture differs from study")
+            visible.update(attempt_path=f"attempts/{identifier}.json", attempt_hash=content_hash(attempt))
+            stored = read_sealed(safe_child(export_directory, visible["attempt_path"]))
+            archived = {key: value for key, value in stored.items() if key != "seal_hash"}
+            _require(archived == attempt, f"{identifier}: P exported attempt differs from registered live root")
+        _require(row == visible, f"{identifier}: P exported row differs from registered live root")
+        verified.append(primary)
+    exclusions = sorted(row["assignment_id"] for row in verified if row["excluded_from_analysis"])
+    for key, expected_value in (("analysis_exclusions", exclusions), ("analysis_exclusion_count", len(exclusions))):
+        if key in index:
+            _require(index[key] == expected_value, f"P export {key} differs from registered live root")
+    # Filtering is safe only after every row above has been checked.
+    scores = [row["score"] for row in analysis_score_rows(verified)]
+    selection = pressure_review_selection(scores)
+    _require(index.get("pressure_review_selection") == selection
+             or not scores and index.get("pressure_review_selection") is None,
+             "P pressure_review_selection differs from sealed export scores re-derived from live root")
+    return scores
+
+
+def verify_pressure_packet_selection(export_directory: Path, index: dict, selection: dict) -> dict:
+    """Bind outcome-selected P packets to primary live-root evidence."""
+    check_seal(selection)
+    scores = verify_pressure_export_evidence(export_directory, index)
     expected = pressure_review_selection(scores)
-    _require(selection == expected == index.get("pressure_review_selection"),
-             "P selection differs from sealed export scores")
+    _require(selection == expected, "P selection differs from sealed export scores")
     return {row["assignment_id"]: row for row in selection["rows"]}
 
 

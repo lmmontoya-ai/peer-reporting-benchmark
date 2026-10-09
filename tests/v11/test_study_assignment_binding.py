@@ -17,8 +17,10 @@ from .test_pilot_decision import core_build, make_decision_inputs, misses
 
 
 @pytest.fixture(scope="session")
-def core_template(tmp_path_factory, wp6_study, wp6_inputs):
-    inputs = make_decision_inputs(tmp_path_factory.mktemp("binding-evidence"), wp6_study)
+def core_template(tmp_path_factory, wp6_study, wp6_inputs, request):
+    patch = pytest.MonkeyPatch()
+    request.addfinalizer(patch.undo)
+    inputs = make_decision_inputs(tmp_path_factory.mktemp("binding-evidence"), wp6_study, patch)
     manifest, fixtures, _, _, write = inputs
     excluded = lane_id(manifest["protocol"]["models"][0], "xhigh")
     def changes(data, rows):
