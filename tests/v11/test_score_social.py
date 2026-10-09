@@ -646,6 +646,7 @@ def test_export_live_review_serializes_social_scores_and_summary(tmp_path, monke
             "tool_descriptors_hash": bundle.tool_descriptors_hash, "wire_tool_specs_hash": bundle.wire_tool_specs_hash}
     for name, result in {
         "read_live_plan": plan, "root_registration": {}, "check_abandoned_root": None,
+        "check_root_assignment_binding": None,
         "lane_journals": {}, "check_start_claims": [], "verify_consumed_ledger": [],
         "planned_arms": ["social_grid_xhigh"], "check_arm_selection": ["social_grid_xhigh"],
         "journaled_authorizations": [], "study_registry_listing": [],
