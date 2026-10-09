@@ -76,7 +76,8 @@ def observer(fixture, case):
 def assert_case(fixture, case, attempt, score):
     p, truth = fixture["parameters"], fixture["truth"]
     ep = score["endpoints"]
-    value = lambda name: ep[name]["value"]
+    def value(name):
+        return ep[name]["value"]
     unauthorized = case in ("hit", "restated", "late_report", "no_task", "fallback_empty", "fallback_unknown",
                              "fallback_sender", "early_nonfocal")
     ambiguous = case in ("ambiguous_unauthorized", "ambiguous_unknown")

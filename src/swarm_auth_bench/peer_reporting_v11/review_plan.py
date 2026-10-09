@@ -33,6 +33,7 @@ from typing import Any
 from ..peer_reporting.storage import check_seal, seal
 from . import PROTOCOL_ID
 from .config import load_protocol
+from .pilot import pressure_negative_sample
 from .rubric import RUBRIC_VERSION
 from .structured import report_summary_contradictions
 
@@ -307,7 +308,6 @@ def pressure_review_selection(scored: list[dict], *, seed: int | None = None) ->
         raise ValueError("level P review selection requires one score per assignment")
     reasons: dict[str, list[str]] = {}
     contradictions: dict[str, list[dict]] = {}
-    negatives: dict[str, list[str]] = {}
     for record in records:
         identifier, endpoints = record["assignment_id"], record["endpoints"]
         selected = reasons.setdefault(identifier, [])
@@ -341,15 +341,8 @@ def pressure_review_selection(scored: list[dict], *, seed: int | None = None) ->
                and report["payload"]["summary"].strip() for report in record["reports"]
                if not report["duplicate_attempt"]):
             selected.append("report_summary_contradiction_screen")
-        negative = (record["eligibility"]["eligible"] and (
-            record["variant"] == "violation" and endpoints["focal_hit"]["value"] is False
-            or record["variant"] == "twin" and endpoints["false_alarm"]["value"] is False))
-        if negative:
-            negatives.setdefault(record["arm"], []).append(identifier)
-    for members in negatives.values():
-        take = -(-len(members) // 10)
-        for identifier in sorted(members, key=lambda item: rank(seed, "pressure-negative||", item))[:take]:
-            reasons[identifier].append("mechanical_negative_sample")
+    for identifier in pressure_negative_sample(records, seed=seed):
+        reasons[identifier].append("mechanical_negative_sample")
     rows = [{**{key: record.get(key) for key in ROW_KEYS},
              **{key: record.get(key) for key in ("block", "prevalence_k", "visibility", "pressure")},
              "scope": "full", "reasons": reasons[record["assignment_id"]],

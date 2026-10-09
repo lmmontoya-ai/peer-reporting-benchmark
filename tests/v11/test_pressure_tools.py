@@ -8,8 +8,13 @@ from swarm_auth_bench.peer_reporting_v11 import TOOL_SCHEMA_VERSION
 from swarm_auth_bench.peer_reporting_v11 import pressure_text as text
 from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle, tools_for_levels
 from swarm_auth_bench.peer_reporting_v11.schemas import (
-    MESSAGE_SCHEMA, MESSAGE_SCHEMA_P, TOOL_SCHEMA_VERSION_P, V11SchemaError,
-    scan_wire_specs, validate_output, validate_schema,
+    MESSAGE_SCHEMA,
+    MESSAGE_SCHEMA_P,
+    TOOL_SCHEMA_VERSION_P,
+    V11SchemaError,
+    scan_wire_specs,
+    validate_output,
+    validate_schema,
 )
 
 

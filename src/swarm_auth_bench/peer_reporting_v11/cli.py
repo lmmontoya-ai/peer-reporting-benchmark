@@ -89,7 +89,7 @@ def _review_commands(commands) -> None:
     plan.add_argument("--output", type=Path, help="new plan file (default: STUDY/review-plan.json)")
     packets = commands.add_parser("review-packets", help="write masked reviewer packets and private bindings")
     packets.add_argument("export", type=Path, help="directory written by export-review")
-    packets.add_argument("--plan", type=Path, required=True, help="sealed review plan")
+    packets.add_argument("--plan", type=Path, help="sealed review plan (P defaults to export selection)")
     packets.add_argument("--output", type=Path, required=True, help="fresh output directory")
     upload = commands.add_parser("validate-review-upload", help="validate returned review labels")
     upload.add_argument("upload", type=Path)
@@ -115,7 +115,10 @@ def _review(args: argparse.Namespace) -> dict:
         return {"output": str(output), "seal_hash": plan["seal_hash"], "seed": plan["seed"],
                 "study_manifest_hash": plan["study_manifest_hash"], "counts": plan["counts"], "live_model_calls": 0}
     if args.command == "review-packets":
-        return write_review_packets(args.export, read_sealed(args.plan), args.output)
+        plan = read_sealed(args.plan) if args.plan else read_sealed(args.export / "index.json").get("pressure_review_selection")
+        if plan is None:
+            raise ValueError("review-packets requires --plan for earlier levels")
+        return write_review_packets(args.export, plan, args.output)
     from .review import validate_review_upload
 
     return validate_review_upload(read_json(args.upload), read_json(args.packet),
@@ -156,8 +159,16 @@ def _parser() -> argparse.ArgumentParser:
                        help="the frozen review plan (collection only); verified against the study, then retained")
     build.add_argument("--arm", dest="arms", action="append",
                        help="calibration only: plan only this arm's rows (repeatable); sealed as selected_arms")
+    build.add_argument("--pilot-decision", type=Path, help="sealed pilot decision required for P core arms")
     _prior_roots(build)
     _amendments(build)
+    decision = commands.add_parser("pilot-decision", help="compute and seal the P pilot decision offline")
+    decision.add_argument("--gate-export", type=Path, action="append", required=True)
+    decision.add_argument("--pilot-export", type=Path, action="append", required=True)
+    decision.add_argument("--flag-resolutions", type=Path, help="JSON mapping of flagged trial IDs to resolutions")
+    decision.add_argument("--scripting-remarks", type=Path, help="JSON list of confirmed scripting trial IDs")
+    decision.add_argument("--ceiling-choice", choices=("a", "b", "c"))
+    decision.add_argument("--output", type=Path, required=True)
     verify = commands.add_parser("verify", help="verify a sealed live root and its retained lane evidence")
     verify.add_argument("root", type=Path)
     _study(verify, "study directory in which a behavioral root is registered")
@@ -238,6 +249,17 @@ def _parser() -> argparse.ArgumentParser:
 def _run(args: argparse.Namespace) -> dict:
     from .bundle import load_bundle
 
+    if args.command == "pilot-decision":
+        from .pilot import build_pilot_decision, export_reference
+
+        record = build_pilot_decision(gate_exports=[export_reference(path) for path in args.gate_export],
+            pilot_exports=[export_reference(path) for path in args.pilot_export],
+            flag_resolutions=read_json(args.flag_resolutions) if args.flag_resolutions else None,
+            confirmed_scripting_remarks=read_json(args.scripting_remarks) if args.scripting_remarks else None,
+            ceiling_choice=args.ceiling_choice)
+        _write_new_json_files({args.output: record})
+        return {"output": str(args.output), "seal_hash": record["seal_hash"], "decision": record["decision"],
+                "Psel": record["Psel"], "eligible_lanes": record["eligible_lanes"], "live_model_calls": 0}
     if args.command == "propose-caps":
         from .config import load_protocol
         from .resources import propose_caps
@@ -335,7 +357,8 @@ def _run(args: argparse.Namespace) -> dict:
         plan = build_phase_plan(args.phase, read_json(args.caps), revision=args.revision, study_directory=args.study,
                                 compatibility_directories=args.compatibility, smoke_directory=args.smoke,
                                 prior_roots=args.prior_roots, bundle=bundle, review_plan=review, arms=args.arms,
-                                tool_schema_version=args.tool_schema_version)
+                                tool_schema_version=args.tool_schema_version,
+                                pilot_decision=read_sealed(args.pilot_decision) if args.pilot_decision else None)
         study = args.study if args.phase != "compatibility" else None
         return {**prepare_live_root(args.root, plan, study_directory=study, prior_roots=args.prior_roots,
                                     bundle=bundle, review_plan=review), "selected_arms": plan[0]["selected_arms"]}

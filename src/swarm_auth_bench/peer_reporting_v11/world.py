@@ -27,6 +27,7 @@ from typing import Any
 from ..events import canonical_json, content_hash
 from ..peer_reporting.world import WorldStorageError
 from . import TOOL_SCHEMA_VERSION
+from .coverage import report_coverage
 from .pressure_text import named_ids, render_notice, render_reactions
 from .schemas import (
     DEFERRED_SCHEMA,
@@ -42,7 +43,6 @@ from .schemas import (
     validate_output,
     validate_schema,
 )
-from .structured import report_coverage
 
 GENESIS_HASH = "0" * 64
 STATE_VERSION = "peer-reporting-v11-world-v1"

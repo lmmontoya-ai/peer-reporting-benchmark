@@ -31,7 +31,8 @@ def record(f, kind):
 
 def matching_grants(op, registry):
     """Independently enumerate every dimension of the inherited authorization rule."""
-    instant = lambda text: datetime.fromisoformat(text.replace("Z", "+00:00"))
+    def instant(text):
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
     return sorted(g["grant_id"] for g in registry["grants"]
                   if op["actor_id"] in g["actor_ids"] and op["operation"] in g["allowed_operations"]
                   and all(g["artifact"][key] == op["artifact"][key] for key in ("artifact_id", "version", "digest"))

@@ -3,19 +3,19 @@
 import json
 import shutil
 from collections import Counter, deque
-from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
 from scripts.audit_peer_pressure import generate_audit
-from swarm_auth_bench.peer_reporting.storage import read_sealed
+from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed
 from swarm_auth_bench.peer_reporting_v11 import live, runner
 from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
 from swarm_auth_bench.peer_reporting_v11.collection import STUDY_MANIFEST, verify_study
 from swarm_auth_bench.peer_reporting_v11.config import PRESSURE_ARMS
 from swarm_auth_bench.peer_reporting_v11.live_review import export_live_review
-from swarm_auth_bench.peer_reporting_v11.review import build_review_bundle
+from swarm_auth_bench.peer_reporting_v11.pilot import build_pilot_decision, export_reference
+from swarm_auth_bench.peer_reporting_v11.review import write_review_packets
 from swarm_auth_bench.peer_reporting_v11.review_plan import pressure_review_selection
 from swarm_auth_bench.peer_reporting_v11.schemas import TOOL_SCHEMA_VERSION_P
 from swarm_auth_bench.peer_reporting_v11.score import score_trial, summarize
@@ -31,6 +31,7 @@ def test_committed_pressure_fixture_audit_is_reproducible():
     assert (root / "docs/v13/fixture-audit.json").read_bytes() == data
     assert (root / "docs/v13/fixture-audit.md").read_bytes() == report
     audit = json.loads(data)
+    assert len(data) < 500_000
     assert audit["fixture_count"] == 126 and audit["anomalies"] == []
     assert Counter(row["parameters"]["template_id"] for row in audit["fixtures"]) == {
         "firewall-change": 63, "budget-transfer": 63}
@@ -90,12 +91,23 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
     assert status["status"] == "complete" and len(harness.created) == 6
     assert all(lane["qualified"] for lane in live.verify_live_root(compatibility, bundle=bundle)["lanes"].values())
     roots, seen, all_scores = [], set(), []
+    decision = None
+    def selected_case(entry):
+        if entry["arm"] in PRESSURE_ARMS[:2]:
+            return "hit"
+        if entry["arm"] in PRESSURE_ARMS[2:4] and entry["variant"] == "violation" and entry["prevalence_k"] == 1:
+            if entry["visibility"] == "private" and entry["pressure"] == "neutral":
+                return "hit"
+            if entry["visibility"] == "visible" and entry["pressure"] in ("P1", "P2", "P3"):
+                return "silent" if (entry["model"] == manifest["protocol"]["models"][0]
+                    and entry["template_id"] == "firewall-change" and entry["reasoning_effort"] == "low") else "hit"
+        return case_for(entry)
     by_id = {row["assignment_id"]: row for row in manifest["assignments"]}
     for name, arms, expected in (("gate-pilot", PRESSURE_ARMS[:4], 156), ("core", PRESSURE_ARMS[4:], 600)):
         root = study / "roots" / name
         built = live.build_phase_plan("calibration", caps, revision="r6-offline-" + name, study_directory=study,
                                       compatibility_directories=[compatibility], prior_roots=roots,
-                                      bundle=bundle, arms=list(arms))
+                                      bundle=bundle, arms=list(arms), pilot_decision=decision)
         live.prepare_live_root(root, built, study_directory=study, prior_roots=roots, bundle=bundle)
         top = live.read_live_plan(root)
         assert top["maximum_live_calls"] == expected and top["tool_schema_version"] == TOOL_SCHEMA_VERSION_P
@@ -110,7 +122,7 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
         def script_for(model, effort):
             entry = queues[model, effort].popleft()
             f = built[2][entry["fixture_id"]]
-            script = observer(f, case_for(entry))
+            script = observer(f, selected_case(entry))
             steps = [("tool", a["tool"], a["arguments"]) for a in script["actions"]]
             steps.insert(-1, ("usage", 2000))
             return steps + [("message", script["final_response"])]
@@ -134,13 +146,13 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
         assert index["summary"] == summarize(scores)
         authored = runner.replay_live_root(root, tmp_path / (name + "-replay"), bundle=bundle,
                                             scorer=lambda raw: score_trial(raw, allow_replay=True),
-                                            script_factory=lambda f, e: observer(f, case_for(e)))
+                                            script_factory=lambda f, e: observer(f, selected_case(e)))
         assert authored["replays"] == expected and authored["live_model_calls"] == authored["incomplete"] == 0
         replay_scores = {row["assignment_id"]: row["score"] for row in authored["rows"]}
         for row in index["rows"]:
             entry = next(e for e in entries if e["entry_id"] == row["assignment_id"])
             f = built[2][entry["fixture_id"]]
-            case = case_for(entry)
+            case = selected_case(entry)
             seen.add(case)
             assert entry["instructions"].encode() == by_id[entry["entry_id"]]["instructions"].encode()
             attempt = read_sealed(export / row["attempt_path"])
@@ -149,10 +161,25 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
             assert replay_scores[row["assignment_id"]]["eligibility"]["resolves_assignment"] is False
         selected = index["pressure_review_selection"]["rows"]
         assert selected and all(row["scope"] == "full" for row in selected)
-        attempts = {row["assignment_id"]: read_sealed(export / row["attempt_path"]) for row in index["rows"]}
-        for row in selected[:3]:
-            packet = build_review_bundle(attempts[row["assignment_id"]], scope="full")["packet"]
-            assert "visibility" not in packet and "pressure" not in packet
+        packet_output = tmp_path / (name + "-packets")
+        finished = write_review_packets(export, index["pressure_review_selection"], packet_output)
+        assert finished["packets"] == len(selected)
+        packets = [read_sealed(path) for path in (packet_output / "reviewer").glob("*.json")]
+        assert all("visibility" not in packet and "pressure" not in packet for packet in packets)
+        assert any(message["source_kind"] == "peer_reaction" for packet in packets
+                   for message in packet["observed_peer_messages"])
+        assert all([message["room_sequence"] for message in packet["observed_peer_messages"]] ==
+                   sorted(message["room_sequence"] for message in packet["observed_peer_messages"]) for packet in packets)
+        assert not any("observer's final message" in message["text"] for packet in packets
+                       for message in packet["observed_peer_messages"])
+        if name == "gate-pilot":
+            reference = export_reference(export)
+            decision = build_pilot_decision(gate_exports=[reference], pilot_exports=[reference])
+            assert decision["decision"] == "proceed" and decision["Psel"] == "P3"
+            assert decision["pooled_gate"]["hits"] == 36
+            atomic_json(tmp_path / "pilot-decision.json", decision)
+        else:
+            assert top["pilot_decision_hash"] == decision["seal_hash"]
         all_scores.extend(scores)
         roots.append(root)
     assert seen == {*CASES, "early_nonfocal"}
