@@ -205,7 +205,7 @@ def test_second_proposal_sizes_smoke_and_collection_together(calibration, phase)
 
 def test_calibration_requires_registered_study(calibration, wp6_study):
     root, _ = calibration
-    with pytest.raises(ValueError, match="another study instance"):
+    with pytest.raises(ValueError, match="assignment binding names another sealed study"):
         proposal(root, wp6_study[0], phase="collection")
 
 
