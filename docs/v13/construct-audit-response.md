@@ -150,7 +150,14 @@ finding: the review sample and the pilot decision could sample different populat
 an arm is split across exports. Section 7.4 now draws the sample per arm over the whole
 phase, and section 5.5 defines the coverage snapshot of an ambiguous report.
 
+R6-fix2 fixed the three minor findings and the pilot side of the major one. Astra's
+second confirmation review ([review-astra-r6-confirm2.md](review-astra-r6-confirm2.md))
+returned NO-GO because core review packets still sample within one export. The
+coordinator's full suite also found that R6-fix2 made the pilot module import a post-hoc
+review module, which the execution boundary test forbids.
+
 ## Next
 
-R6-fix2 fixes the major finding and the three minor ones, then Astra confirms. No model
-call runs before the user authorizes the v2 compatibility plan and the gate and pilot plan.
+R6-fix3 enforces the one-root-per-arm rule on the core review path and restores the
+execution boundary, then Astra confirms. No model call runs before the user authorizes the
+v2 compatibility plan and the gate and pilot plan.
