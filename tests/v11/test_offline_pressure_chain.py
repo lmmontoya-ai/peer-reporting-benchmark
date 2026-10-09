@@ -113,7 +113,8 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
                                       compatibility_directories=[compatibility], prior_roots=roots,
                                       bundle=bundle, arms=list(arms), pilot_decision=decision,
                                       pilot_decision_verifier=validate_core_decision if decision else None)
-        live.prepare_live_root(root, built, study_directory=study, prior_roots=roots, bundle=bundle)
+        live.prepare_live_root(root, built, study_directory=study, prior_roots=roots, bundle=bundle,
+                               pilot_decision_verifier=validate_core_decision if decision else None)
         top = live.read_live_plan(root)
         assert top["maximum_live_calls"] == expected and top["tool_schema_version"] == TOOL_SCHEMA_VERSION_P
         assert top["gate_evidence"]["qualification"]

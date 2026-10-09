@@ -648,7 +648,8 @@ def test_export_live_review_serializes_social_scores_and_summary(tmp_path, monke
         "read_live_plan": plan, "root_registration": {}, "check_abandoned_root": None,
         "lane_journals": {}, "check_start_claims": [], "verify_consumed_ledger": [],
         "planned_arms": ["social_grid_xhigh"], "check_arm_selection": ["social_grid_xhigh"],
-        "journaled_authorizations": [], "study_registry_listing": [], "read_study_manifest": {},
+        "journaled_authorizations": [], "study_registry_listing": [],
+        "read_study_manifest": {"assignments": [{"assignment_id": raw["assignment_id"], "level": "S"}]},
     }.items():
         monkeypatch.setattr(live_review, name, lambda *args, _result=result, **kwargs: _result)
 

@@ -78,7 +78,11 @@ from .live import (
     verify_consumed_ledger,
 )
 from .phase import _PhaseState
-from .review_population import check_pressure_arm_roots, registered_pressure_partitions
+from .review_population import (
+    check_pressure_arm_roots,
+    check_pressure_export_population,
+    registered_pressure_partitions,
+)
 
 ADAPTER_VERSION = "peer-reporting-v11-live-review-v1"
 EXPORT_KIND = "peer_reporting_v11_live_review_export"
@@ -443,6 +447,13 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     evidence = data["authorization_evidence"]
     authorizations = {value: evidence[value] if value in evidence else authorization_error(directory, plan, value)
                       for value in journaled_authorizations(journals)}
+    manifest = read_study_manifest(study_directory)
+    identifiers = {row["assignment_id"] for row in data["rows"]}
+    if any(row["level"] == "P" and row["assignment_id"] in identifiers for row in manifest["assignments"]):
+        partitions = registered_pressure_partitions(Path(study_directory), phase=plan["phase"],
+            study_manifest_hash=registration["study_manifest_hash"], source_plan_hash=plan["seal_hash"])
+        check_pressure_arm_roots(partitions)
+        check_pressure_export_population(data["rows"], partitions, source_plan_hash=plan["seal_hash"])
     # Spec 12: rows excluded from analysis keep their scores but stay out of the summary's counts and cells.
     from .review_sampling import analysis_score_rows
 
@@ -450,9 +461,6 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     summary = summarize(scored) if summarize is not None else None
     pressure_selection = (pressure_review_selector(scored) if pressure_review_selector is not None
                           and any(record.get("level") == "P" for record in scored) else None)
-    if pressure_selection is not None:
-        check_pressure_arm_roots(registered_pressure_partitions(Path(study_directory), phase=plan["phase"],
-            study_manifest_hash=registration["study_manifest_hash"], source_plan_hash=plan["seal_hash"]))
     output.mkdir(parents=True, exist_ok=False)
     (output / "attempts").mkdir()
     index = []
@@ -480,7 +488,7 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
             "pressure_review_study_directory": str(Path(study_directory).resolve())}
            if pressure_selection is not None else {}),
         # Review packets recompute the frozen plan against the sealed manifest this root was built from.
-        "study_manifest": read_study_manifest(study_directory),
+        "study_manifest": manifest,
         "analysis_exclusions": exclusions, "analysis_exclusion_count": len(exclusions),
         "ledger_repairs": ledger_repairs,
         "declared_deviations": [{"kind": "ledger_repaired", "lane_id": repair["lane_id"],

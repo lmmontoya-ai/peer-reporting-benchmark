@@ -295,7 +295,7 @@ def test_decision_refuses_four_unflagged_p3_misses_split_across_exports(tmp_path
             part["pressure_review_selection"] = pressure_review_selection([])
             atomic_json(path, seal({key: value for key, value in part.items() if key != "seal_hash"}))
             references[number] = export_reference(path)
-    with pytest.raises(ValueError, match="pressure_pilot_xhigh.*more than one export"):
+    with pytest.raises(ValueError, match="pressure_pilot_xhigh.*omits planned assignments"):
         build_pilot_decision(gate_exports=references, pilot_exports=references,
                              confirmed_scripting_remarks=sorted(targets))
 
@@ -484,3 +484,62 @@ def test_decision_rechecks_registered_roots_without_a_second_export(decision_inp
     register_review_root(Path(index["pressure_review_study_directory"]), manifest, [assignment], "later-unrun")
     with pytest.raises(ValueError, match="pressure_pilot_xhigh.*more than one registered root"):
         build_pilot_decision(**inputs)
+
+
+@pytest.mark.parametrize("with_verifier", [False, True])
+def test_prepare_core_requires_offline_verifier_before_writing(tmp_path, decision_inputs, wp6_inputs,
+                                                             with_verifier):
+    record = build_pilot_decision(**decision_inputs[-1]())
+    built = core_build(decision_inputs, wp6_inputs, record)
+    study = tmp_path / "sealing-study"
+    study.mkdir()
+    atomic_json(study / live.STUDY_MANIFEST, decision_inputs[0])
+    root = study / "roots" / "core"
+    registrations = list((study / live.STUDY_REGISTRY).glob("*.json"))
+    if not with_verifier:
+        with pytest.raises(ValueError, match="core prepare requires offline pilot decision verification"):
+            live.prepare_live_root(root, built, study_directory=study)
+        assert not root.exists()
+        assert list((study / live.STUDY_REGISTRY).glob("*.json")) == registrations
+    else:
+        live.prepare_live_root(root, built, study_directory=study, pilot_decision_verifier=validate_core_decision)
+        sealed = read_sealed(root / live.LIVE_PLAN_FILE)
+        assert sealed["pilot_decision"] == record
+        verify_core_binding(sealed)
+
+
+def test_prepare_refuses_resealed_failed_gate_decision_swapped_after_build(tmp_path, decision_inputs, wp6_inputs):
+    good = build_pilot_decision(**decision_inputs[-1]())
+    top, lanes, fixtures = core_build(decision_inputs, wp6_inputs, good)
+    assert top["maximum_live_calls"] == 600
+
+    def failed_gate(data, rows):
+        for row in rows:
+            misses(data[row["assignment_id"]])
+
+    bad = build_pilot_decision(**decision_inputs[-1](failed_gate))
+    assert bad["pooled_gate"] == {"hits": 0, "trials": 36}
+    assert bad["decision"] == "stop" and bad["eligible_lanes"] == []
+    bad["decision"] = "proceed"
+    bad["eligible_lanes"] = sorted(lanes)
+    bad = seal({key: value for key, value in bad.items() if key != "seal_hash"})
+    top["pilot_decision"] = bad
+    top["pilot_decision_hash"] = bad["seal_hash"]
+    verify_core_binding(top)
+    study = tmp_path / "sealing-study"
+    study.mkdir()
+    atomic_json(study / live.STUDY_MANIFEST, decision_inputs[0])
+    root = study / "roots" / "refused-core"
+    registrations = list((study / live.STUDY_REGISTRY).glob("*.json"))
+    with pytest.raises(ValueError, match="differs from recomputed"):
+        live.prepare_live_root(root, (top, lanes, fixtures), study_directory=study,
+                               pilot_decision_verifier=validate_core_decision)
+    assert not root.exists()
+    assert list((study / live.STUDY_REGISTRY).glob("*.json")) == registrations
+
+
+
+def test_compatibility_build_refuses_a_pilot_decision(wp6_inputs):
+    with pytest.raises(ValueError, match="only a core plan binds a pilot decision"):
+        live.build_phase_plan("compatibility", wp6_inputs["caps_record"], revision="non-core",
+                              pilot_decision={"decision": "proceed"})
