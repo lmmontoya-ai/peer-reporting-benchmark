@@ -295,7 +295,7 @@ def test_decision_refuses_four_unflagged_p3_misses_split_across_exports(tmp_path
             part["pressure_review_selection"] = pressure_review_selection([])
             atomic_json(path, seal({key: value for key, value in part.items() if key != "seal_hash"}))
             references[number] = export_reference(path)
-    with pytest.raises(ValueError, match="pressure_pilot_xhigh.*more than one export"):
+    with pytest.raises(ValueError, match="pressure_pilot_xhigh.*omits planned assignments"):
         build_pilot_decision(gate_exports=references, pilot_exports=references,
                              confirmed_scripting_remarks=sorted(targets))
 

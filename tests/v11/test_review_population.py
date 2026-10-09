@@ -17,6 +17,7 @@ from swarm_auth_bench.peer_reporting_v11.schemas import TOOL_SCHEMA_VERSION_P
 from swarm_auth_bench.peer_reporting_v11.score import score_trial
 
 from .review_root_helpers import register_review_root
+from .test_pilot_decision import decision_inputs as decision_inputs
 from .test_score_pressure import pressure_attempt
 
 
@@ -62,11 +63,12 @@ def write_local_export(output, study, manifest, plan, registration, rows):
     entries = []
     for row in rows:
         raw = row["attempt"]
-        relative = f"attempts/{row['assignment_id']}.json"
-        atomic_json(output / relative, seal(raw))
         entries.append({key: value for key, value in row.items() if key != "attempt"})
-        entries[-1].update(attempt_path=relative, attempt_hash=content_hash(raw))
-    selection = pressure_review_selection([row["score"] for row in rows if not row["excluded_from_analysis"]])
+        if raw is not None:
+            relative = f"attempts/{row['assignment_id']}.json"
+            atomic_json(output / relative, seal(raw))
+            entries[-1].update(attempt_path=relative, attempt_hash=content_hash(raw))
+    selection = pressure_review_selection([row["score"] for row in rows if not row["excluded_from_analysis"] and row["score"] is not None])
     index = seal({"kind": live_review.EXPORT_KIND, "phase": "calibration", "source_plan_hash": plan["seal_hash"],
         "study_manifest": manifest, "study_registration": registration,
         "pressure_review_study_directory": str(study.resolve()), "rows": entries,
@@ -81,7 +83,7 @@ def export_root(monkeypatch, root, plan, study, output, rows):
         "check_abandoned_root": None,
         "lane_journals": {lane["lane_id"]: [] for lane in plan["lanes"]},
         "check_start_claims": [], "verify_consumed_ledger": [], "journaled_authorizations": [],
-        "check_arm_selection": sorted({row["score"]["arm"] for row in rows}),
+        "check_arm_selection": sorted(live.planned_arms(root, plan)),
     }.items():
         monkeypatch.setattr(live_review, name, lambda *args, _result=result, **kwargs: _result)
     def inspect(directory, **kwargs):
@@ -121,10 +123,9 @@ def test_core_split_roots_refuse_export_and_packets_before_writing(tmp_path, mon
         selection = write_local_export(legacy_export, study, manifest, plan, registration, rows)
         selections.append(selection)
         output = tmp_path / f"refused-export-{number}"
-        if selection["rows"]:
-            with pytest.raises(ValueError, match="pressure_core_xhigh.*more than one registered root"):
-                export_root(monkeypatch, root, plan, study, output, rows)
-            assert not output.exists()
+        with pytest.raises(ValueError, match="pressure_core_xhigh.*more than one registered root"):
+            export_root(monkeypatch, root, plan, study, output, rows)
+        assert not output.exists()
         packets = tmp_path / f"refused-packets-{number}"
         with pytest.raises(ValueError, match="pressure_core_xhigh.*more than one registered root"):
             write_review_packets(legacy_export, selection, packets)
@@ -174,3 +175,70 @@ def test_review_population_rejects_resealed_plans_that_differ_from_registration(
     with pytest.raises(ValueError, match="plan differs"):
         check_pressure_arm_roots(registered_pressure_partitions(study, phase="calibration",
             study_manifest_hash=manifest["seal_hash"], source_plan_hash=plan["seal_hash"]))
+
+
+@pytest.mark.parametrize("singleton", range(4))
+def test_same_root_singleton_exports_refuse_packets_and_export(tmp_path, monkeypatch, core_review_inputs, singleton):
+    study, manifest, assignments, attempts = core_review_inputs
+    root, plan, registration = register_review_root(study, manifest, assignments, "combined")
+    rows = export_rows(assignments[singleton:singleton + 1], attempts)
+    legacy = tmp_path / "singleton-export"
+    selection = write_local_export(legacy, study, manifest, plan, registration, rows)
+    assert len(selection["rows"]) == 1
+    with pytest.raises(ValueError, match="pressure_core_xhigh.*omits planned assignments"):
+        write_review_packets(legacy, selection, tmp_path / "packets")
+    assert not (tmp_path / "packets").exists()
+    with pytest.raises(ValueError, match="pressure_core_xhigh.*omits planned assignments"):
+        export_root(monkeypatch, root, plan, study, tmp_path / "export", rows)
+    assert not (tmp_path / "export").exists()
+
+
+@pytest.mark.parametrize("missing_status", ["excluded", "unscored"])
+def test_population_includes_excluded_and_unscored_rows(tmp_path, monkeypatch, core_review_inputs, missing_status):
+    study, manifest, assignments, attempts = core_review_inputs
+    root, plan, registration = register_review_root(study, manifest, assignments, "combined")
+    rows = export_rows(assignments, attempts)
+    if missing_status == "excluded":
+        rows[-1]["excluded_from_analysis"] = True
+    else:
+        rows[-1].update(status="unstarted", attempt=None, score=None)
+    output = tmp_path / "complete-export"
+    export_root(monkeypatch, root, plan, study, output, rows)
+    selection = read_sealed(output / "index.json")["pressure_review_selection"]
+    assert write_review_packets(output, selection, tmp_path / "complete-packets")["packets"] == 1
+    incomplete = tmp_path / "incomplete-export"
+    selection = write_local_export(incomplete, study, manifest, plan, registration, rows[:-1])
+    with pytest.raises(ValueError, match="pressure_core_xhigh.*omits planned assignments"):
+        write_review_packets(incomplete, selection, tmp_path / "packets")
+    assert not (tmp_path / "packets").exists()
+
+
+@pytest.mark.parametrize("scored", [False, True])
+def test_empty_selection_export_still_requires_complete_population(tmp_path, monkeypatch, core_review_inputs, scored):
+    study, manifest, assignments, attempts = core_review_inputs
+    root, plan, _ = register_review_root(study, manifest, assignments, "combined")
+    rows = export_rows(assignments[:1], attempts, excluded=True)
+    if not scored:
+        rows[0].update(status="unstarted", attempt=None, score=None)
+    with pytest.raises(ValueError, match="pressure_core_xhigh.*omits planned assignments"):
+        export_root(monkeypatch, root, plan, study, tmp_path / "export", rows)
+    assert not (tmp_path / "export").exists()
+
+
+def test_pilot_builder_refuses_same_root_partitioned_exports(decision_inputs):
+    from pathlib import Path
+
+    from swarm_auth_bench.peer_reporting_v11.pilot_decision import build_pilot_decision, export_reference
+
+    inputs = decision_inputs[-1]()
+    path = Path(inputs["pilot_exports"][0]["path"])
+    index = read_sealed(path)
+    arm = "pressure_pilot_xhigh"
+    kept = next(row["assignment_id"] for row in index["rows"] if row["score"]["arm"] == arm)
+    index["rows"] = [row for row in index["rows"]
+                     if row["score"]["arm"] != arm or row["assignment_id"] == kept]
+    index["pressure_review_selection"] = pressure_review_selection([row["score"] for row in index["rows"]])
+    atomic_json(path, seal({key: value for key, value in index.items() if key != "seal_hash"}))
+    reference = export_reference(path)
+    with pytest.raises(ValueError, match="pressure_pilot_xhigh.*omits planned assignments"):
+        build_pilot_decision(gate_exports=[reference], pilot_exports=[reference])

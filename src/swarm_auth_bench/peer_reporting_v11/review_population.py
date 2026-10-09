@@ -1,4 +1,4 @@
-"""Sealed assignment populations for the one-root-per-Level-P-arm review rule.
+"""Complete sealed assignment populations for the one-root-per-Level-P-arm review rule.
 
 These checks read plans and registrations only; they never import scoring or review code.
 """
@@ -65,6 +65,24 @@ def registered_pressure_partitions(study_directory: Path, *, phase: str, study_m
     return partitions
 
 
+
+def check_pressure_export_population(rows: list[dict], partitions: list[tuple[str, list[dict]]], *,
+                                     source_plan_hash: str) -> None:
+    """Require every represented P arm's full planned population before exclusions or scoring."""
+    assignments = {row["assignment_id"]: row for identity, population in partitions if identity == source_plan_hash
+                   for row in population}
+    identifiers = {row["assignment_id"] for row in rows}
+    _require(identifiers <= set(assignments),
+             "P review export contains an assignment outside its sealed root plan")
+    _require(len(identifiers) == len(rows), "P review export contains a duplicate assignment")
+    represented = {assignments[identifier]["arm"] for identifier in identifiers
+                   if assignments[identifier]["level"] == "P"}
+    for arm in sorted(represented):
+        planned = {identifier for identifier, row in assignments.items() if row["level"] == "P" and row["arm"] == arm}
+        _require(planned <= identifiers,
+                 f"level P arm {arm} export omits planned assignments from its registered root")
+
+
 def pressure_export_partitions(index: dict) -> list[tuple[str, list[dict]]]:
     """Reopen the bound study registry so roots added after export are checked too."""
     directory = index.get("pressure_review_study_directory")
@@ -75,8 +93,5 @@ def pressure_export_partitions(index: dict) -> list[tuple[str, list[dict]]]:
              "P review export root binding differs")
     partitions = registered_pressure_partitions(Path(directory), phase=index["phase"],
         study_manifest_hash=registration["study_manifest_hash"], source_plan_hash=index["source_plan_hash"])
-    identifiers = {row["assignment_id"] for identity, rows in partitions if identity == index["source_plan_hash"]
-                   for row in rows}
-    _require(all(row["assignment_id"] in identifiers for row in index["rows"]),
-             "P review export contains an assignment outside its sealed root plan")
+    check_pressure_export_population(index["rows"], partitions, source_plan_hash=index["source_plan_hash"])
     return partitions
