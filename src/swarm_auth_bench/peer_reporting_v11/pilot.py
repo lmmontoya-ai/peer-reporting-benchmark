@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from copy import deepcopy
 from pathlib import Path
 
@@ -10,6 +9,8 @@ from ..events import content_hash
 from ..peer_reporting.storage import check_seal, read_sealed, safe_child, seal
 from .config import load_protocol
 from .lanes import lane_id
+from .review_plan import pressure_review_selection
+from .review_sampling import analysis_score_rows, pressure_negative_sample
 
 DECISION_KIND = "peer_reporting_v11_pressure_pilot_decision"
 CORE_ARMS = {"pressure_core_xhigh", "pressure_core_low"}
@@ -20,26 +21,6 @@ GATE_ARMS = {"pressure_gate_xhigh", "pressure_gate_low"}
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise ValueError(message)
-
-
-def pressure_negative_sample(scored: list[dict], *, seed: int) -> set[str]:
-    """Seeded per-arm 10% sample shared by gate verification and review selection."""
-    negatives = {}
-    for record in scored:
-        if record.get("level") != "P":
-            continue
-        endpoints = record["endpoints"]
-        negative = record["eligibility"]["eligible"] and (
-            record["variant"] == "violation" and endpoints["focal_hit"]["value"] is False
-            or record["variant"] == "twin" and endpoints["false_alarm"]["value"] is False)
-        if negative:
-            negatives.setdefault(record["arm"], []).append(record["assignment_id"])
-    sampled = set()
-    for members in negatives.values():
-        def key(identifier):
-            return hashlib.sha256(f"{seed}||pressure-negative||{identifier}".encode("utf-8")).hexdigest(), identifier
-        sampled.update(sorted(members, key=key)[: -(-len(members) // 10)])
-    return sampled
 
 
 def _export(path: Path) -> tuple[dict, dict, list[dict]]:
@@ -56,8 +37,8 @@ def _export(path: Path) -> tuple[dict, dict, list[dict]]:
         identifier = row["assignment_id"]
         _require(identifier in assignments and identifier not in seen, "unknown or duplicate pilot assignment")
         seen.add(identifier)
-        if row.get("score") is None or row.get("excluded_from_analysis"):
-            continue
+    for row in analysis_score_rows(index["rows"]):
+        identifier = row["assignment_id"]
         _require("attempt_path" in row, "pilot score requires a sealed attempt")
         attempt = read_sealed(safe_child(path.parent, row["attempt_path"]))
         attempt = {key: value for key, value in attempt.items() if key != "seal_hash"}
@@ -73,6 +54,8 @@ def _export(path: Path) -> tuple[dict, dict, list[dict]]:
         for key in ("arm", "model", "effort", "level", "variant", "block", "prevalence_k", "visibility", "pressure"):
             _require(score.get(key) == assignment.get(key), f"pilot score {key} differs from study")
         scores.append(score)
+    _require(index.get("pressure_review_selection") == pressure_review_selection(scores),
+             "pilot pressure_review_selection differs from sealed export scores")
     return index, manifest, scores
 
 
@@ -87,16 +70,25 @@ def export_reference(directory: Path) -> dict:
 def _inputs(gate_exports: list[dict], pilot_exports: list[dict]) -> tuple[dict, dict[str, dict]]:
     _require(bool(gate_exports) and bool(pilot_exports), "decision requires sealed gate and pilot exports")
     manifest, scores = None, {}
-    cache = {}
+    cache, arm_exports = {}, {}
     for references, arms in ((gate_exports, GATE_ARMS), (pilot_exports, PILOT_ARMS)):
         seen_paths = set()
         for reference in references:
             _require(type(reference) is dict and set(reference) == {"path", "seal_hash"}, "invalid pilot export reference")
             path = Path(reference["path"])
-            _require(path.is_absolute() and str(path) not in seen_paths, "pilot export paths must be absolute and distinct")
+            _require(path.is_absolute(), "pilot export paths must be absolute and distinct")
+            path = path.resolve()
+            _require(str(path) not in seen_paths, "pilot export paths must be absolute and distinct")
             seen_paths.add(str(path))
             if str(path) not in cache:
                 cache[str(path)] = _export(path)
+                for score in cache[str(path)][2]:
+                    if score.get("level") != "P":
+                        continue
+                    arm = score["arm"]
+                    _require(arm not in arm_exports or arm_exports[arm] == path,
+                             f"level P arm {arm} has scored trials in more than one export")
+                    arm_exports[arm] = path
             index, supplied, records = cache[str(path)]
             _require(index["seal_hash"] == reference["seal_hash"], "pilot export hash differs from decision record")
             _require(manifest is None or manifest["seal_hash"] == supplied["seal_hash"], "pilot exports come from different studies")

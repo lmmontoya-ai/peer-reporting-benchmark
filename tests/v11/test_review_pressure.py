@@ -13,6 +13,7 @@ from swarm_auth_bench.peer_reporting_v11.cli import main
 from swarm_auth_bench.peer_reporting_v11.config import load_protocol
 from swarm_auth_bench.peer_reporting_v11.review import build_review_bundle, validate_review_upload
 from swarm_auth_bench.peer_reporting_v11.review_plan import REVIEW_SEED, pressure_review_selection, rank
+from swarm_auth_bench.peer_reporting_v11.review_sampling import analysis_score_rows, pressure_negative_sample
 from swarm_auth_bench.peer_reporting_v11.score import PRESSURE_ENDPOINTS, score_trial, summarize
 from swarm_auth_bench.peer_reporting_v11.structured import report_summary_contradictions
 
@@ -81,6 +82,21 @@ def test_negative_sample_is_seeded_ten_percent_per_arm_excludes_unknown_and_pres
     assert all(row["reasons"] == ["mechanical_negative_sample"] for row in selection["rows"])
     with pytest.raises(ValueError, match="review_seed"):
         pressure_review_selection(records, seed=123)
+
+
+def test_negative_population_excludes_analysis_exclusions_missing_scores_and_ineligible_trials():
+    records = [scored(f"population-{index:02d}") for index in range(20)]
+    rows = [{"score": record, "excluded_from_analysis": index < 10} for index, record in enumerate(records)]
+    rows.append({"score": None, "excluded_from_analysis": False})
+    records[-1]["eligibility"]["eligible"] = False
+    population = [row["score"] for row in analysis_score_rows(rows)]
+    assert population == records[10:]
+    expected = {min((record["assignment_id"] for record in records[10:-1]),
+                    key=lambda identifier: rank(REVIEW_SEED, "pressure-negative||", identifier))}
+    assert pressure_negative_sample(population, seed=REVIEW_SEED) == expected
+    selected = pressure_review_selection(population)
+    assert {row["assignment_id"] for row in selected["rows"]
+            if "mechanical_negative_sample" in row["reasons"]} == expected
 
 
 @pytest.mark.parametrize("state,summary,expected", [

@@ -43,6 +43,7 @@ from .prompts import (
     build_instructions,
 )
 from .review_plan import SCOPES, plan_rows, pressure_review_selection, verify_review_plan
+from .review_sampling import analysis_score_rows
 from .rubric import (
     LABEL_QUESTIONS,
     MATERIAL_CLAIM_KINDS,
@@ -769,8 +770,8 @@ def verify_pressure_packet_selection(export_directory: Path, index: dict, select
         identifier = row["assignment_id"]
         _require(identifier not in seen and identifier in assignments, "P export assignment missing or duplicated")
         seen.add(identifier)
-        if row.get("score") is None or row.get("excluded_from_analysis"):
-            continue
+    for row in analysis_score_rows(index["rows"]):
+        identifier = row["assignment_id"]
         _require("attempt_path" in row, "P score has no sealed attempt")
         stored = read_sealed(safe_child(export_directory, row["attempt_path"]))
         attempt = {key: value for key, value in stored.items() if key != "seal_hash"}

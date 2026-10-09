@@ -453,7 +453,9 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
             visible.update(attempt_path=relative, attempt_hash=content_hash(row["attempt"]))
         index.append(visible)
     # Spec 12: rows excluded from analysis keep their scores but stay out of the summary's counts and cells.
-    scored = [row["score"] for row in data["rows"] if row["score"] is not None and not row["excluded_from_analysis"]]
+    from .review_sampling import analysis_score_rows
+
+    scored = [row["score"] for row in analysis_score_rows(data["rows"])]
     summary = summarize(scored) if summarize is not None else None
     pressure_selection = (pressure_review_selector(scored) if pressure_review_selector is not None
                           and any(record.get("level") == "P" for record in scored) else None)
