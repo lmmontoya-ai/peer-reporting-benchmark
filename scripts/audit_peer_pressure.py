@@ -61,12 +61,12 @@ def counterpart_checks(f):
     private = other(visibility="private", pressure="P3" if p["pressure"] == "P4" else p["pressure"])
     assert visible["packet"].encode() == private["packet"].encode()
     assert other(visibility="visible", pressure="P3")["packet"] == other(visibility="visible", pressure="P4")["packet"]
-    pressure_paths = {}
+    pressure_hashes = {}
     for condition in ("none", "neutral", "P1", "P2", "P3", "P4"):
         target = other(pressure=condition, visibility="visible" if condition == "P4" else p["visibility"])
         paths = [d["path"] for d in field_differences(f["public"], target["public"])]
         assert set(paths) <= {f"/messages/{slot - 1}/text" for slot in roles["sender_slots"]}
-        pressure_paths[condition] = paths
+        pressure_hashes[condition] = content_hash(target["public"])
     twin = other(variant="twin", k=0)
     twin_checks = {}
     for k in (1, 12):
@@ -82,11 +82,14 @@ def counterpart_checks(f):
             allowed |= {f"/messages/{slot - 1}/text" for slot in roles["norm_slots"]}
         paths = [d["path"] for d in field_differences(twin["public"], violation["public"])]
         assert set(paths) <= allowed and len(paths) == k * 3 + (3 if k == 12 else 0)
-        twin_checks[str(k)] = {"passed": True, "changed_paths": paths}
+        twin_checks[str(k)] = {"passed": True, "changed_path_count": len(paths),
+                               "public_hash": content_hash(violation["public"])}
         assert [g["grant_id"] for g in reg["grants"]] == [g["grant_id"] for g in record(twin, "principal_registry_export")["grants"]]
         assert len(canonical_json(reg).encode()) == len(canonical_json(record(twin, "principal_registry_export")).encode())
     return {"visibility_packets_identical": True, "P3_P4_packets_identical": True,
-            "pressure_changed_paths": pressure_paths, "violation_twin": twin_checks,
+            "visibility_public_hash": content_hash(visible["public"]),
+            "pressure_public_hashes": pressure_hashes, "twin_public_hash": content_hash(twin["public"]),
+            "violation_twin": twin_checks,
             "grant_ids_and_registry_bytes_constant": True}
 
 
@@ -122,12 +125,19 @@ def audit_row(f):
         assert all(check == checks[0] for check in checks)
         post_results.append({"event_id": message["event_id"], **checks[0],
                              "roster_substitutions_checked": len(checks)})
-    return {"fixture_id": f["fixture_id"], "parameters": p, "packet_bytes": len(f["packet"].encode()),
+    scans = [*post_results, *notices.values()]
+    for checks in reactions.values():
+        scans += [checks["fallback"], *checks["post"]]
+        scans += [scan for actor in checks["report_by_actor"].values() for scan in actor]
+    return {"fixture_id": f["fixture_id"], "fixture_hash": content_hash(f), "parameters": p, "packet_bytes": len(f["packet"].encode()),
             "packet_words": len(f["packet"].split()), "packet_sha256": hashlib.sha256(f["packet"].encode()).hexdigest(),
             "posts_per_peer": dict(sorted(counts.items())), "grant_count": len(registry["grants"]),
-            "lookup_matches": matches, "roles": truth["pressure"], "verifier_errors": errors,
-            "post_text_rules": post_results,
-            "reaction_text_rules": reactions, "notice_text_rules": notices, "counterparts": counterpart_checks(f)}
+            "lookup_counts": dict(sorted(Counter(row["matching_count"] for row in matches).items())),
+            "roles": truth["pressure"], "verifier_errors": errors,
+            "text_rules": {"posts_passed": len(post_results) * len(peers),
+                           "reactions_passed": sum(len(v["report_by_actor"]) * 3 + 4 for v in reactions.values()),
+                           "notices_passed": len(notices),
+                           "failures": [scan for scan in scans if not scan["passed"]]}, "counterparts": counterpart_checks(f)}
 
 
 def generate_audit():
@@ -158,7 +168,7 @@ def generate_audit():
               "Reserved senders never violate; norm speakers are separate from senders and initiators.",
               "Every post and rendered reaction passes the cue, post-stem, hidden-label and operation-ID scans.",
               "Fixed notice wording passes the hidden-label scan with observer fields empty.",
-              "The JSON records each text and its scan results, lookup counts, roles and changed counterpart paths.", "",
+              "The JSON records aggregate scan counts, any failures, lookup counts, roles and counterpart hashes.", "",
               "Visibility and P3/P4 packets are byte-identical. Pressure changes only sender text slots.",
               "Violation/twin changes are limited to slot b grants, lookup matches and the K=12 norm slots.",
               "Grant IDs and serialized registry lengths stay equal across K and variant.", "",
@@ -166,9 +176,8 @@ def generate_audit():
     lines += [f"| p{i} | {c['injunctive_bytes']} | {c['neutral_bytes']} | {c['byte_difference']} |"
               for i, c in enumerate(clauses, 1)]
     lines += ["", "Regenerate from this worktree with its src first:", "", "```powershell",
-              "$env:PYTHONPATH = 'D:\\research\\projects\\peer-reporting-benchmark-wt\\r6-verify\\src'",
-              "& 'D:\\research\\projects\\peer-reporting-benchmark\\.venv\\Scripts\\python.exe' scripts/audit_peer_pressure.py", "```", ""]
-    return (json.dumps(result, indent=2, ensure_ascii=False) + "\n").encode(), "\n".join(lines).encode()
+              "uv run --offline python scripts/audit_peer_pressure.py", "```", ""]
+    return (json.dumps(result, separators=(",", ":"), ensure_ascii=False) + "\n").encode(), "\n".join(lines).encode()
 
 
 def main():

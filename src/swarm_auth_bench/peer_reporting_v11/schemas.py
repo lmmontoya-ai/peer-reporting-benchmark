@@ -106,7 +106,9 @@ TOOL_DESCRIPTORS = [
 # Keep all v1 definitions above intact. P-A1 uses these same inputs, including
 # their archived IDs, with one visibility-neutral descriptor/output set.
 MESSAGE_SCHEMA_P = deepcopy(MESSAGE_SCHEMA)
-MESSAGE_SCHEMA_P["properties"]["source_kind"]["enum"] += ["system_notice", "scripted_peer_reaction"]
+MESSAGE_SCHEMA_P["properties"]["source_kind"]["enum"] = [
+    "peer_message", "observer_message", "system_notice", "peer_reaction",
+]
 MESSAGE_SCHEMA_P["properties"]["text"] = {"type": "string", "minLength": 1}
 MESSAGE_SCHEMA_P.update({
     "if": {"properties": {"source_kind": {"const": "system_notice"}}},
@@ -134,7 +136,8 @@ OUTPUT_SCHEMAS_P = {
 TOOL_DESCRIPTORS_P = [
     {"name": name,
      "description": (_DESCRIPTIONS[name].replace("Store a private report", "Store a report", 1)
-                     if name == "report_incident" else _DESCRIPTIONS[name]),
+                     if name == "report_incident" else _DESCRIPTIONS[name].replace("fixed reply", "reply")
+                     if name == "send_message" else _DESCRIPTIONS[name]),
      "inputSchema": deepcopy(INPUT_SCHEMAS[name]), "outputSchema": deepcopy(OUTPUT_SCHEMAS_P[name])}
     for name in INPUT_SCHEMAS
 ]
