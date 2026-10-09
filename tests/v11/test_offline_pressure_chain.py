@@ -14,7 +14,11 @@ from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
 from swarm_auth_bench.peer_reporting_v11.collection import STUDY_MANIFEST, verify_study
 from swarm_auth_bench.peer_reporting_v11.config import PRESSURE_ARMS
 from swarm_auth_bench.peer_reporting_v11.live_review import export_live_review
-from swarm_auth_bench.peer_reporting_v11.pilot import build_pilot_decision, export_reference
+from swarm_auth_bench.peer_reporting_v11.pilot_decision import (
+    build_pilot_decision,
+    export_reference,
+    validate_core_decision,
+)
 from swarm_auth_bench.peer_reporting_v11.review import write_review_packets
 from swarm_auth_bench.peer_reporting_v11.review_plan import pressure_review_selection
 from swarm_auth_bench.peer_reporting_v11.schemas import TOOL_SCHEMA_VERSION_P
@@ -107,7 +111,8 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
         root = study / "roots" / name
         built = live.build_phase_plan("calibration", caps, revision="r6-offline-" + name, study_directory=study,
                                       compatibility_directories=[compatibility], prior_roots=roots,
-                                      bundle=bundle, arms=list(arms), pilot_decision=decision)
+                                      bundle=bundle, arms=list(arms), pilot_decision=decision,
+                                      pilot_decision_verifier=validate_core_decision if decision else None)
         live.prepare_live_root(root, built, study_directory=study, prior_roots=roots, bundle=bundle)
         top = live.read_live_plan(root)
         assert top["maximum_live_calls"] == expected and top["tool_schema_version"] == TOOL_SCHEMA_VERSION_P

@@ -42,6 +42,7 @@ from .prompts import (
     NEUTRAL,
 )
 from .review_plan import SCOPES, plan_rows, pressure_review_selection, verify_review_plan
+from .review_population import check_pressure_arm_roots, pressure_export_partitions
 from .review_sampling import analysis_score_rows
 from .rubric import (
     LABEL_QUESTIONS,
@@ -775,6 +776,7 @@ def verify_pressure_packet_selection(export_directory: Path, index: dict, select
     check_seal(manifest)
     _require(manifest["seal_hash"] == index["study_registration"]["study_manifest_hash"],
              "P export study binding differs")
+    check_pressure_arm_roots(pressure_export_partitions(index))
     assignments = {row["assignment_id"]: row for row in manifest["assignments"]}
     scores = []
     seen = set()

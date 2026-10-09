@@ -250,7 +250,7 @@ def _run(args: argparse.Namespace) -> dict:
     from .bundle import load_bundle
 
     if args.command == "pilot-decision":
-        from .pilot import build_pilot_decision, export_reference
+        from .pilot_decision import build_pilot_decision, export_reference
 
         record = build_pilot_decision(gate_exports=[export_reference(path) for path in args.gate_export],
             pilot_exports=[export_reference(path) for path in args.pilot_export],
@@ -354,11 +354,17 @@ def _run(args: argparse.Namespace) -> dict:
                 raise ValueError(f"the review plan failed verification against the study: {errors[:5]}")
         elif args.review_plan is not None:
             raise ValueError("--review-plan applies only to a collection build")
+        decision_verifier = None
+        if args.pilot_decision:
+            from .pilot_decision import validate_core_decision
+
+            decision_verifier = validate_core_decision
         plan = build_phase_plan(args.phase, read_json(args.caps), revision=args.revision, study_directory=args.study,
                                 compatibility_directories=args.compatibility, smoke_directory=args.smoke,
                                 prior_roots=args.prior_roots, bundle=bundle, review_plan=review, arms=args.arms,
                                 tool_schema_version=args.tool_schema_version,
-                                pilot_decision=read_sealed(args.pilot_decision) if args.pilot_decision else None)
+                                pilot_decision=read_sealed(args.pilot_decision) if args.pilot_decision else None,
+                                pilot_decision_verifier=decision_verifier)
         study = args.study if args.phase != "compatibility" else None
         return {**prepare_live_root(args.root, plan, study_directory=study, prior_roots=args.prior_roots,
                                     bundle=bundle, review_plan=review), "selected_arms": plan[0]["selected_arms"]}

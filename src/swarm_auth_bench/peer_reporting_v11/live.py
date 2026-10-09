@@ -755,16 +755,23 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
                           revision: str, source: dict, gate_evidence: dict, bundle: ProtocolBundle | None = None,
                           consumed_attempts: dict | None = None, smoke_assignment_ids: list[str] | None = None,
                           review_plan_hash: str | None = None, selected_arms: list[str] | None = None,
-                          pilot_decision: dict | None = None
+                          pilot_decision: dict | None = None,
+                          pilot_decision_verifier: Callable[..., dict] | None = None
                           ) -> tuple[dict, dict, dict]:
-    """Seal calibration, smoke, or collection rows into lanes. Nothing is written or called."""
+    """Seal rows into lanes; core counts require an injected offline decision verifier.
+
+    Nothing is written and no model is called. The run phase only checks the resulting binding.
+    """
     bundle = tools_for_levels(require_v11_tools(bundle or load_bundle()), [row.get("level") for row in rows])
     caps_record = validate_caps_record(caps_record, require_frozen=False)
-    from .pilot import CORE_ARMS, validate_core_decision
+    from .pilot import CORE_ARMS, check_core_decision
 
     core = any(row["arm"] in CORE_ARMS for row in rows)
     if core:
-        pilot_decision = validate_core_decision(pilot_decision, study_manifest_hash=source["study_manifest_hash"])
+        check_core_decision(pilot_decision, study_manifest_hash=source["study_manifest_hash"])
+        if pilot_decision_verifier is None:
+            raise ValueError("core build requires offline pilot decision verification")
+        pilot_decision = pilot_decision_verifier(pilot_decision, study_manifest_hash=source["study_manifest_hash"])
         rows = [row for row in rows if row["arm"] not in CORE_ARMS
                 or lane_id(row["model"], row["effort"]) in pilot_decision["eligible_lanes"]]
     elif pilot_decision is not None:
@@ -2151,7 +2158,8 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
                      study_verifier: Callable[[Path, dict], Any] | None = None,
                      review_plan: dict | None = None, arms: list[str] | tuple | None = None,
                      tool_schema_version: str | None = None,
-                     pilot_decision: dict | None = None) -> tuple[dict, dict, dict]:
+                     pilot_decision: dict | None = None,
+                     pilot_decision_verifier: Callable[..., dict] | None = None) -> tuple[dict, dict, dict]:
     """Build a phase plan; behavioral phases bind their study, its consumed-attempt ledger, and their gates.
 
     A behavioral plan requires the study manifest's caps hash, tool manifest hash,
@@ -2190,10 +2198,13 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
         review_plan_hash = check_review_plan(review_plan, study_manifest_hash=manifest["seal_hash"])
     elif review_plan is not None:
         raise ValueError("only a collection plan binds a review plan")
-    from .pilot import CORE_ARMS, validate_core_decision
+    from .pilot import CORE_ARMS, check_core_decision
 
     if selected_arms and set(selected_arms) & CORE_ARMS:
-        validate_core_decision(pilot_decision, study_manifest_hash=manifest["seal_hash"])
+        check_core_decision(pilot_decision, study_manifest_hash=manifest["seal_hash"])
+        if pilot_decision_verifier is None:
+            raise ValueError("core build requires offline pilot decision verification")
+        pilot_decision_verifier(pilot_decision, study_manifest_hash=manifest["seal_hash"])
     report = (study_verifier or verify_sealed_study)(Path(study_directory), caps_record)
     if type(report) is not dict or report.get("valid") is not True:
         raise EvidenceError(f"study verification failed: {(report or {}).get('errors')}")
@@ -2236,7 +2247,8 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
     return build_assignment_plan(phase, rows, fixtures, caps_record, revision=revision, source=source,
                                  gate_evidence=gates["evidence"], bundle=bundle, consumed_attempts=ledger,
                                  smoke_assignment_ids=smoke_ids, review_plan_hash=review_plan_hash,
-                                 selected_arms=selected_arms, pilot_decision=pilot_decision)
+                                 selected_arms=selected_arms, pilot_decision=pilot_decision,
+                                 pilot_decision_verifier=pilot_decision_verifier)
 
 
 # Coordinator

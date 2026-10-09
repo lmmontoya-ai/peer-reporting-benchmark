@@ -1139,6 +1139,7 @@ def lane_report(state: _PhaseState) -> dict:
 POST_HOC_MODULES = frozenset({
     "peer_reporting_v11/score.py", "peer_reporting_v11/structured.py", "peer_reporting_v11/rubric.py",
     "peer_reporting_v11/review.py", "peer_reporting_v11/review_plan.py",
+    "peer_reporting_v11/pilot_decision.py",
 })
 
 
