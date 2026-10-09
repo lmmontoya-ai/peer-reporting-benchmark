@@ -327,31 +327,64 @@ def _audit_pressure_events(state: dict) -> None:
 
 
 def _audit_pressure_receipts(state: dict) -> None:
-    """Recompute each successful receipt from complete ordered public messages."""
+    """Reconcile every receipt with storage, room events and admitted idempotent operations."""
     public = {}
     triggers = {}
+    report_events, result_events = {}, {}
     for event in state["events"]:
         if event["kind"] == "public_message_stored" and event["arrival_seq"] is not None:
             public.setdefault(event["arrival_seq"], []).append(event["data"]["message"])
         if event["kind"] == "pressure_reactions_stored":
             triggers[event["arrival_seq"]] = event["data"]["trigger"]
+        if event["kind"] == "incident_report_stored":
+            report_events.setdefault(event["arrival_seq"], []).append(event["data"]["report_id"])
+        if event["kind"] in ("tool_result_stored", "tool_rejected"):
+            result_events.setdefault(event["arrival_seq"], []).append(event["data"].get("result"))
+    reports = {}
+    for report in state["reports"]:
+        arrival = report["arrival_seq"]
+        if arrival in reports or report_events.get(arrival) != [report["report_id"]]:
+            raise ValueError("level P stored report has no unique receipt event")
+        reports[arrival] = report
     saved = {}
     fired = set()
     context = state["pressure"]
     for request in state["requests"]:
         name, result, args, arrival = (request[key] for key in ("name", "result", "arguments", "arrival_seq"))
-        if name not in ("report_incident", "send_message") or not result or result.get("status") != "stored":
+        if name not in ("report_incident", "send_message"):
             continue
-        key = canonical_json([state["trial_id"], name, args["request_id"]])
         emitted = public.get(arrival, [])
+        report = reports.get(arrival)
+        effects = bool(emitted or report or arrival in triggers or arrival in report_events)
+        if request["status"] == "held":
+            if result is not None or effects or arrival in result_events:
+                raise ValueError("level P pending receipt has a result or stored effect")
+            continue
+        if result is None or result_events.get(arrival) != [result]:
+            raise ValueError("level P receipt differs from its stored result event")
+        key = None
+        if request["admitted"] and request["status"] == "completed" and request["actor_id"] == state["observer_id"]:
+            try:
+                validate_input(name, args)
+            except V11SchemaError:
+                pass
+            else:
+                if not (name == "report_incident" and state["world_mode"] == "report_store_unavailable"):
+                    key = canonical_json([state["trial_id"], name, args["request_id"]])
         if key in saved:
             original_args, expected = saved[key]
-            if args != original_args or result != expected or emitted or arrival in triggers:
+            repeat_result = expected if args == original_args else _error("idempotency_conflict")
+            if result != repeat_result or effects:
                 raise ValueError("level P idempotent receipt differs from its original")
             continue
+        if result.get("status") != "stored":
+            if result.get("status") != "error" or effects:
+                raise ValueError("level P failure receipt has a stored effect or invalid status")
+            continue
+        if key is None or request["status"] != "completed":
+            raise ValueError("level P stored receipt has no admitted operation")
         reactions = [message for message in emitted if message["source_kind"] == "peer_reaction"]
         if name == "report_incident":
-            report = next((report for report in state["reports"] if report["arrival_seq"] == arrival), None)
             if report is None or report["report"] != args:
                 raise ValueError("level P report receipt has no matching stored report")
             expected = {"status": "stored", "report_id": report["report_id"]}
@@ -364,6 +397,8 @@ def _audit_pressure_receipts(state: dict) -> None:
             elif emitted:
                 raise ValueError("private level P report emitted room messages")
         else:
+            if report is not None:
+                raise ValueError("level P post receipt has a stored report effect")
             posts = [message for message in emitted if message["source_kind"] == "observer_message"]
             replies = [message for message in emitted if message["source_kind"] == "peer_message"]
             if len(posts) != 1 or len(replies) > 1 or emitted != posts + replies + reactions:
@@ -387,6 +422,18 @@ def _audit_pressure_receipts(state: dict) -> None:
         if state["idempotency"].get(key) != {"arguments": args, "receipt": expected}:
             raise ValueError("level P original idempotency receipt differs from room messages")
         saved[key] = (args, expected)
+    requests = {request["arrival_seq"]: request["name"] for request in state["requests"]}
+    if any(requests.get(arrival) != "report_incident" for arrival in reports | report_events):
+        raise ValueError("level P stored report has no matching request receipt")
+    if any(requests.get(arrival) not in ("report_incident", "send_message") for arrival in public | triggers):
+        raise ValueError("level P room effect has no matching request receipt")
+    for key in state["idempotency"]:
+        identity = json.loads(key)
+        if (type(identity) is not list or len(identity) != 3 or identity[0] != state["trial_id"]
+                or identity[1] not in IDEMPOTENT_TOOLS or type(identity[2]) is not str):
+            raise ValueError("level P idempotency receipt has an invalid operation key")
+        if identity[1] in ("report_incident", "send_message") and key not in saved:
+            raise ValueError("level P idempotency receipt has no stored original operation")
 
 
 def _audit_checkpoint(checkpoint: Any) -> None:
