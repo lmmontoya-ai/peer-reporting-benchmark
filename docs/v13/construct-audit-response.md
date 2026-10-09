@@ -141,8 +141,16 @@ sampled trials; the level P `send_message` description drops "fixed"; and the
 turn-result rule cites the v1.1 runtime. Astra noted that the label rename touches the
 generator, schema, world validation, runner and review paths; that is implementation work.
 
+## Confirmation review
+
+R6-fix implemented P-A3 and the six code findings, and reduced the fixture audit to
+358 KB. Astra's confirmation review
+([review-astra-r6-confirm.md](review-astra-r6-confirm.md)) returned NO-GO on one major
+finding: the review sample and the pilot decision could sample different populations when
+an arm is split across exports. Section 7.4 now draws the sample per arm over the whole
+phase, and section 5.5 defines the coverage snapshot of an ambiguous report.
+
 ## Next
 
-R6-fix implements P-A3 together with the six code findings, and the generated fixture
-audit (6.9 MB) is reduced in size. An Astra confirmation review follows. No model call
-runs before the user authorizes the v2 compatibility plan and the gate and pilot plan.
+R6-fix2 fixes the major finding and the three minor ones, then Astra confirms. No model
+call runs before the user authorizes the v2 compatibility plan and the gate and pilot plan.
