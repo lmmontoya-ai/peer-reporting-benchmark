@@ -242,6 +242,7 @@ def test_live_export_serializes_pressure_events_scores_summary_and_selection(tmp
     from swarm_auth_bench.peer_reporting_v11.schemas import TOOL_SCHEMA_VERSION_P
 
     bundle = load_bundle().tool_set(TOOL_SCHEMA_VERSION_P)
+    assignment = {"assignment_id": raw["assignment_id"], "arm": raw["arm"], "level": "P"}
     plan = {"phase": "calibration", "seal_hash": "plan", "lanes": [],
             "tool_schema_version": bundle.schema_version, "tool_manifest_hash": bundle.tool_manifest_hash,
             "tool_descriptors_hash": bundle.tool_descriptors_hash, "wire_tool_specs_hash": bundle.wire_tool_specs_hash}
@@ -249,8 +250,9 @@ def test_live_export_serializes_pressure_events_scores_summary_and_selection(tmp
         "read_live_plan": plan, "root_registration": {"study_manifest_hash": "study"}, "check_abandoned_root": None,
         "lane_journals": {}, "check_start_claims": [], "verify_consumed_ledger": [],
         "planned_arms": ["pressure_core_xhigh"], "check_arm_selection": ["pressure_core_xhigh"],
-        "journaled_authorizations": [], "study_registry_listing": [], "read_study_manifest": {},
-        "registered_pressure_partitions": [("plan", [{"arm": raw["arm"], "level": "P"}])],
+        "journaled_authorizations": [], "study_registry_listing": [],
+        "read_study_manifest": {"assignments": [assignment]},
+        "registered_pressure_partitions": [("plan", [assignment])],
     }.items():
         monkeypatch.setattr(live_review, name, lambda *args, _result=result, **kwargs: _result)
     def inspect(directory, *, bundle, scorer, amendments):
