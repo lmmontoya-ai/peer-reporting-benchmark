@@ -336,6 +336,7 @@ def _run(args: argparse.Namespace) -> dict:
         _write_new_json_files({args.output: binding})
         return {"output": str(args.output), "binding": binding, "live_model_calls": 0}
     if args.command == "build":
+        from ..peer_reporting.storage import read_sealed
         from .live import STUDY_MANIFEST, build_phase_plan, prepare_live_root, validate_arm_selection
 
         if args.arms is not None:
@@ -345,7 +346,6 @@ def _run(args: argparse.Namespace) -> dict:
         if args.phase == "collection":
             if args.review_plan is None or args.study is None:
                 raise ValueError("collection build requires --study and the frozen review plan (--review-plan)")
-            from ..peer_reporting.storage import read_sealed
             from .review_plan import verify_review_plan
 
             review = read_json(args.review_plan)
