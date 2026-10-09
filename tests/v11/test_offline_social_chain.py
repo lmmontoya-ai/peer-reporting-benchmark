@@ -104,6 +104,7 @@ async def test_revision5_offline_study_three_roots_and_root_replay(tmp_path, wp6
                                        study_directory=study, bundle=bundle)
         plan = live.build_assignment_plan("calibration", rows, fixtures, wp6_inputs["caps_record"],
                                           revision="offline-r5-" + name, source=source,
+                                          study_manifest=live.read_study_manifest(study),
                                           gate_evidence={"test_only": True}, bundle=bundle,
                                           consumed_attempts=ledger, selected_arms=sorted(arms))
         live.prepare_live_root(root, plan, study_directory=study, prior_roots=roots, bundle=bundle)

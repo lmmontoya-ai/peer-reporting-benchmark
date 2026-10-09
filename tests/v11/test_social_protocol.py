@@ -175,6 +175,7 @@ def test_cli_builds_offline_pilot_root_with_all_four_fields_unchanged(tmp_path, 
     rows = [row for row in rows if row["arm"] in SOCIAL_ARMS[:2]]
     plan = live.build_assignment_plan("calibration", rows, fixtures, wp6_inputs["caps_record"],
                                       revision="social-pilot-archive-test", source=source,
+                                      study_manifest=live.read_study_manifest(study),
                                       gate_evidence={"test_only": True}, selected_arms=sorted(SOCIAL_ARMS[:2]))
     live.prepare_live_root(root, plan, study_directory=study)
     top = live.read_live_plan(root)

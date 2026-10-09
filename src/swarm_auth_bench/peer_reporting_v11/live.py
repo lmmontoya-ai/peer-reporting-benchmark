@@ -751,12 +751,95 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
     return entries
 
 
+
+def check_assignment_binding(rows: list[dict], *, manifest: dict, source: dict, phase: str,
+                             fixtures: dict[str, dict] | None = None) -> list[dict]:
+    """Bind every row or lane entry to primary study data, without post-hoc imports.
+
+    Historical lane entries omit fixture-only labels such as compound_type. Check
+    those against the retained fixture instead of changing the serialized format.
+    Return canonical assignments so callers derive arms and lanes from the study.
+    """
+    check_seal(manifest)
+    if manifest["seal_hash"] != source.get("study_manifest_hash"):
+        raise EvidenceError("assignment binding names another sealed study")
+    assignments = {row["assignment_id"]: row for row in manifest["assignments"]}
+    canonical, seen = [], set()
+    for row in rows:
+        entry = "entry_id" in row
+        identifier = row.get("entry_id" if entry else "assignment_id")
+        if identifier in seen or identifier not in assignments:
+            raise EvidenceError(f"{identifier}: unknown or duplicate sealed-study assignment")
+        seen.add(identifier)
+        assignment = assignments[identifier]
+        if assignment["split"] != phase:
+            raise EvidenceError(f"{identifier}: assignment phase differs from sealed study")
+        fixture = (fixtures or {}).get(assignment["fixture_id"])
+        for key, expected in assignment.items():
+            label = {"assignment_id": "entry_id", "effort": "reasoning_effort"}.get(key, key) if entry else key
+            if not entry and key == "instructions" and key not in row:
+                continue  # The built entry is checked again after prompt generation.
+            actual = row.get(label)
+            if entry and label not in row and fixture is not None:
+                actual = fixture.get("parameters", {}).get(key)
+            if actual != expected:
+                raise EvidenceError(f"{identifier}: assignment {key} differs from sealed study")
+        reference = manifest["fixtures"][assignment["fixture_id"]]
+        if fixture is not None and content_hash(fixture) != reference["content_hash"]:
+            raise EvidenceError(f"{identifier}: assignment fixture differs from sealed study")
+        if entry:
+            if row.get("fixture_hash") != reference["content_hash"]:
+                raise EvidenceError(f"{identifier}: assignment fixture hash differs from sealed study")
+            if row.get("attempt_id") != identifier + ATTEMPT_SUFFIX:
+                raise EvidenceError(f"{identifier}: assignment attempt ID differs from sealed study")
+            if fixture is not None and row.get("instructions_and_roles_hash") != _messages_hash(row["instructions"], fixture):
+                raise EvidenceError(f"{identifier}: assignment instruction hash differs from sealed study")
+        canonical.append(assignment)
+    return canonical
+
+
+def check_plan_assignment_binding(plan: dict, lane_plans: dict[str, dict], manifest: dict,
+                                  fixtures: dict[str, dict]) -> list[dict]:
+    """Check study entries and their execution lanes before a root is used."""
+    rows = []
+    for lane in plan["lanes"]:
+        lane_plan = lane_plans[lane["lane_id"]]
+        for entry in lane_plan["planned_order"]:
+            if (lane_id(entry["model"], entry["reasoning_effort"]) != lane["lane_id"]
+                    or entry["model"] != lane_plan["model"]
+                    or entry["reasoning_effort"] != lane_plan["reasoning_effort"]):
+                raise EvidenceError(f"{entry['entry_id']}: assignment differs from its execution lane")
+            rows.append(entry)
+    canonical = check_assignment_binding(rows, manifest=manifest, source=plan["source"], phase=plan["phase"],
+                                         fixtures=fixtures)
+    from .pilot import verify_core_binding
+
+    verify_core_binding(plan, entry_arms={row["arm"] for row in canonical},
+                        entry_lanes={lane_id(row["model"], row["effort"]) for row in canonical})
+    return canonical
+
+
+def check_root_assignment_binding(directory: Path, plan: dict, study_directory: Path | None) -> None:
+    if "study_manifest_hash" not in plan["source"]:
+        return
+    if study_directory is None:
+        raise EvidenceError("assignment binding requires the registered study directory")
+    lanes = {lane["lane_id"]: read_sealed(safe_child(directory, lane["path"]) / "phase-plan.json")
+             for lane in plan["lanes"]}
+    for lane in plan["lanes"]:
+        if lanes[lane["lane_id"]]["seal_hash"] != lane["plan_hash"]:
+            raise EvidenceError(f"lane {lane['lane_id']} differs from the sealed live plan")
+    fixtures = {identifier: read_root_fixture(directory, plan, identifier) for identifier in plan["fixtures"]}
+    check_plan_assignment_binding(plan, lanes, read_study_manifest(study_directory), fixtures)
+
+
 def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict], caps_record: dict, *,
                           revision: str, source: dict, gate_evidence: dict, bundle: ProtocolBundle | None = None,
                           consumed_attempts: dict | None = None, smoke_assignment_ids: list[str] | None = None,
                           review_plan_hash: str | None = None, selected_arms: list[str] | None = None,
                           pilot_decision: dict | None = None,
-                          pilot_decision_verifier: Callable[..., dict] | None = None
+                          pilot_decision_verifier: Callable[..., dict] | None = None,
+                          study_manifest: dict | None = None
                           ) -> tuple[dict, dict, dict]:
     """Seal rows into lanes; core counts require an injected offline decision verifier.
 
@@ -766,7 +849,13 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
     caps_record = validate_caps_record(caps_record, require_frozen=False)
     from .pilot import CORE_ARMS, check_core_decision
 
-    core = any(row["arm"] in CORE_ARMS for row in rows)
+    canonical = rows
+    if "study_manifest_hash" in source:
+        if study_manifest is None:
+            raise EvidenceError("study-bound build requires its sealed study manifest")
+        canonical = check_assignment_binding(rows, manifest=study_manifest, source=source, phase=phase,
+                                             fixtures=fixtures)
+    core = any(row["arm"] in CORE_ARMS for row in canonical)
     if core:
         check_core_decision(pilot_decision, study_manifest_hash=source["study_manifest_hash"])
         if pilot_decision_verifier is None:
@@ -777,6 +866,8 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
     elif pilot_decision is not None:
         raise ValueError("only a core plan binds a pilot decision")
     entries = validate_assignment_rows(phase, rows, fixtures, caps_record, bundle)
+    if study_manifest is not None:
+        check_assignment_binding(entries, manifest=study_manifest, source=source, phase=phase, fixtures=fixtures)
     used = {entry["fixture_id"]: fixtures[entry["fixture_id"]] for entry in entries}
     result = _assemble(phase, revision, caps_record, bundle, entries, used, source=source,
                      gate_evidence=gate_evidence, consumed_attempts=consumed_attempts or _empty_ledger(),
@@ -1698,6 +1789,10 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
     a pending root, which blocks later builds of the phase until it is abandoned.
     """
     top, lane_plans, fixtures = plan
+    if "study_manifest_hash" in top["source"]:
+        if study_directory is None:
+            raise EvidenceError("assignment binding requires the registered study directory")
+        check_plan_assignment_binding(top, lane_plans, read_study_manifest(study_directory), fixtures)
     from .pilot import CORE_ARMS, verify_core_binding
 
     entry_arms = {entry["arm"] for lane in lane_plans.values() for entry in lane["planned_order"]}
@@ -1930,6 +2025,7 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
     directory = Path(directory)
     plan = read_live_plan(directory)
     bundle = _tool_set_for_plan(plan, bundle)
+    check_root_assignment_binding(directory, plan, study_directory)
     from .pilot import verify_core_binding
 
     verify_core_binding(plan, entry_arms=planned_arms(directory, plan))
@@ -2256,7 +2352,7 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
                                  gate_evidence=gates["evidence"], bundle=bundle, consumed_attempts=ledger,
                                  smoke_assignment_ids=smoke_ids, review_plan_hash=review_plan_hash,
                                  selected_arms=selected_arms, pilot_decision=pilot_decision,
-                                 pilot_decision_verifier=pilot_decision_verifier)
+                                 pilot_decision_verifier=pilot_decision_verifier, study_manifest=manifest)
 
 
 # Coordinator
@@ -2317,6 +2413,7 @@ async def run_live_phase(
     directory = Path(directory)
     plan = read_live_plan(directory)
     bundle = _tool_set_for_plan(plan, bundle)
+    check_root_assignment_binding(directory, plan, study_directory)
     record = validate_caps_record(caps_record, require_frozen=True)
     if content_hash(record) != plan["caps_hash"] or record != plan["caps"]:
         raise LivePhaseError("supplied caps differ from the sealed live plan; no model session was created")

@@ -36,6 +36,10 @@ from .test_score_pressure import pressure_attempt
 
 @pytest.fixture
 def decision_inputs(tmp_path, wp6_study):
+    return make_decision_inputs(tmp_path, wp6_study)
+
+
+def make_decision_inputs(tmp_path, wp6_study):
     directory, manifest, _ = wp6_study
     fixtures = {}
     for row in manifest["assignments"]:
@@ -94,6 +98,7 @@ def core_build(decision_inputs, wp6_inputs, record):
     rows = [row for row in manifest["assignments"] if row["arm"] in CORE_ARMS]
     return live.build_assignment_plan("calibration", rows, fixtures, wp6_inputs["caps_record"], revision="core-double",
         source={"kind": "study_manifest", "study_manifest_hash": manifest["seal_hash"]}, gate_evidence={},
+        study_manifest=manifest,
         bundle=replace(load_bundle(), verify_fixture=lambda *args: []), selected_arms=sorted(CORE_ARMS), pilot_decision=record,
         pilot_decision_verifier=validate_core_decision)
 
@@ -378,6 +383,7 @@ async def test_run_refuses_changed_decision_binding_before_runtime_creation(tmp_
     root.mkdir()
     monkeypatch.setattr(live, "read_live_plan", lambda *args: top)
     monkeypatch.setattr(live, "planned_arms", lambda *args: CORE_ARMS)
+    monkeypatch.setattr(live, "check_root_assignment_binding", lambda *args: None)
     monkeypatch.setattr(live, "root_registration", lambda *args, **kwargs: None)
     monkeypatch.setattr(live, "validate_authorization", lambda *args, **kwargs: {})
     monkeypatch.setattr(live, "implementation_changes", lambda *args, **kwargs: [])
@@ -473,6 +479,7 @@ def test_core_build_requires_an_offline_decision_verifier(decision_inputs, wp6_i
     with pytest.raises(ValueError, match="requires offline pilot decision verification"):
         live.build_assignment_plan("calibration", rows, fixtures, wp6_inputs["caps_record"], revision="core-double",
             source={"kind": "study_manifest", "study_manifest_hash": manifest["seal_hash"]}, gate_evidence={},
+        study_manifest=manifest,
             selected_arms=sorted(CORE_ARMS), pilot_decision=record)
 
 

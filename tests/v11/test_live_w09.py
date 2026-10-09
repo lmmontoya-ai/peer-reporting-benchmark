@@ -392,7 +392,8 @@ async def test_the_collection_gate_refuses_a_partial_smoke_root(compat, tmp_path
     study = write_study(tmp_path / "study", rows + collection_rows, {**fixtures, **collection_fixtures})
     smoke_rows, smoke_fixtures, source = v11_live.load_study(study, "smoke")
     partial = v11_live.build_assignment_plan("smoke", smoke_rows[:1], smoke_fixtures, caps_record(),
-                                             revision="smoke-partial", source=source, gate_evidence={
+                                             revision="smoke-partial", source=source,
+                                             study_manifest=v11_live.read_study_manifest(study), gate_evidence={
                                                  "qualification": {}}, bundle=fake_bundle())
     root = study / "roots" / "smoke"
     assert prepare(root, partial, study)["maximum_live_calls"] == 1
