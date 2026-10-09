@@ -51,7 +51,7 @@ def registered_pressure_partitions(study_directory: Path, *, phase: str, study_m
             _require(lane_plan["seal_hash"] == lane["plan_hash"] and lane_plan["phase"] == phase,
                      "P review lane plan differs from its sealed root plan")
             for entry in lane_plan["planned_order"]:
-                identifier = entry["assignment_id"]
+                identifier = entry["entry_id"]
                 _require(identifier not in seen and identifier in study_assignments,
                          "P review root assignment missing or duplicated")
                 seen.add(identifier)

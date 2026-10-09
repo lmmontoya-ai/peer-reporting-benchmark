@@ -18,7 +18,9 @@ def register_review_root(study, manifest, assignments, name):
     lanes = []
     for identifier, rows in sorted(groups.items()):
         relative = f"lanes/{identifier}"
-        plan = seal({"phase": "calibration", "planned_order": rows})
+        entries = [{**{key: value for key, value in row.items() if key not in ("assignment_id", "effort")},
+                    "entry_id": row["assignment_id"], "reasoning_effort": row["effort"]} for row in rows]
+        plan = seal({"phase": "calibration", "planned_order": entries})
         (root / relative).mkdir(parents=True)
         atomic_json(root / relative / "phase-plan.json", plan)
         lanes.append({"lane_id": identifier, "path": relative, "plan_hash": plan["seal_hash"]})
