@@ -159,7 +159,7 @@ async def test_prepare_rechecks_prior_roots_under_their_locks(compat, tmp_path):
     with _exclusive(v1 / v11_live.COORDINATOR_LOCK):  # the prior root is running
         with pytest.raises(v11_live.LivePhaseError, match="another process"):
             v11_live.prepare_live_root(study / "roots" / "smoke-v2", built, study_directory=study, prior_roots=[v1])
-    with pytest.raises(ValueError, match="registered in its study"):
+    with pytest.raises(ValueError, match="assignment binding requires the registered study directory"):
         v11_live.prepare_live_root(study / "roots" / "smoke-v2", built, prior_roots=[v1])
     await run(v1, plan_v1, Harness(tmp_path / "h1", scripted(fixtures)), compatibility_directories=[compat],
               study_directory=study)
