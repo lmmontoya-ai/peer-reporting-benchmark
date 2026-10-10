@@ -181,7 +181,7 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
         selected = index["pressure_review_selection"]["rows"]
         assert selected and all(row["scope"] == "full" for row in selected)
         packet_output = tmp_path / (name + "-packets")
-        finished = write_review_packets(export, index["pressure_review_selection"], packet_output, receipt_directory=receipts)
+        finished = write_review_packets(export, index["pressure_review_selection"], packet_output, study_directory=study, receipt_directory=receipts)
         assert finished["packets"] == len(selected)
         packets = [read_sealed(path) for path in (packet_output / "reviewer").glob("*.json")]
         assert all("visibility" not in packet and "pressure" not in packet for packet in packets)

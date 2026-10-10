@@ -395,7 +395,7 @@ def test_packet_route_rejects_rehashed_selection_score_and_study_mutations(tmp_p
         index["study_registration"]["study_manifest_hash"] = "other-study"
     atomic_json(path, seal({key: value for key, value in index.items() if key != "seal_hash"}))
     with pytest.raises(ValueError):
-        write_review_packets(Path(path).parent, selection, tmp_path / "packets")
+        write_review_packets(Path(path).parent, selection, tmp_path / "packets", study_directory=Path(index["pressure_review_study_directory"]))
     assert not (tmp_path / "packets").exists()
 
 
@@ -421,7 +421,7 @@ def finished_packet(tmp_path, inputs):
     source = Path(inputs["pilot_exports"][0]["path"])
     selection = read_sealed(source)["pressure_review_selection"]
     output = tmp_path / "finished-packets"
-    write_review_packets(source.parent, selection, output)
+    write_review_packets(source.parent, selection, output, study_directory=Path(read_sealed(source)["pressure_review_study_directory"]))
     path = next((output / "reviewer").glob("*.json"))
     return read_sealed(path), path.with_suffix(".html").read_text(encoding="utf-8"), read_sealed(
         output / "controller" / path.name)

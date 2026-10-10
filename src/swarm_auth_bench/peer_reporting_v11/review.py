@@ -996,14 +996,19 @@ def verify_pressure_export_evidence(export_directory: Path, index: dict,
     check_pressure_arm_roots(pressure_export_partitions(index, receipt_directory=receipt_directory))
     verified = verify_registered_export_evidence(export_directory, index,
         Path(index["pressure_review_study_directory"]), receipt_directory, repair_evidence_directory)
-    # Filtering is safe only after every row above has been checked.
+    scores = _pressure_export_scores(index, verified)
+    if _verified_rows is not None:
+        _verified_rows[:] = verified
+    return scores
+
+
+def _pressure_export_scores(index: dict, verified: list[dict]) -> list[dict]:
+    """Recompute selection from rows already checked against the archive."""
     scores = [row["score"] for row in analysis_score_rows(verified)]
     selection = pressure_review_selection(scores)
     _require(index.get("pressure_review_selection") == selection
              or not scores and index.get("pressure_review_selection") is None,
              "P pressure_review_selection differs from sealed export scores re-derived from live root")
-    if _verified_rows is not None:
-        _verified_rows[:] = verified
     return scores
 
 
@@ -1021,8 +1026,9 @@ def verify_pressure_packet_selection(export_directory: Path, index: dict, select
 def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
                          load_template: Callable[[str], dict] | None = None,
                          study_directory: Path | None = None,
-                             receipt_directory: Path | None = None,
-                             repair_evidence_directory: Path | None = None) -> dict[str, Any]:
+                         receipt_directory: Path | None = None,
+                         repair_evidence_directory: Path | None = None,
+                         replay: bool = False) -> dict[str, Any]:
     """Write reviewer packets for every planned assignment with an exported attempt.
 
     ``reviewer/`` holds the only files a reviewer may see (sealed JSON packets and
@@ -1030,8 +1036,10 @@ def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
     ``controller/`` holds every packet with its private bindings and attempt, and
     ``index.json`` maps assignments to packets and second review; both are
     researcher-only. Planned rows without an attempt stay unknown.
-    The export must retain its sealed ``study_manifest`` and ``review_plan_hash``;
-    the plan is fully recomputed and checked against both before any packet is written.
+    Live exports require their registered study and full archive verification before
+    routing or writing. Unregistered authored exports require explicit ``replay=True``;
+    every retained attempt must be authored offline. The verified study determines
+    whether the plan must be an ordinary plan or a pressure selection.
     """
     from .incidents import load_template as default_loader
 
@@ -1041,25 +1049,53 @@ def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
              "review packets must be written outside the export")
     index = read_sealed(export_directory / "index.json")
     _require(index.get("kind") == EXPORT_KIND, "not a v1.1 live review export")
-    pressure = plan.get("kind") == "peer_reporting_v11_pressure_review_selection"
-    manifest = index.get("study_manifest") or {}
-    identifiers = {row["assignment_id"] for row in index["rows"]}
-    contains_pressure = any(row["level"] == "P" and row["assignment_id"] in identifiers
-                            for row in manifest.get("assignments", []))
-    _require(not contains_pressure or pressure, "level P export requires its pressure review selection")
-    if pressure:
-        rows = verify_pressure_packet_selection(export_directory, index, plan,
-            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+    attempts = {}
+    if replay:
+        _require(study_directory is None, "replay packets require an unregistered authored export")
+        manifest = index.get("study_manifest")
+        _require(type(manifest) is dict, "the export must retain its sealed study_manifest for review verification")
+        check_seal(manifest)
+        for row in index["rows"]:
+            if "attempt_path" in row:
+                stored = read_sealed(safe_child(export_directory, row["attempt_path"]))
+                attempt = {key: value for key, value in stored.items() if key != "seal_hash"}
+                _require(attempt.get("execution_kind") == "authored_offline_replay",
+                         "replay packets require an authored offline attempt")
+                _require(content_hash(attempt) == row["attempt_hash"], f"{row['assignment_id']}: attempt hash mismatch")
+                attempts[row["assignment_id"]] = attempt
+        verified = index["rows"]
     else:
+        from .live import read_study_manifest
+
+        _require(study_directory is not None, "review packets require the registered study directory")
+        study = Path(study_directory).resolve()
+        verified = verify_registered_export_evidence(export_directory, index, study,
+                                                      receipt_directory, repair_evidence_directory)
+        manifest = read_study_manifest(study)
+        attempts = {row["assignment_id"]: row["attempt"] for row in verified if row["attempt"] is not None}
+    identifiers = {row["assignment_id"] for row in verified}
+    pressure = any(row["level"] == "P" and row["assignment_id"] in identifiers
+                   for row in manifest["assignments"])
+    if pressure:
+        _require(plan.get("kind") == "peer_reporting_v11_pressure_review_selection",
+                 "level P export requires its pressure review selection")
+        if not replay:
+            directory = index.get("pressure_review_study_directory")
+            _require(type(directory) is str and Path(directory).is_absolute()
+                     and Path(directory).resolve() == study,
+                     "P export study directory differs from its registered study directory")
+            check_pressure_arm_roots(pressure_export_partitions(index, receipt_directory=receipt_directory))
+        check_seal(plan)
+        expected = pressure_review_selection(_pressure_export_scores(index, verified))
+        _require(plan == expected, "P selection differs from sealed export scores")
+        rows = {row["assignment_id"]: row for row in plan["rows"]}
+    else:
+        _require(plan.get("kind") != "peer_reporting_v11_pressure_review_selection",
+                 "earlier-level export requires its ordinary review plan")
         rows = None
-        if study_directory is not None:
-            verify_registered_export_evidence(export_directory, index, Path(study_directory),
-                                              receipt_directory, repair_evidence_directory)
     _require(index["study_registration"]["study_manifest_hash"] ==
              (index["study_manifest"]["seal_hash"] if pressure else plan["study_manifest_hash"]),
              "the export comes from another study than the review plan")
-    manifest = index.get("study_manifest")
-    _require(type(manifest) is dict, "the export must retain its sealed study_manifest for review verification")
     errors = [] if pressure else verify_review_plan(plan, manifest)
     _require(not errors, f"invalid review plan: {'; '.join(errors)}")
     _require(manifest["seal_hash"] == index["study_registration"]["study_manifest_hash"],
@@ -1085,9 +1121,7 @@ def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
         if "attempt_path" not in row:
             entries.append({**entry, "packet_status": "no_attempt"})
             continue
-        attempt = read_sealed(safe_child(export_directory, row["attempt_path"]))
-        attempt = {key: value for key, value in attempt.items() if key != "seal_hash"}
-        _require(content_hash(attempt) == row["attempt_hash"], f"{row['assignment_id']}: attempt hash mismatch")
+        attempt = attempts[row["assignment_id"]]
         template = load_template(attempt["fixture"]["parameters"]["template_id"])
         withheld = withheld_texts(template, models, attempt["fixture"]["packet"])
         instructions = next(item["instructions"] for item in manifest["assignments"]

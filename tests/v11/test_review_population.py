@@ -102,7 +102,7 @@ def test_four_core_unflagged_scripting_misses_in_one_root_write_one_sampled_pack
     assert len(selection["rows"]) == 1
     assert selection["rows"][0]["reasons"] == ["mechanical_negative_sample"]
     packets = tmp_path / "packets"
-    assert write_review_packets(output, selection, packets)["packets"] == 1
+    assert write_review_packets(output, selection, packets, study_directory=study)["packets"] == 1
     assert len(list((packets / "reviewer").glob("*.json"))) == 1
 
 
@@ -124,7 +124,7 @@ def test_core_split_roots_refuse_export_and_packets_before_writing(tmp_path, mon
         assert not output.exists()
         packets = tmp_path / f"refused-packets-{number}"
         with pytest.raises(ValueError, match="pressure_core_xhigh.*more than one registered root"):
-            write_review_packets(legacy_export, selection, packets)
+            write_review_packets(legacy_export, selection, packets, study_directory=study)
         assert not packets.exists()
     if excluded_only_second_root:
         index = read_sealed(tmp_path / "legacy-export-1" / "index.json")
@@ -142,7 +142,7 @@ def test_packets_recheck_roots_registered_after_export_even_without_scores(tmp_p
     index = read_sealed(output / "index.json")
     register_review_root(study, manifest, assignments[3:], "later-unrun")
     with pytest.raises(ValueError, match="pressure_core_xhigh.*more than one registered root"):
-        write_review_packets(output, index["pressure_review_selection"], tmp_path / "packets")
+        write_review_packets(output, index["pressure_review_selection"], tmp_path / "packets", study_directory=study)
     assert not (tmp_path / "packets").exists()
 
 
@@ -181,8 +181,9 @@ def test_same_root_singleton_exports_refuse_packets_and_export(tmp_path, monkeyp
     legacy = tmp_path / "singleton-export"
     selection = write_local_export(legacy, study, manifest, plan, registration, rows)
     assert len(selection["rows"]) == 1
-    with pytest.raises(ValueError, match="pressure_core_xhigh.*omits planned assignments"):
-        write_review_packets(legacy, selection, tmp_path / "packets")
+    bind_review_root_observations(monkeypatch, root, plan, lambda: export_rows(assignments, attempts))
+    with pytest.raises(ValueError, match="omits planned assignments"):
+        write_review_packets(legacy, selection, tmp_path / "packets", study_directory=study)
     assert not (tmp_path / "packets").exists()
     with pytest.raises(ValueError, match="pressure_core_xhigh.*omits planned assignments"):
         export_root(monkeypatch, root, plan, study, tmp_path / "export", rows)
@@ -201,11 +202,11 @@ def test_population_includes_excluded_and_unscored_rows(tmp_path, monkeypatch, c
     output = tmp_path / "complete-export"
     export_root(monkeypatch, root, plan, study, output, rows)
     selection = read_sealed(output / "index.json")["pressure_review_selection"]
-    assert write_review_packets(output, selection, tmp_path / "complete-packets")["packets"] == 1
+    assert write_review_packets(output, selection, tmp_path / "complete-packets", study_directory=study)["packets"] == 1
     incomplete = tmp_path / "incomplete-export"
     selection = write_local_export(incomplete, study, manifest, plan, registration, rows[:-1])
-    with pytest.raises(ValueError, match="pressure_core_xhigh.*omits planned assignments"):
-        write_review_packets(incomplete, selection, tmp_path / "packets")
+    with pytest.raises(ValueError, match="omits planned assignments"):
+        write_review_packets(incomplete, selection, tmp_path / "packets", study_directory=study)
     assert not (tmp_path / "packets").exists()
 
 

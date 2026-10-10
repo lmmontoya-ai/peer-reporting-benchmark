@@ -173,7 +173,7 @@ def native_packet(tmp_path, pressure_roots):
     live_review.export_live_review(root, export, study_directory=study, receipt_directory=receipts,
                                     scorer=score_trial, pressure_review_selector=pressure_review_selection)
     packets = tmp_path / "packets"
-    write_review_packets(export, read_sealed(export / "index.json")["pressure_review_selection"], packets,
+    write_review_packets(export, read_sealed(export / "index.json")["pressure_review_selection"], packets, study_directory=study,
                           receipt_directory=receipts)
     controller = read_sealed(next((packets / "controller").glob("*.json")))
     assert controller["plan_row"]["second_review"] is True
@@ -203,7 +203,7 @@ def test_sibling_matching_phase_copies_refuse(tmp_path, pressure_roots, native_p
                 receipt_directory=receipts, scorer=score_trial, pressure_review_selector=pressure_review_selection)
         elif consumer == "packets":
             write_review_packets(export, read_sealed(export / "index.json")["pressure_review_selection"],
-                                  tmp_path / "again", receipt_directory=receipts)
+                                  tmp_path / "again", study_directory=study, receipt_directory=receipts)
         else:
             index = read_sealed(export / "index.json")
             reference = {"path": str(export / "index.json"), "seal_hash": index["seal_hash"]}
@@ -240,7 +240,7 @@ def test_sibling_receipt_checked_before_population_filtering(tmp_path, pressure_
             source_plan_hash=live.read_live_plan(root)["seal_hash"], receipt_directory=receipts)
     with pytest.raises(ValueError, match="receipt mismatch"):
         write_review_packets(export, read_sealed(export / "index.json")["pressure_review_selection"],
-                              tmp_path / "again", receipt_directory=receipts)
+                              tmp_path / "again", study_directory=study, receipt_directory=receipts)
     assert before == (primary_bytes(root), primary_bytes(sibling))
 
 

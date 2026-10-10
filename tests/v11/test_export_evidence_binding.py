@@ -39,7 +39,7 @@ def test_four_complete_exports_cannot_fabricate_four_singleton_packets(tmp_path,
     original = tmp_path / "original"
     export_root(monkeypatch, root, plan, study, original, export_rows(assignments, attempts))
     selection = read_sealed(original / "index.json")["pressure_review_selection"]
-    assert write_review_packets(original, selection, tmp_path / "valid-packets")["packets"] == 1
+    assert write_review_packets(original, selection, tmp_path / "valid-packets", study_directory=study)["packets"] == 1
     for kept in range(4):
         forged = tmp_path / f"forged-{kept}"
         shutil.copytree(original, forged)
@@ -53,7 +53,7 @@ def test_four_complete_exports_cannot_fabricate_four_singleton_packets(tmp_path,
         assert len(selection["rows"]) == 1
         output = tmp_path / f"refused-packets-{kept}"
         with pytest.raises(ValueError, match="exported row differs from registered live root"):
-            write_review_packets(forged, selection, output)
+            write_review_packets(forged, selection, output, study_directory=study)
         assert not output.exists()
         assert all((forged / row["attempt_path"]).read_bytes() == (original / row["attempt_path"]).read_bytes()
                    for row in index["rows"])
@@ -124,7 +124,7 @@ def test_consumers_refuse_resealed_derived_evidence(tmp_path, monkeypatch, core_
         selection = index["pressure_review_selection"]
     with pytest.raises(ValueError, match="live root|pressure_review_selection"):
         if consumer == "packets":
-            write_review_packets(output, selection, tmp_path / "packets")
+            write_review_packets(output, selection, tmp_path / "packets", study_directory=study)
         else:
             reference = export_reference(path)
             build_pilot_decision(gate_exports=[reference], pilot_exports=[reference])
@@ -173,4 +173,4 @@ def test_all_unrun_pressure_rows_keep_the_registered_source_and_empty_selection(
     assert "compound_type" not in next(iter(earlier_plan[1].values()))["planned_order"][0]
     live.prepare_live_root(study / "roots" / "earlier", earlier_plan, study_directory=study, prior_roots=[root], receipt_directory=receipts)
     assert verify_pressure_export_evidence(export, index, receipt_directory=receipts) == []
-    assert write_review_packets(export, pressure_review_selection([]), tmp_path / "packets", receipt_directory=receipts)["packets"] == 0
+    assert write_review_packets(export, pressure_review_selection([]), tmp_path / "packets", study_directory=study, receipt_directory=receipts)["packets"] == 0

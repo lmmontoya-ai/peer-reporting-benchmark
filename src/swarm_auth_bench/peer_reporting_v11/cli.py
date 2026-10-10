@@ -91,7 +91,7 @@ def _review_commands(commands) -> None:
     packets.add_argument("export", type=Path, help="directory written by export-review")
     packets.add_argument("--plan", type=Path, help="sealed review plan (P defaults to export selection)")
     packets.add_argument("--output", type=Path, required=True, help="fresh output directory")
-    packets.add_argument("--study", type=Path, help="registered study for earlier-level archive verification")
+    packets.add_argument("--study", type=Path, help="required registered study for archive verification")
     upload = commands.add_parser("validate-review-upload", help="validate returned review labels")
     upload.add_argument("upload", type=Path)
     upload.add_argument("--packet", type=Path, required=True, help="the reviewer packet the labels answer")
@@ -116,6 +116,8 @@ def _review(args: argparse.Namespace) -> dict:
         return {"output": str(output), "seal_hash": plan["seal_hash"], "seed": plan["seed"],
                 "study_manifest_hash": plan["study_manifest_hash"], "counts": plan["counts"], "live_model_calls": 0}
     if args.command == "review-packets":
+        if args.study is None:
+            raise ValueError("review-packets requires --study for registered archive verification")
         plan = read_sealed(args.plan) if args.plan else read_sealed(args.export / "index.json").get("pressure_review_selection")
         if plan is None:
             raise ValueError("review-packets requires --plan for earlier levels")
