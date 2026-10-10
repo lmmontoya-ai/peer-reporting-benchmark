@@ -181,7 +181,7 @@ def test_packet_content_recomputed_after_consistent_hash_changes(tmp_path, conte
     }
     returned = upload(packet, {identifier: review() for identifier in packet["label_template"]})
     with pytest.raises(ValueError, match="packet content differs"):
-        validate_review_upload(returned, packet, controller=controller)
+        validate_review_upload(returned, packet, controller=controller, allow_replay=True)
 
 
 @pytest.mark.parametrize("case", ["disagreement", "missing_second", "absent_adjudication"])
@@ -196,7 +196,7 @@ def test_endpoint_resolution_recomputed_from_reviews_and_bound_rule(tmp_path, ca
     rule = case == "missing_second"
     resolved = resolve_packet_reviews(packet, [first] if rule else [first, second], second_review=rule)
     legitimate = human_endpoints(
-        attempt, bundle["bindings"], resolved, structured=structured(attempt), second_review=rule
+        attempt, bundle["bindings"], resolved, structured=structured(attempt), allow_replay=True, second_review=rule
     )
     assert legitimate["endpoints"]["final_answer_concern"]["value"] is None
     altered = deepcopy(resolved)
@@ -206,7 +206,7 @@ def test_endpoint_resolution_recomputed_from_reviews_and_bound_rule(tmp_path, ca
     assert altered[identifier]["adjudication"] is None
     with pytest.raises(ValueError, match="resolution differs"):
         human_endpoints(
-            attempt, bundle["bindings"], altered, structured=structured(attempt), second_review=rule
+            attempt, bundle["bindings"], altered, structured=structured(attempt), allow_replay=True, second_review=rule
         )
 
 

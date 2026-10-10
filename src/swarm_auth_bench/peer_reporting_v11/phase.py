@@ -1012,6 +1012,14 @@ class _PhaseRun:
         settlement = self._settle(reservation, total, result, observer_error, failures, unobserved,
                                   provider_pause=provider)
         details = {key: value for key, value in settlement.items() if key not in {"status", "actual_tokens"}}
+        # V2 retains the pause before the study write or attempt archive can fail.
+        # V1 journal and export serialization stay unchanged.
+        prepared_pause = (self.pauses.prepare(attempt_id, self.lane_id)
+                          if settlement.get("settlement_reason") in PROVIDER_PAUSE_CLASSIFICATIONS
+                          and self.bundle.schema_version == "peer-reporting-v11-tools-v2"
+                          else None)
+        if prepared_pause is not None:
+            details["provider_pause"] = prepared_pause
         self.journal.append("usage_settled", attempt_id=attempt_id, reservation_id=reservation,
                             status="settled" if settlement["actual_tokens"] is not None else "unresolved",
                             actual_tokens=settlement["actual_tokens"], usage_settlement=settlement["status"],
@@ -1022,7 +1030,7 @@ class _PhaseRun:
         # Spec 10 (revisions 3 and 4): a provider_unavailable or provider_stalled attempt pauses all new admission
         # now, before any await; the pause is sealed into the attempt and journaled, and the third in the window
         # holds, whichever kinds the three are.
-        pause = (self.pauses.record(attempt_id, self.lane_id)
+        pause = (self.pauses.record(attempt_id, self.lane_id, prepared=prepared_pause)
                  if check.get("classification") in PROVIDER_PAUSE_CLASSIFICATIONS else None)
         if pause is not None and pause["holds_admission"]:
             self.hooks.hold(f"provider_unavailable_limit:{attempt_id}")

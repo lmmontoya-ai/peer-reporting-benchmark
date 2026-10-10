@@ -91,6 +91,7 @@ def _review_commands(commands) -> None:
     packets.add_argument("export", type=Path, help="directory written by export-review")
     packets.add_argument("--plan", type=Path, help="sealed review plan (P defaults to export selection)")
     packets.add_argument("--output", type=Path, required=True, help="fresh output directory")
+    packets.add_argument("--study", type=Path, help="registered study for earlier-level archive verification")
     upload = commands.add_parser("validate-review-upload", help="validate returned review labels")
     upload.add_argument("upload", type=Path)
     upload.add_argument("--packet", type=Path, required=True, help="the reviewer packet the labels answer")
@@ -119,12 +120,14 @@ def _review(args: argparse.Namespace) -> dict:
         if plan is None:
             raise ValueError("review-packets requires --plan for earlier levels")
         return write_review_packets(args.export, plan, args.output,
+            study_directory=args.study,
             receipt_directory=args.receipt_directory,
             repair_evidence_directory=args.repair_evidence_directory)
     from .review import validate_review_upload
 
     return validate_review_upload(read_json(args.upload), read_json(args.packet),
-                                  controller=read_sealed(args.controller) if args.controller else None)
+        controller=read_sealed(args.controller) if args.controller else None,
+        receipt_directory=args.receipt_directory, repair_evidence_directory=args.repair_evidence_directory)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -246,7 +249,8 @@ def _parser() -> argparse.ArgumentParser:
         _prior_roots(command)
         _amendments(command)
     for command in (build, verify, export, decision, repair, cleanup, propose, abandon, *
-                    [commands.choices[name] for name in LIVE_COMMANDS], commands.choices["review-packets"]):
+                    [commands.choices[name] for name in LIVE_COMMANDS], commands.choices["review-packets"],
+                    commands.choices["validate-review-upload"]):
         command.add_argument("--receipt-directory", type=Path, help="directory of committed P-A4 receipts")
         command.add_argument("--repair-evidence-directory", type=Path, action="append", help="independently retained A4.1 evidence")
     for command in (verify, cleanup, propose):

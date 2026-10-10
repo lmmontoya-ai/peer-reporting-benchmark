@@ -459,20 +459,25 @@ class ProviderPause:
     def window_count(self, at: float) -> int:
         return sum(at - PROVIDER_WINDOW_SECONDS < event["paused_at"] <= at for event in self.events)
 
-    def record(self, attempt_id: str, lane_id: str) -> dict:
-        """Pause admission for a provider_unavailable or provider_stalled attempt; persist it, then return its
-        journal record."""
+    def prepare(self, attempt_id: str, lane_id: str) -> dict:
+        """Compute a pause before its timing and count are made durable."""
         self.refresh()
         if any(event["attempt_id"] == attempt_id for event in self.events):
             raise ValueError(f"{attempt_id} already paused admission; an attempt is consumed once")
         now = float(self.wall_clock())
         count = self.window_count(now) + 1
-        record = validate_pause_record({
+        return validate_pause_record({
             "attempt_id": attempt_id, "lane_id": lane_id, "paused_at": now,
             "resume_at": now + PROVIDER_PAUSE_SECONDS, "paused_at_utc": _utc(now),
             "resume_at_utc": _utc(now + PROVIDER_PAUSE_SECONDS), "pause_seconds": PROVIDER_PAUSE_SECONDS,
             "window_seconds": PROVIDER_WINDOW_SECONDS, "window_count": count, "limit": PROVIDER_UNAVAILABLE_LIMIT,
             "holds_admission": count >= PROVIDER_UNAVAILABLE_LIMIT})
+
+    def record(self, attempt_id: str, lane_id: str, *, prepared: dict | None = None) -> dict:
+        """Persist a new pause, using the journaled record when supplied."""
+        record = self.prepare(attempt_id, lane_id) if prepared is None else validate_pause_record(deepcopy(prepared))
+        if record["attempt_id"] != attempt_id or record["lane_id"] != lane_id:
+            raise ValueError("prepared provider pause names another attempt or lane")
         if self.persist is not None:
             self.persist(deepcopy(record))
         self.events.append(record)

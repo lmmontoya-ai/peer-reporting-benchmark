@@ -1287,6 +1287,37 @@ def study_provider_pauses(study_directory: Path, *, _check: bool = True,
                 pauses = [entry["data"] for entry in journal if entry["kind"] == "provider_pause_started"]
                 journaled = {pause["attempt_id"] for pause in pauses}
                 archived = [entry["data"] for entry in journal if entry["kind"] == "attempt_archived"]
+                checkpoints = {entry["attempt_id"]: entry for entry in archived}
+                for entry in journal:
+                    if entry["kind"] != "attempt_started":
+                        continue
+                    attempt = entry["data"]["attempt_id"]
+                    path = safe_child(root, lane["path"]) / "attempts" / attempt / "attempt.json"
+                    if not path.exists():
+                        continue
+                    payload = _plain(read_sealed(path))
+                    if (payload.get("attempt_id") != attempt or payload.get("lane_id") != lane["lane_id"]
+                            or payload.get("started_journal_seq") != entry["sequence"]
+                            or payload.get("plan_hash") != lane["plan_hash"]):
+                        raise EvidenceError("retained pause attempt differs from its journaled start")
+                    if attempt in checkpoints and content_hash(payload) != checkpoints[attempt]["summary"]["attempt_hash"]:
+                        raise EvidenceError("pause attempt differs from its journal checkpoint")
+                    pause = payload["orchestrator"].get("provider_pause")
+                    if pause is not None:
+                        pauses.append(pause)
+                for entry in journal:
+                    if entry["kind"] == "usage_settled" and "provider_pause" in entry["data"]:
+                        pauses.append(entry["data"]["provider_pause"])
+                for pause in pauses:
+                    record = records.get(pause["attempt_id"])
+                    expected = {key: value for key, value in pause.items() if key != "recovered"}
+                    if record is not None and record["pause"] != expected:
+                        raise EvidenceError(f"the provider pause of {pause['attempt_id']} is not recorded in the study as journaled")
+                if plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_P:
+                    evidenced = {pause["attempt_id"] for pause in pauses}
+                    if any(record["plan_hash"] == identity and record["pause"]["lane_id"] == lane["lane_id"]
+                           and attempt not in evidenced for attempt, record in records.items()):
+                        raise EvidenceError("v2 study pause lacks retained attempt or journaled timing and count evidence")
                 for entry in archived:
                     if (entry["summary"].get("classification") in PROVIDER_PAUSE_CLASSIFICATIONS
                             and entry["attempt_id"] not in journaled):
@@ -1326,12 +1357,13 @@ def record_study_pause(study_directory: Path, plan: dict, *, root_path: str, pau
                               plan_hash=plan["seal_hash"], phase=plan["phase"], root_path=root_path, pause=pause)
 
 
-def _lane_pause_evidence(records: list[dict]) -> tuple[dict[str, Any], dict[str, tuple[str, int]]]:
+def _lane_pause_evidence(records: list[dict]) -> tuple[dict[str, Any], dict[str, tuple[str, int, dict | None]]]:
     """A lane journal's archived classifications by attempt, and each ``usage_settled`` record that settled an attempt
-    with a provider pause classification, as that classification and the record's journal sequence."""
+    with a provider pause classification, as the classification, sequence and retained v2 pause."""
     archived = {record["data"].get("attempt_id"): record["data"]["summary"].get("classification")
                 for record in records if record["kind"] == "attempt_archived"}
-    settled = {record["data"].get("attempt_id"): (record["data"]["settlement_reason"], record["sequence"])
+    settled = {record["data"].get("attempt_id"): (record["data"]["settlement_reason"], record["sequence"],
+                                               record["data"].get("provider_pause"))
                for record in records if record["kind"] == "usage_settled"
                and record["data"].get("settlement_reason") in PROVIDER_PAUSE_CLASSIFICATIONS}
     return archived, settled
@@ -1349,9 +1381,10 @@ def reconcile_study_pauses(study_directory: Path, plan: dict, *, wall_clock: Cal
     its coordinator lock and before any admission, every behavioral root reads
     the claiming lane's journal for each start in the study's start ledger that
     has no pause record. Each unarchived start that its journal settled with a
-    pause classification gets its pause recorded now: the pause begins at this
-    reconciliation's ``wall_clock`` time and counts in the 60-minute window
-    ending then. The record names the claiming root's plan, registered path,
+    pause classification gets its pause recorded now. V2 uses the exact timing
+    and count retained in its settlement journal; a retained attempt supplies
+    the pause for an interrupted archive. Historical v1 settlement-only recovery
+    begins at reconciliation's ``wall_clock`` time. The record names the claiming root's plan, registered path,
     phase, and lane, as its own write would have, and ``recovery`` names the
     evidence and the root that recorded it. An archived pause-class attempt
     without its study record is refused, as verify refuses it. A claim that names
@@ -1383,8 +1416,22 @@ def reconcile_study_pauses(study_directory: Path, plan: dict, *, wall_clock: Cal
                 from .receipts import check_receipt
 
                 check_receipt(root, receipt_directory, study_directory=study_directory)
-            evidence[claim["plan_hash"]] = {lane: _lane_pause_evidence(records)
-                                            for lane, records in lane_journals(root, root_plan).items()}
+            evidence[claim["plan_hash"]] = {}
+            journals = lane_journals(root, root_plan)
+            for lane in root_plan["lanes"]:
+                archived, settled = _lane_pause_evidence(journals[lane["lane_id"]])
+                for identifier, (reason, sequence, retained) in list(settled.items()):
+                    path = safe_child(root, lane["path"]) / "attempts" / identifier / "attempt.json"
+                    if path.exists():
+                        payload = read_sealed(path)
+                        pause = payload["orchestrator"].get("provider_pause")
+                        if retained is not None and retained != pause:
+                            raise EvidenceError("retained attempt pause differs from its journaled settlement")
+                        retained = pause
+                    if root_plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_P and retained is None:
+                        raise EvidenceError("v2 pause settlement lacks journaled timing and count evidence")
+                    settled[identifier] = (reason, sequence, retained)
+                evidence[claim["plan_hash"]][lane["lane_id"]] = (archived, settled)
         if claim["lane_id"] not in evidence[claim["plan_hash"]]:
             raise EvidenceError(f"the study start claim of {attempt} names a lane its root lacks")
         archived, settled = evidence[claim["plan_hash"]][claim["lane_id"]]
@@ -1404,7 +1451,7 @@ def reconcile_study_pauses(study_directory: Path, plan: dict, *, wall_clock: Cal
 
     written = []
     pauses = ProviderPause(wall_clock=wall_clock, load=load)
-    for claim, (reason, sequence) in found:
+    for claim, (reason, sequence, retained_pause) in found:
         recovery = {"basis": "unarchived_attempt_settled_with_a_provider_pause_classification",
                     "settlement_reason": reason, "usage_settled_journal_seq": sequence,
                     "recorded_by_plan_hash": plan["seal_hash"],
@@ -1416,7 +1463,7 @@ def reconcile_study_pauses(study_directory: Path, plan: dict, *, wall_clock: Cal
                 phase=claim["phase"], root_path=claim["root_path"], pause=pause, recovery=recovery))
 
         pauses.persist = persist
-        pauses.record(claim["attempt_id"], claim["lane_id"])
+        pauses.record(claim["attempt_id"], claim["lane_id"], prepared=retained_pause)
     return written
 
 
