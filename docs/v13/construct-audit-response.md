@@ -207,8 +207,22 @@ resolution mapping without checking it against the reviewers' original uploads. 
 affects human-review scoring after the runs, not the runs or the pilot decision. Two
 minor operator issues were also reported.
 
+R6-fix9 computed human endpoints from the original uploads and fixed the two minor
+issues. Astra's ninth confirmation review
+([review-astra-r6-confirm9.md](review-astra-r6-confirm9.md)) found all three fixed and no
+new finding. It withheld only the operator-path rerun, which makes temporary receipt
+commits; the coordinator ran the unchanged check on `99ffb77` and it passed.
+
+Over the nine confirmation rounds the open findings went from six, to nine after the
+scope was written down, to four, one, one and none.
+
 ## Next
 
-R6-fix9 computes human endpoints from the original uploads and fixes the two minor
-issues. Astra then confirms against section 2.1. No model call runs before the user
-authorizes the v2 compatibility plan and the gate and pilot plan.
+The code has no open blocker or major finding. Before the first model call:
+
+1. The guest needs Git and a committed receipts repository, because the receipt check
+   reads a local Git commit. This was not exercised by the offline checks, which run on a
+   machine with Git.
+2. The user authorizes, in turn: the guest snapshot, the 6-call v2 compatibility plan by
+   hash, the push of receipts to the public repository, and the gate and pilot plan by
+   hash. The core plan needs its own authorization after the pilot decision record.
