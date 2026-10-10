@@ -209,7 +209,7 @@ def test_bundles_refuse_withheld_text_in_the_delivered_evidence(tmp_path):
         build_review_bundle(attempt, scope="everything")
 
 
-def test_review_packets_command_and_upload_validation_end_to_end(tmp_path, wp6_study, capsys):
+def test_review_packets_command_and_unregistered_upload_consistency(tmp_path, wp6_study, capsys):
     study, manifest, _ = wp6_study
     plan = build_review_plan(manifest)
     plan_path = tmp_path / "plan.json"
@@ -243,8 +243,11 @@ def test_review_packets_command_and_upload_validation_end_to_end(tmp_path, wp6_s
     upload_path = tmp_path / "upload.json"
     upload_path.write_text(json.dumps(upload(packet, records)), encoding="utf-8")
     assert main(["validate-review-upload", str(upload_path), "--packet", str(packet_path), "--controller",
-                 str(controller_path)]) == 0
-    checked = json.loads(capsys.readouterr().out)
+                 str(controller_path)]) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert "no registered archive study directory" in refused["error"]
+    checked = validate_review_upload(upload(packet, records), packet,
+                                     controller=read_sealed(controller_path), allow_replay=True)
     assert checked["bindings_verified"] is True and checked["final_human_output_count"] == 1
     assert len(checked["missing_final_output_ids"]) == 3
     other = output / "packets-again"
