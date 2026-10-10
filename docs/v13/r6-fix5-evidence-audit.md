@@ -122,6 +122,50 @@ separate API refusal checks using those exact altered exports passed: omitted
 study, supplied registered study, and explicit replay for each reproduction.
 No packet directory was written and primary attempt/journal bytes stayed equal.
 
+## R6-fix8 final offline validation
+
+The full suite ran on code/test commit `ec270c1` as four simultaneous
+`uv run --offline python -m pytest -q <files> -p no:cacheprovider` processes.
+Each group contains 19 files. All 76 test files were assigned exactly once,
+with no overlap or omissions. Each process used a separate system-temp
+`--basetemp` outside Git repositories; `PEER_V1_CONTROLLER_DIR` was unset.
+All four exited zero. Only this audit document changed after the run began.
+
+| Worker | Files | Collected | Result | Pytest duration |
+| --- | ---: | ---: | --- | ---: |
+| 1 | 19 | 668 | 668 passed | 2,290.00 seconds |
+| 2 | 19 | 1,816 | 1,815 passed, 1 xfailed | 1,739.72 seconds |
+| 3 | 19 | 794 | 793 passed, 1 skipped | 2,186.56 seconds |
+| 4 | 19 | 1,205 | 1,205 passed | 1,450.45 seconds |
+
+Total: **4,481 passed, 1 skipped, 1 expected xfail; 4,483 collected**.
+The supervisor measured **2,300.09 seconds** of wall time
+for the four-worker run. All six new cases and the added earlier-level native
+integration assertions passed. The skip is
+`test_score.py::test_p1_collection_regression`, whose private controller directory
+is unset. The existing strict Win32 xfail is
+`test_windows_ledger_storage.py::test_atomic_ledger_update_while_reader_is_open`.
+Neither condition was introduced here.
+
+The L0/S plan/root/export byte-identity guard, earlier fixture goldens and replay
+matrix, and frozen earlier scoring goldens passed. Both execution boundaries
+passed: `test_live_w09.py::test_no_execution_module_imports_a_post_hoc_module` and
+`test_pilot_decision.py::test_runtime_binding_does_not_load_post_hoc_code_or_read_exports`.
+The corrected population unit doubles and both boundary/fixture guards also
+passed in the 15-case focused run; the native packet/integration run passed
+all 5 cases. Six API refusals against Astra's exact altered exports passed,
+and its unchanged CLI reproductions refused missing `--study` as recorded above.
+
+The changed Python files pass Ruff. Before each commit, `git diff --check` and
+byte scans checked all 13 changed files for valid UTF-8, CR bytes, mojibake
+markers and newly added non-ASCII text. All checks passed. No provider/model
+calls, guest access, private-repository access, push or merge occurred.
+
+The exact file groups, tested commit, four launch commands, per-worker logs and
+combined results remain under
+`C:/Users/luism/AppData/Local/Temp/r6-fix8-validation/` in `groups.json`,
+`worker-1.log` through `worker-4.log`, and `results.json`.
+
 ## R6-fix7 final offline validation
 
 The full suite ran on final code/test commit `5a4329f` as four simultaneous
