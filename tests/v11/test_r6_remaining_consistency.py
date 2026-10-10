@@ -22,6 +22,7 @@ from swarm_auth_bench.peer_reporting_v11.review import (
     write_review_packets,
 )
 from swarm_auth_bench.peer_reporting_v11.review_plan import pressure_review_selection
+from swarm_auth_bench.peer_reporting_v11.review_population import registered_pressure_partitions
 from swarm_auth_bench.peer_reporting_v11.schemas import TOOL_SCHEMA_VERSION_P
 from swarm_auth_bench.peer_reporting_v11.score import score_trial
 
@@ -216,15 +217,31 @@ def submitted(packet):
     return {**upload(packet, records), "descriptive_codes": dict.fromkeys(packet["descriptive_codes"], "no")}
 
 
-def test_sibling_receipt_checked_before_population_filtering(tmp_path, pressure_roots, native_packet):
+@pytest.mark.parametrize("state", ["prepared", "completed", "completed_without_finalization"])
+def test_sibling_receipt_checked_before_population_filtering(tmp_path, pressure_roots, native_packet, state):
     study, receipts, rows, fixtures, prepare, run = pressure_roots
     root, export, controller = native_packet
     sibling, plan = prepare(1, "sibling-receipt", [root])
+    if state != "prepared":
+        raw = observer(fixtures[rows[1]["fixture_id"]], "hit")
+        actions = [("tool", action["tool"], action["arguments"]) for action in raw["actions"]]
+        actions.insert(-1, ("usage", 2000))
+        harness = Harness(tmp_path / "sibling-homes", lambda *args: actions + [("message", "Inventory completed.")])
+        assert asyncio.run(run(sibling, plan, harness, prior=[root]))["status"] == "complete"
     commit_receipt(sibling, receipts, study_directory=study)
+    before = primary_bytes(root), primary_bytes(sibling)
+    if state == "completed_without_finalization":
+        (study / live.STUDY_REGISTRY / live.FINALIZED_DIRECTORY / (plan["seal_hash"] + ".json")).unlink()
+    check_receipt(sibling, receipts, study_directory=study)
     (receipts / (plan["seal_hash"] + ".json")).unlink()
+    with pytest.raises(ValueError, match="receipt mismatch"):
+        registered_pressure_partitions(study, phase="calibration",
+            study_manifest_hash=live.read_study_manifest(study)["seal_hash"],
+            source_plan_hash=live.read_live_plan(root)["seal_hash"], receipt_directory=receipts)
     with pytest.raises(ValueError, match="receipt mismatch"):
         write_review_packets(export, read_sealed(export / "index.json")["pressure_review_selection"],
                               tmp_path / "again", receipt_directory=receipts)
+    assert before == (primary_bytes(root), primary_bytes(sibling))
 
 
 def test_controller_attempt_packet_and_hashes_compared_with_archive_cli(

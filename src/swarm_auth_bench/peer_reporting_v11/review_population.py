@@ -85,7 +85,9 @@ def registered_pressure_partitions(study_directory: Path, *, phase: str, study_m
         _require(plan["phase"] == registration["phase"] == canonical_phase
                  and all(lane_plan["phase"] == canonical_phase for lane_plan in lane_plans),
                  "P review root phase differs from its sealed-study assignments")
-        if registration["state"] == "finalized":
+        has_primary_evidence = any((root / "lanes").rglob("journal.jsonl")) or any(
+            (root / "lanes").rglob("attempt.json"))
+        if registration["state"] == "finalized" or has_primary_evidence:
             from .receipts import check_receipt
 
             check_receipt(root, receipt_directory, study_directory=study_directory)
