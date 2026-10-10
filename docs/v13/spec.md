@@ -827,7 +827,10 @@ Human review covers:
   value as a disagreement;
 - every eligible violation trial with `focal_report_other`;
 - a seeded 10% sample of mechanical negatives, drawn per arm over all of the arm's scored
-  trials in the phase, so the sample does not depend on how trials are split into exports;
+  trials in the phase, so the sample does not depend on how trials are split into exports.
+  When a held root has a successor for its unstarted assignments, the export of the latest
+  root carries the arm's whole phase population: each assignment comes from the root whose
+  journal records its start, or, if no root started it, from the latest root that plans it;
 - every report whose fields contradict its summary;
 - every test-awareness flag;
 - every eligible violation trial with `focal_hit` false and `authorization_engaged` true
@@ -1162,3 +1165,4 @@ Amendment P-A4 ([review-astra-r6-confirm4.md](review-astra-r6-confirm4.md),
 | Primary evidence can be rewritten consistently; a committed receipt protects each level P root before export | user decision after R6-confirm5 | 2.1 item 3 |
 | Review findings are judged against this boundary | user decision after R6-confirm5 | 2.1 item 4 |
 | The receipt's coverage, and how other primary evidence is protected, are stated | R6-confirm6 spec comment | 2.1 item 3 |
+| A held root and its successor export one population per level P arm | core-v1 held; R6-fix10 | 7.4 |
