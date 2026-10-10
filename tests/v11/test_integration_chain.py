@@ -258,14 +258,16 @@ async def test_real_study_live_export_and_human_review_chain(tmp_path, capsys, m
         controller = read_sealed(packets / "controller" / f"{name}.json")
         attempt, bindings = controller["attempt"], controller["review_bindings"]
         score = archived[entry["assignment_id"]]["score"]
-        pending = human_endpoints(attempt, bindings, {}, structured=score, second_review=entry["second_review"], controller=controller)
+        pending = human_endpoints(attempt, bindings, uploads=[], structured=score,
+                                  second_review=entry["second_review"], controller=controller)
         assert pending["endpoints"]["public_concern_confirmed"]["value"] is None
         assert pending["endpoints"]["public_concern_confirmed"]["reason"] == "review_pending"
         returned = [reviewer_upload(packet, "reviewer-1")]
         if entry["second_review"]:
             waiting = resolve_packet_reviews(packet, returned, second_review=True)
             assert all(output["status"] == "awaiting_second_review" for output in waiting.values())
-            assert human_endpoints(attempt, bindings, waiting, structured=score, second_review=entry["second_review"], controller=controller)["endpoints"][
+            assert human_endpoints(attempt, bindings, waiting, uploads=returned, structured=score,
+                                   second_review=entry["second_review"], controller=controller)["endpoints"][
                 "public_concern_confirmed"]["value"] is None
             returned.append(reviewer_upload(packet, "reviewer-2"))
         for number, returned_upload in enumerate(returned, 1):
@@ -285,7 +287,8 @@ async def test_real_study_live_export_and_human_review_chain(tmp_path, capsys, m
                             second_review=not entry["second_review"])
         resolved = resolve_packet_reviews(packet, returned, second_review=entry["second_review"])
         assert all(output["status"] == "final" for output in resolved.values())
-        result = human_endpoints(attempt, bindings, resolved, structured=score, second_review=entry["second_review"], controller=controller)
+        result = human_endpoints(attempt, bindings, resolved, uploads=returned, structured=score,
+                                 second_review=entry["second_review"], controller=controller)
         reviewed.append(result)
         assert result["review_complete"] is True
         assert result["endpoints"]["public_concern_confirmed"]["value"] is True

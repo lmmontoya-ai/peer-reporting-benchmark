@@ -279,7 +279,7 @@ def test_second_review_rule_recomputed_from_archive_selection(pressure_roots, na
     packet = controller["review_packet"]
     returned = submitted(packet)
     correct = resolve_packet_reviews(packet, [returned], second_review=True)
-    checked = human_endpoints(controller["attempt"], controller["review_bindings"], correct,
+    checked = human_endpoints(controller["attempt"], controller["review_bindings"], correct, uploads=[returned],
                               controller=controller, receipt_directory=receipts)
     assert checked["endpoints"]["final_answer_concern"]["value"] is None
     altered = resolve_packet_reviews(packet, [returned], second_review=False)
@@ -290,7 +290,119 @@ def test_second_review_rule_recomputed_from_archive_selection(pressure_roots, na
         controller = deepcopy(controller)
         controller["plan_row"]["second_review"] = False
     with pytest.raises(ValueError, match="(second-review rule differs|selection row differs|resolution differs)"):
-        human_endpoints(controller["attempt"], controller["review_bindings"], altered,
+        human_endpoints(controller["attempt"], controller["review_bindings"], altered, uploads=[returned],
                         controller=controller, receipt_directory=receipts, **kwargs)
+    assert primary_bytes(root) == before
+    check_receipt(root, receipts, study_directory=study)
+
+
+@pytest.mark.parametrize("change", ["resolution_only", "swapped_outputs", "initial_review", "partial_mapping"])
+def test_endpoint_resolution_mapping_matches_retained_uploads(
+        tmp_path, pressure_roots, native_packet, change):
+    study, receipts, *_ = pressure_roots
+    root, export, controller = native_packet
+    before = primary_bytes(root)
+    packet = controller["review_packet"]
+    paths = []
+    for reviewer in ("human-one", "human-two"):
+        records = {row["review_output_id"]: review(
+            reviewer=reviewer, concern=row["source_kind"] == "private_report",
+            addresses=row["source_kind"] == "private_report") for row in packet["outputs"]}
+        path = tmp_path / (reviewer + ".json")
+        atomic_json(path, {**upload(packet, records),
+                          "descriptive_codes": dict.fromkeys(packet["descriptive_codes"], "no")})
+        paths.append(path)
+    retained = {path: path.read_bytes() for path in paths}
+    uploads = [json.loads(path.read_bytes()) for path in paths]
+    resolutions = resolve_packet_reviews(packet, uploads, second_review=True)
+    final_id = next(row["review_output_id"] for row in packet["outputs"] if row["source_kind"] == "final_response")
+    report_id = next(row["review_output_id"] for row in packet["outputs"] if row["source_kind"] == "private_report")
+
+    def endpoints(resolved=None, **kwargs):
+        return human_endpoints(controller["attempt"], controller["review_bindings"], resolved,
+                               controller=controller, receipt_directory=receipts, **kwargs)
+
+    original = endpoints(uploads=uploads)
+    assert original == endpoints(resolutions, uploads=uploads)
+    assert original["endpoints"]["final_answer_concern"]["value"] is False
+    assert original["endpoints"]["public_concern_confirmed"]["value"] is False
+    altered = deepcopy(resolutions)
+    if change == "resolution_only":
+        with pytest.raises(ValueError, match="require retained original review uploads"):
+            endpoints(altered)
+    else:
+        if change == "swapped_outputs":
+            altered[final_id], altered[report_id] = altered[report_id], altered[final_id]
+        elif change == "initial_review":
+            altered[final_id] = deepcopy(altered[report_id])
+        else:
+            del altered[final_id]
+        with pytest.raises(ValueError, match="resolution differs from retained original uploads"):
+            endpoints(altered, uploads=uploads)
+    assert retained == {path: path.read_bytes() for path in paths}
+    assert primary_bytes(root) == before
+    check_receipt(root, receipts, study_directory=study)
+
+
+def test_endpoint_upload_packet_binding_checked(pressure_roots, native_packet):
+    study, receipts, *_ = pressure_roots
+    root, export, controller = native_packet
+    packet = controller["review_packet"]
+    original = submitted(packet)
+    altered = deepcopy(original)
+    altered["review_packet_hash"] = "another-packet"
+    with pytest.raises(ValueError, match="review_packet_hash mismatch"):
+        human_endpoints(controller["attempt"], controller["review_bindings"], uploads=[altered],
+                        controller=controller, receipt_directory=receipts)
+
+
+def test_endpoint_adjudications_match_retained_packet_and_resolution(
+        tmp_path, pressure_roots, native_packet):
+    study, receipts, *_ = pressure_roots
+    root, export, controller = native_packet
+    before = primary_bytes(root)
+    packet = controller["review_packet"]
+    final_id = next(row["review_output_id"] for row in packet["outputs"] if row["source_kind"] == "final_response")
+    uploads = []
+    for reviewer, concern in (("human-one", False), ("human-two", True)):
+        records = {row["review_output_id"]: review(
+            reviewer=reviewer, concern=concern if row["review_output_id"] == final_id else False)
+            for row in packet["outputs"]}
+        uploads.append({**upload(packet, records),
+                        "descriptive_codes": dict.fromkeys(packet["descriptive_codes"], "no")})
+    adjudicator = review(reviewer="human-three", concern=False)
+    adjudication_path = tmp_path / "adjudication.json"
+    atomic_json(adjudication_path, {**upload(packet, {final_id: adjudicator}),
+                                   "descriptive_codes": dict.fromkeys(packet["descriptive_codes"], "no")})
+    retained = adjudication_path.read_bytes()
+    adjudication = json.loads(retained)
+
+    def endpoints(resolved=None, *, adjudication_uploads=None):
+        return human_endpoints(controller["attempt"], controller["review_bindings"], resolved,
+            uploads=uploads, adjudication_uploads=adjudication_uploads,
+            controller=controller, receipt_directory=receipts)
+
+    assert endpoints()["endpoints"]["final_answer_concern"]["value"] is None
+    expected = resolve_packet_reviews(packet, uploads, second_review=True, adjudications={final_id: adjudicator})
+    checked = endpoints(adjudication_uploads=[adjudication])
+    assert checked == endpoints(expected, adjudication_uploads=[adjudication])
+    assert checked["endpoints"]["final_answer_concern"]["value"] is False
+    assert next(row for row in checked["outputs"] if row["review_output_id"] == final_id)["resolution"] == "adjudicated"
+    for change, message in (("packet_hash", "review_packet_hash mismatch"),
+                            ("output_id", "unknown review output IDs")):
+        altered = deepcopy(adjudication)
+        if change == "packet_hash":
+            altered["review_packet_hash"] = "another-packet"
+        else:
+            altered["labels_by_output_id"] = {"another-output": adjudicator}
+        with pytest.raises(ValueError, match=message):
+            endpoints(adjudication_uploads=[altered])
+    with pytest.raises(ValueError, match="multiple adjudications"):
+        endpoints(adjudication_uploads=[adjudication, adjudication])
+    altered = deepcopy(expected)
+    altered[final_id]["adjudication"]["labels"]["raises_concern"] = True
+    with pytest.raises(ValueError, match="resolution differs from retained original uploads"):
+        endpoints(altered, adjudication_uploads=[adjudication])
+    assert adjudication_path.read_bytes() == retained
     assert primary_bytes(root) == before
     check_receipt(root, receipts, study_directory=study)
