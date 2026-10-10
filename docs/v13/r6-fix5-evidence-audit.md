@@ -1,4 +1,4 @@
-# Evidence gate audit through R6-fix6 (P-A4)
+# Evidence gate audit through R6-fix7 (P-A4)
 
 [Specification section 2.1](spec.md#21-evidence-and-trust-boundary-amendment-p-a4)
 is normative. The sealed study, lane journals and archived attempts, approval
@@ -23,21 +23,21 @@ plan or read from an environment variable.
 | `verify_live_root`, `run_live_phase` | Plans, indexes, budgets, start claims, registrations, supersession, consumed ledger, retained review plan | Study assignments/fixtures/instructions/caps; journal hash chains, attempt checkpoints, exact usage history and user authorization. Later-root verification and run recheck receipts of prior/prerequisite archives. |
 | `compatibility_evidence`, `check_phase_gates` | Qualification declarations and plan tool/catalog/caps copies | Actual verified archived qualification results and current protocol tool/catalog/caps bindings; a v2 compatibility root's committed receipt before reading its archives. |
 | `smoke_evidence` | Smoke population copy, registration, amendments | Population read directly from the sealed study at each call; all corresponding starts and archived outcomes, cleanup evidence and user-approved failed-attempt amendments. The collection plan's population copy must equal the study's. |
-| Study pause loading and admission (`study_provider_pauses`, `check_study_pauses`, `reconcile_study_pauses`, admission reload/window counting) | Study pause records, claiming/root identifiers, timestamps and window counts | Owning root's hash-chained journal, archive hash and retained pause in the attempt; the same `check_study_pauses` comparison used in owning-root verification, plus study starts and registered ownership. A genuine unarchived settlement may still be recovered under the existing crash rule. |
+| Study pause loading and admission (`study_provider_pauses`, `check_study_pauses`, `reconcile_study_pauses`, admission reload/window counting) | Study pause records, claiming/root identifiers, timestamps and window counts | Owning root's hash-chained journal, archive hash and retained pause in the attempt; the same `check_study_pauses` comparison used in owning-root verification, plus study starts and registered ownership. Retained attempts are checked even without an archive event. V2 settlements retain the exact pause in the journal for recovery without an attempt. |
 | `consumed_attempts_in_root`, `prior_root_ledger`, `verify_consumed_ledger`; preparation's prior-root ingestion | Lane indexes, consumed ledger, registrations, supersession and repair records | Canonical assignments; journaled starts and index checkpoints; study start claims and owning paths; committed corruption evidence and exact repair declarations. P/v2 prior archives require receipts before their journals are opened. |
 | `abandon_root` | Registration and abandonment data | Registered plan/path and absence of journaled starts; P receipts checked before journal inspection, with an explicit directory accepted by API and CLI. Pending roots without a written plan retain the existing journal-inspection crash check. |
 | `record_amendment`, `amended_attempts` | Amendment identity and excluded-attempt declarations | User approval text and study identity; verified failed smoke attempts, transport/usage results and cleanup evidence. Valid and unstarted trials cannot be amended into failed exclusions. |
 | `reconcile_cleanup` | Cleanup and start declarations | Current P/v2 root receipt before archive verification; verified root/start evidence and the actual environment-check result. Tests inject that check; this package's validation does not contact a guest. |
 | `repair_ledger`, `verify_root_ledger_repairs` and their consumers | Binding, repair records, completion and journal declarations | Explicitly supplied independently retained evidence locations; binding rebuilt with the existing builder against its named local Git commit; unique single-bit reconstruction, identity marker and exact journal prefix. The repair checks its current P root's receipt before reading its journal. All consumers recheck the binding commit, including repair resumption and current/prior-root verification. |
 | Resource proposal and caps freezing | Root plans, registrations, repair/usage summaries and proposed caps | Verified actual archived usage/wall measurements and journal evidence. P/v2 input archives require receipts. Freezing uses the user's approval of the exact proposal. |
-| `inspect_live_root` within export/re-derivation | Lane indexes and attempt summaries | Journaled archive presence and retained archived attempts. An index that hides a journaled archive refuses outside the per-row quarantine handler. A start without an archive retains the existing interrupted/recovery behavior. |
+| `inspect_live_root` within export/re-derivation | Lane indexes and attempt summaries | Journaled archive presence and retained archived attempts. An index that hides a journaled archive refuses outside the per-row quarantine handler. A start without an archive retains the existing interrupted/recovery behavior. This lane-index check also refuses inconsistent earlier-level indexes; earlier levels do not keep the old handling for this mismatch. |
 | `export_live_review` | Plans, registrations, consumed ledger, indexes, amendments, repair records and declarations | Canonical study binding; study starts; journal and attempt evidence; current repairs rebuilt against their committed incident evidence; each P root's committed receipt before archive access. |
-| `registered_pressure_partitions`, `pressure_export_partitions` | Registrations, root/lane plans and exported population | Every registration's actual root plan is checked before phase filtering; entries equal sealed-study assignments and fixture-only historical labels. Excluded/unscored assignments remain in the planned population. |
+| `registered_pressure_partitions`, `pressure_export_partitions` | Registrations, root/lane plans and exported population | Every root's entries are checked against sealed-study assignments before phase filtering; the canonical split supplies the phase, which both plan and registration must equal. P siblings with retained journal/attempt evidence require committed receipts independently of registration state; finalized P plans also require receipts. Excluded/unscored assignments remain in the planned population. |
 | P packet production, `build_pilot_decision`, `validate_core_decision` | Export population, rows, attempts, scores, exclusions, repair declarations, selection and decision | Shared verifier checks the source receipt, current repairs and declarations, reopens the source archive, rederives every row/attempt/score, and recomputes selection before filtering. Pilot mechanical counts and selection are recomputed; user flag resolutions and ceiling choices remain primary inputs. |
 | Earlier-level review-plan authoring/verification and packet production | Review plan and export binding | Full deterministic plan recomputation from the study and protocol seed; exact retained study/authorized plan hash. Earlier-level archives require no P-A4 receipt. |
 | Core decision execution binding | Retained decision and eligible-lane declarations | Exact authorized plan's offline-recomputed decision; canonical assignment arms and lanes. This execution check reads no score exports and imports no post-hoc modules. |
-| Human upload validation | Packet and private bindings | Existing packet builder reconstructs evidence-bearing content from the primary attempt with retained masking IDs: output text/payloads, context, notices/reactions, instructions, delivered and retrievable records, and record checks. Consistently changed packet/controller hashes do not authorize changed content. |
-| Human endpoints | Resolution and any supplied structured score | Existing resolver recomputes resolution from submitted initial reviews, adjudication, authorization truth and the explicitly bound second-review rule; complete resolution comparison. Supplied structured scores are checked by rescoring the primary attempt. |
+| Human upload validation | Controller attempt, selection row, packet and private bindings | Shared `verified_review_context` resolves the export to its registered archive and checks its receipt, then checks the controller copy and recomputed selection. The packet builder reconstructs evidence-bearing content from that verified attempt with retained masking IDs: output text/payloads, context, notices/reactions, instructions, delivered and retrievable records, and record checks. Consistently changed packet/controller hashes do not authorize changed content. |
+| Human endpoints | Resolution and any supplied structured score | Existing resolver recomputes resolution from submitted initial reviews, adjudication, authorization truth and the second-review rule from the verified, recomputed selection; complete resolution comparison. Live endpoints require the same verified context as uploads. Supplied structured scores are checked by rescoring the primary attempt. |
 | Receipt writing and checking | Receipt | Deterministic live-file hashes; exact on-disk bytes and the matching committed Git blob at HEAD. Changed, added or missing attempt/journal files refuse. |
 
 Historical lane omission fallback is limited to `compound_type`; non-S/P
@@ -58,6 +58,87 @@ pilot/core decision. The gates that use their outputs recompute them.
 Earlier-level serialization and the execution/post-hoc import boundary are
 unchanged. Publication of a receipt commit remains outside these offline checks,
 as section 2.1 item 3 states.
+
+## R6-fix7 change and test map
+
+Implementation and regression tests are committed as `406cfbd`; `0bf062b`
+updates the authored-replay CLI fixture to assert the missing-archive refusal
+and to use the explicit replay API for its positive case. `5a4329f` binds
+sibling receipt scope to retained primary journal/attempt evidence as well as
+finalization, so removing a derived finalization record cannot suppress the
+receipt check for a completed archive.
+
+| Finding | Code change | Tests in `test_r6_remaining_consistency.py` |
+| --- | --- | --- |
+| R1: interrupted pause records | `live.study_provider_pauses` checks retained `attempt.json` against its journaled start even without `attempt_archived`, then compares every pause copy with that evidence. V2 `usage_settled` retains the exact pause for settlement-only recovery. | `test_interrupted_pause_primary_evidence_at_successor_admission`: retained-attempt and settlement-only states, altered timestamps and counts, legitimate recovery, successor admission and unchanged receipt-covered evidence. |
+| R2: sibling phase | `review_population.registered_pressure_partitions` checks all lane entries against the study before filtering, derives the phase from their canonical split, checks both phase copies, and checks applicable sibling receipts whenever primary journal/attempt evidence exists or the plan is finalized. | `test_sibling_matching_phase_copies_refuse`: matching root-plan and registration/finalization changes refuse at export, packets and pilot; `test_sibling_receipt_checked_before_population_filtering` refuses a missing receipt for prepared and completed siblings, including a completed sibling with its derived finalization record removed; primary attempt/journal bytes remain unchanged. |
+| R3: controller attempt copy | `review.verified_review_context` reuses `verify_pressure_export_evidence`, compares the controller attempt with the verified registered archive, then checks bindings and rebuilds the packet. Upload CLI propagates receipt and repair evidence. | `test_controller_attempt_packet_and_hashes_compared_with_archive_cli`: consistently rebuilt controller, packet and hashes refuse in an unmodified CLI process; original inputs pass. `test_review_endpoints.py::test_retained_blinding_warning_preserves_primary_packet_validation` covers a legitimate model-name warning. |
+| R4: second-review rule | Uploads and endpoints share `verified_review_context`. The selection row and rule are recomputed; any supplied rule or resolution must agree. | `test_second_review_rule_recomputed_from_archive_selection`: changed argument, controller selection row and recomputed resolution refuse with unchanged archive and submitted review. |
+
+The original reviewer scripts were copied unchanged into system temp and run
+against a separate system-temp `1497625` snapshot. They reproduced all four
+findings offline: a start 600 simulated seconds early with an unchanged receipt,
+a sibling hidden by matching phase copies, an altered controller accepted with
+`bindings_verified=true`, and a required second review bypassed by a supplied
+rule. The scripts and the original evidence were not modified.
+
+V2 provider-pause settlements add one `provider_pause` object to the existing
+`usage_settled` journal event, before any study-pause write or archive write.
+It records the exact timing, window count and admission rule subsequently used
+by the attempt and study record. Settlement-only recovery copies that journal
+evidence rather than creating a new time or count. No new derived file is added.
+V1 journal serialization, all earlier plans, prepared roots and exports keep
+their bytes. Historical v1 settlement-only recovery has no retained timing/count
+evidence to check against and retains its existing recovery path; this journal addition is scoped
+to tool set v2 as requested.
+
+Earlier-level live packet consumers use the same registered-export verifier
+when given their study directory. The private controller retains that source
+locator; earlier exports are unchanged. Authored offline replay examples have
+no registered archive. Their unit callers explicitly opt into replay validation
+and endpoints; the live upload CLI does not offer that option, and live endpoint
+calls without a registered controller refuse.
+`test_review_packets.py::test_review_packets_command_and_unregistered_upload_consistency`
+checks that the live CLI reports the absent archive and that explicitly opted-in
+authored replay validation still succeeds. The native earlier-level integration
+chain checks registered-archive validation and endpoint rule consistency.
+
+## R6-fix7 final offline validation
+
+The full suite ran on final code/test commit `5a4329f` as four simultaneous
+`uv run --offline python -m pytest -q <files> -p no:cacheprovider` processes.
+All 75 test files were assigned exactly once, with no overlap or omissions.
+The groups contain 18, 18, 21 and 18 files. Each process used its own
+system-temp `--basetemp` outside Git repositories; `PEER_V1_CONTROLLER_DIR`
+was unset. All four exited zero. Only this audit document changed after
+the run began.
+
+| Worker | Files | Collected | Result | Pytest duration |
+| --- | ---: | ---: | --- | ---: |
+| 1 | 18 | 774 | 773 passed, 1 skipped | 1,968.80 seconds (32:48.80) |
+| 2 | 18 | 817 | 816 passed, 1 xfailed | 1,780.40 seconds (29:40.40) |
+| 3 | 21 | 1,427 | 1,427 passed | 1,929.63 seconds (32:09.63) |
+| 4 | 18 | 1,459 | 1,459 passed | 1,850.19 seconds (30:50.19) |
+
+Total: **4,475 passed, 1 skipped, 1 expected xfail; 4,477 collected**.
+Four-worker wall time was **1,972.36 seconds (32:52.36)**. All 17 new
+regression cases passed. The skip is
+`test_score.py::test_p1_collection_regression`, whose private controller
+directory is unset. The existing strict Win32 xfail is
+`test_windows_ledger_storage.py::test_atomic_ledger_update_while_reader_is_open`.
+It covers Windows readers denying `os.replace`; it was not introduced here.
+
+The L0/S plan/root/export byte-identity guard and all three earlier-fixture
+golden checks passed. Both execution boundaries passed:
+`test_live_w09.py::test_no_execution_module_imports_a_post_hoc_module` and
+`test_pilot_decision.py::test_runtime_binding_does_not_load_post_hoc_code_or_read_exports`.
+The changed Python files pass Ruff. `git diff --check 1497625` and byte scans
+found no CR bytes, mojibake or non-ASCII text in the 14 changed files.
+No provider/model calls, guest access, push or merge occurred.
+
+The exact file groups, per-worker logs and JUnit XML remain under
+`C:/Users/luism/AppData/Local/Temp/r6-fix7-verified-suite-bek6iw17/`.
+The manifest records the tested commit and all four process launchers.
 
 ## R6-fix6 change and test map
 
