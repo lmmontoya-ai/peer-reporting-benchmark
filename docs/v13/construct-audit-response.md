@@ -194,8 +194,14 @@ validation that rebuilt a packet from the controller's attempt copy instead of t
 archive, and a second-review rule taken from the caller instead of the review selection.
 Astra's wording comment on the receipt's coverage is applied in section 2.1 item 3.
 
+R6-fix7 fixed the four. Astra's seventh confirmation review
+([review-astra-r6-confirm7.md](review-astra-r6-confirm7.md)) found all four fixed and one
+new finding: review packets were checked against the registered archive only when the
+study directory was supplied, so an edited export could still produce reviewer packets.
+
 ## Next
 
-R6-fix7 fixes the four remaining findings. Astra then confirms against section 2.1. No
-model call runs before the user authorizes the v2 compatibility plan and the gate and
-pilot plan.
+R6-fix8 makes the registered-archive check mandatory for review packets and decides the
+review route from the verified study. Astra then confirms against section 2.1. No model
+call runs before the user authorizes the v2 compatibility plan and the gate and pilot
+plan.
