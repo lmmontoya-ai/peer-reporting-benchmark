@@ -11,8 +11,8 @@ revision 6 gets built and checked before any model call.
   - code reviews go to GPT-6-Astra at xhigh.
 - No delegated agent makes a model or provider call, touches the guest VM, pushes, or reads
   the private `swarm-auth-bench` repository.
-- Each package works in its own worktree under
-  `D:\research\projects\peer-reporting-benchmark-wt\` and commits on its branch. The
+- Each package works in its own worktree beside the main checkout and commits on its
+  branch. The
   coordinator merges each branch into `v11/integration` and removes the worktree.
 - Files are written with LF line endings. The repository stores bytes as-is, and the live
   layer hashes file bytes.

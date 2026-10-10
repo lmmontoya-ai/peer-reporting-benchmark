@@ -162,9 +162,8 @@ markers and newly added non-ASCII text. All checks passed. No provider/model
 calls, guest access, private-repository access, push or merge occurred.
 
 The exact file groups, tested commit, four launch commands, per-worker logs and
-combined results remain under
-`C:/Users/luism/AppData/Local/Temp/r6-fix8-validation/` in `groups.json`,
-`worker-1.log` through `worker-4.log`, and `results.json`.
+combined results were kept in a local temporary directory (`groups.json`,
+`worker-1.log` through `worker-4.log`, and `results.json`), not in the repository.
 
 ## R6-fix7 final offline validation
 
@@ -199,8 +198,8 @@ The changed Python files pass Ruff. `git diff --check 1497625` and byte scans
 found no CR bytes, mojibake or non-ASCII text in the 14 changed files.
 No provider/model calls, guest access, push or merge occurred.
 
-The exact file groups, per-worker logs and JUnit XML remain under
-`C:/Users/luism/AppData/Local/Temp/r6-fix7-verified-suite-bek6iw17/`.
+The exact file groups, per-worker logs and JUnit XML were kept in a local temporary
+directory, not in the repository.
 The manifest records the tested commit and all four process launchers.
 
 ## R6-fix6 change and test map
