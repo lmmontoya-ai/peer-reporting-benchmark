@@ -213,8 +213,8 @@ issues. Astra's ninth confirmation review
 new finding. It withheld only the operator-path rerun, which makes temporary receipt
 commits; the coordinator ran the unchanged check on `99ffb77` and it passed.
 
-Over the nine confirmation rounds the open findings went from six, to nine after the
-scope was written down, to four, one, one and none.
+The major findings per round were two in round 4 and nine in round 5. Section 2.1 then
+set the scope, and the next rounds found four, one, one and none.
 
 ## Next
 
