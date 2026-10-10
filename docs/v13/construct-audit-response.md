@@ -199,9 +199,16 @@ R6-fix7 fixed the four. Astra's seventh confirmation review
 new finding: review packets were checked against the registered archive only when the
 study directory was supplied, so an edited export could still produce reviewer packets.
 
+R6-fix8 made the registered-archive check mandatory for review packets. Astra's eighth
+confirmation review ([review-astra-r6-confirm8.md](review-astra-r6-confirm8.md)) found it
+fixed, and ran the whole operator path on fake transport, from the study to the 600-trial
+core build, without a problem. One new finding remains: human endpoints accepted a
+resolution mapping without checking it against the reviewers' original uploads. It
+affects human-review scoring after the runs, not the runs or the pilot decision. Two
+minor operator issues were also reported.
+
 ## Next
 
-R6-fix8 makes the registered-archive check mandatory for review packets and decides the
-review route from the verified study. Astra then confirms against section 2.1. No model
-call runs before the user authorizes the v2 compatibility plan and the gate and pilot
-plan.
+R6-fix9 computes human endpoints from the original uploads and fixes the two minor
+issues. Astra then confirms against section 2.1. No model call runs before the user
+authorizes the v2 compatibility plan and the gate and pilot plan.
