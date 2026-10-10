@@ -1,5 +1,6 @@
 """Every exported row is checked before sampling or pilot decisions can filter it."""
 
+import json
 import shutil
 from copy import deepcopy
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, seal
+from swarm_auth_bench.peer_reporting_v11.cli import main
 from swarm_auth_bench.peer_reporting_v11.pilot_decision import (
     build_pilot_decision,
     export_reference,
@@ -131,7 +133,8 @@ def test_consumers_refuse_resealed_derived_evidence(tmp_path, monkeypatch, core_
     assert not (tmp_path / "packets").exists()
 
 
-def test_all_unrun_pressure_rows_keep_the_registered_source_and_empty_selection(tmp_path, wp6_study, wp6_inputs):
+def test_all_unrun_pressure_rows_keep_the_registered_source_and_empty_cli_selection(
+        tmp_path, wp6_study, wp6_inputs, capsys):
     from swarm_auth_bench.peer_reporting_v11 import live
     from swarm_auth_bench.peer_reporting_v11.live_review import export_live_review
     from swarm_auth_bench.peer_reporting_v11.review import verify_pressure_export_evidence
@@ -174,3 +177,19 @@ def test_all_unrun_pressure_rows_keep_the_registered_source_and_empty_selection(
     live.prepare_live_root(study / "roots" / "earlier", earlier_plan, study_directory=study, prior_roots=[root], receipt_directory=receipts)
     assert verify_pressure_export_evidence(export, index, receipt_directory=receipts) == []
     assert write_review_packets(export, pressure_review_selection([]), tmp_path / "packets", study_directory=study, receipt_directory=receipts)["packets"] == 0
+
+    cli_packets = tmp_path / "cli-packets"
+    arguments = ["review-packets", str(export), "--study", str(study),
+                 "--receipt-directory", str(receipts), "--output", str(cli_packets)]
+    assert main(arguments) == 0
+    assert json.loads(capsys.readouterr().out)["packets"] == 0
+    assert list((cli_packets / "reviewer").iterdir()) == []
+    assert list((cli_packets / "controller").iterdir()) == []
+    assert write_review_packets(export, None, tmp_path / "default-packets", study_directory=study,
+                                receipt_directory=receipts)["packets"] == 0
+    (receipts / (live.read_live_plan(root)["seal_hash"] + ".json")).unlink()
+    refused = tmp_path / "missing-receipt-packets"
+    arguments[-1] = str(refused)
+    assert main(arguments) == 2
+    assert "receipt mismatch" in json.loads(capsys.readouterr().out)["error"]
+    assert not refused.exists()

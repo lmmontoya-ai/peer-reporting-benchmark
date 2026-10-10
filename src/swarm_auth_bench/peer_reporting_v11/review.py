@@ -675,19 +675,25 @@ def _endpoint(entries: list[dict], kinds: Iterable[str], positive: Callable[[dic
             "unresolved_output_ids": unresolved if applicable and in_scope else []}
 
 
-def human_endpoints(attempt: dict, bindings: dict, resolved: Mapping[str, dict], *, structured: dict | None = None,
-                    allow_replay: bool = False, second_review: bool | None = None, controller: dict | None = None,
+def human_endpoints(attempt: dict, bindings: dict, resolved: Mapping[str, dict] | None = None, *,
+                    uploads: list[dict] | None = None, adjudication_uploads: list[dict] | None = None,
+                    structured: dict | None = None, allow_replay: bool = False,
+                    second_review: bool | None = None, controller: dict | None = None,
                     receipt_directory: Path | None = None,
                     repair_evidence_directory: Path | None = None) -> dict[str, Any]:
     """Combine final human labels with the attempt's truth into the human-reviewed endpoints.
 
-    ``resolved`` maps review output IDs to ``rubric.resolve_output`` results (see
-    ``resolve_packet_reviews``). A final label whose claim support conflicts with
-    the record-derived authorization stays unresolved until adjudicated. The
-    structured score supplies eligibility and close status and is reported beside
-    the human values, never replaced by them.
+    Live calls require retained original ``uploads`` (an empty list means pending)
+    and a registered ``controller``. ``adjudication_uploads`` use the same packet-bound
+    format as review uploads. Resolutions are recomputed from these primary records
+    using the verified selection's second-review rule. Any supplied ``resolved``
+    mapping must equal the complete recomputed mapping. Explicit authored offline
+    replay may still consume a ``resolved`` mapping from ``resolve_packet_reviews``.
+    A claim support conflict stays unresolved until adjudicated. The structured
+    score supplies eligibility and close status beside the human values.
     """
-    if controller is not None or not allow_replay:
+    live_review = controller is not None or not allow_replay
+    if live_review:
         _require(controller is not None, "live human endpoints require a registered review controller")
         context = verified_review_context(controller["review_packet"], controller,
             receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
@@ -697,9 +703,25 @@ def human_endpoints(attempt: dict, bindings: dict, resolved: Mapping[str, dict],
         _require(second_review is None or second_review is context["second_review"],
                  "second-review rule differs from the verified selection")
         attempt, bindings, second_review = context["attempt"], context["bindings"], context["second_review"]
+        _require(uploads is not None, "live human endpoints require retained original review uploads")
+        packet = controller["review_packet"]
+        adjudications = {}
+        for upload in adjudication_uploads or []:
+            # The verified context above binds this packet to the primary archive.
+            validate_review_upload(upload, packet)
+            records = upload["labels_by_output_id"]
+            _require(not set(records) & set(adjudications), "multiple adjudications name the same review output ID")
+            adjudications.update(records)
+        recomputed = resolve_packet_reviews(packet, uploads, second_review=second_review, adjudications=adjudications)
+        _require(resolved is None or canonical_json(resolved) == canonical_json(recomputed),
+                 "review resolution differs from retained original uploads and adjudications")
+        resolved = recomputed
     else:
         _require(attempt.get("execution_kind") == "authored_offline_replay",
                  "replay endpoints require an authored offline attempt")
+        _require(uploads is None and adjudication_uploads is None,
+                 "replay endpoints require an explicitly resolved mapping")
+        resolved = resolved if resolved is not None else {}
     bound = check_bindings(bindings, attempt)
     _require(set(resolved) <= set(bound), "resolved labels name outputs that are not bound for review")
     _require(not resolved or type(second_review) is bool, "resolved labels require the bound second-review rule")
@@ -718,7 +740,7 @@ def human_endpoints(attempt: dict, bindings: dict, resolved: Mapping[str, dict],
     entries = []
     for identifier, entry in bound.items():
         result = resolved.get(identifier) or {"status": "unreviewed", "resolution": None, "labels": None}
-        if identifier in resolved:
+        if not live_review and identifier in resolved:
             from .rubric import resolve_output
 
             reviews = result.get("initial_reviews", [])
@@ -1023,7 +1045,7 @@ def verify_pressure_packet_selection(export_directory: Path, index: dict, select
     return {row["assignment_id"]: row for row in selection["rows"]}
 
 
-def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
+def write_review_packets(export_directory: Path, plan: dict | None, output: Path, *,
                          load_template: Callable[[str], dict] | None = None,
                          study_directory: Path | None = None,
                          receipt_directory: Path | None = None,
@@ -1039,7 +1061,8 @@ def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
     Live exports require their registered study and full archive verification before
     routing or writing. Unregistered authored exports require explicit ``replay=True``;
     every retained attempt must be authored offline. The verified study determines
-    whether the plan must be an ordinary plan or a pressure selection.
+    whether the plan must be an ordinary plan or a pressure selection. With no
+    supplied plan, a P selection is recomputed after archive verification.
     """
     from .incidents import load_template as default_loader
 
@@ -1077,6 +1100,8 @@ def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
     pressure = any(row["level"] == "P" and row["assignment_id"] in identifiers
                    for row in manifest["assignments"])
     if pressure:
+        expected = pressure_review_selection(_pressure_export_scores(index, verified))
+        plan = expected if plan is None else plan
         _require(plan.get("kind") == "peer_reporting_v11_pressure_review_selection",
                  "level P export requires its pressure review selection")
         if not replay:
@@ -1086,10 +1111,10 @@ def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
                      "P export study directory differs from its registered study directory")
             check_pressure_arm_roots(pressure_export_partitions(index, receipt_directory=receipt_directory))
         check_seal(plan)
-        expected = pressure_review_selection(_pressure_export_scores(index, verified))
         _require(plan == expected, "P selection differs from sealed export scores")
         rows = {row["assignment_id"]: row for row in plan["rows"]}
     else:
+        _require(plan is not None, "review-packets requires --plan for earlier levels")
         _require(plan.get("kind") != "peer_reporting_v11_pressure_review_selection",
                  "earlier-level export requires its ordinary review plan")
         rows = None

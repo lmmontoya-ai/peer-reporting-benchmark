@@ -339,10 +339,11 @@ Where they are known:
 
 ```
 python -m swarm_auth_bench.peer_reporting_v11 review-plan STUDY            # writes STUDY/review-plan.json
-python -m swarm_auth_bench.peer_reporting_v11 export-review ROOT --output EXPORT --study STUDY
-python -m swarm_auth_bench.peer_reporting_v11 review-packets EXPORT --plan STUDY/review-plan.json --output PACKETS
+python -m swarm_auth_bench.peer_reporting_v11 export-review ROOT --output EXPORT --study STUDY --receipt-directory RECEIPTS
+python -m swarm_auth_bench.peer_reporting_v11 review-packets EXPORT --study STUDY --plan STUDY/review-plan.json \
+    --output PACKETS --receipt-directory RECEIPTS
 python -m swarm_auth_bench.peer_reporting_v11 validate-review-upload UPLOAD --packet PACKETS/reviewer/P.json \
-    [--controller PACKETS/controller/P.json]
+    --controller PACKETS/controller/P.json --receipt-directory RECEIPTS
 ```
 
 `review-packets` writes `reviewer/` (JSON packets and HTML views; the only files a
@@ -350,8 +351,13 @@ reviewer may see), `controller/` (bindings, the attempt and the packet; research
 and `index.json` (assignment to packet, scope and second review; researcher-only). Each
 run draws new random IDs, so keep the controller files from the run whose packets went to
 the reviewers. A returned upload is `{"review_packet_hash", "labels_by_output_id"}` from
-one reviewer. In Python, `review.resolve_packet_reviews` combines the uploads and
-adjudications of one packet, `review.human_endpoints` turns them into the endpoints, and
+one reviewer. Retain uploads and adjudications as submitted. In Python,
+`review.human_endpoints` takes the original `uploads`, packet-bound
+`adjudication_uploads` in the same upload format, and the registered `controller`.
+It validates the packet against the archive and recomputes resolutions using the
+verified selection's second-review rule. An optional `resolved` mapping must equal
+that complete recomputation. An empty upload list leaves review pending.
+`review.resolve_packet_reviews` remains available for explicit offline replay, and
 `review.summarize_human` builds the cells.
 
 ## 7 Before starting

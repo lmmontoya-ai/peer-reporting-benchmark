@@ -118,9 +118,7 @@ def _review(args: argparse.Namespace) -> dict:
     if args.command == "review-packets":
         if args.study is None:
             raise ValueError("review-packets requires --study for registered archive verification")
-        plan = read_sealed(args.plan) if args.plan else read_sealed(args.export / "index.json").get("pressure_review_selection")
-        if plan is None:
-            raise ValueError("review-packets requires --plan for earlier levels")
+        plan = read_sealed(args.plan) if args.plan else None
         return write_review_packets(args.export, plan, args.output,
             study_directory=args.study,
             receipt_directory=args.receipt_directory,
