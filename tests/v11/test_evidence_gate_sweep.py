@@ -105,7 +105,7 @@ def test_human_endpoints_refuse_resealed_structured_scores(tmp_path, field):
         endpoint = next(record for record in score["endpoints"].values() if "value" in record)
         endpoint["value"] = "fabricated"
     with pytest.raises(ValueError, match="structured score differs from the primary attempt"):
-        human_endpoints(attempt, bundle["bindings"], {}, structured=score)
+        human_endpoints(attempt, bundle["bindings"], {}, structured=score, allow_replay=True)
 
 
 @pytest.mark.parametrize("consumer", ["consumption", "ledger"])

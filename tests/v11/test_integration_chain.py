@@ -200,11 +200,11 @@ async def test_real_study_live_export_and_human_review_chain(tmp_path, capsys, m
     assert not refused.exists()
 
     packets = tmp_path / "packets"
-    written = write_review_packets(export, plan, packets)
+    written = write_review_packets(export, plan, packets, study_directory=study)
     assert written["packets"] == 6
     assert written["packet_status_counts"] == {"packet_written": 6, "no_attempt": 1122}
     cli_packets = tmp_path / "cli-packets"
-    assert main(["review-packets", str(export), "--plan", str(plan_path), "--output", str(cli_packets)]) == 0
+    assert main(["review-packets", str(export), "--plan", str(plan_path), "--output", str(cli_packets), "--study", str(study)]) == 0
     assert json.loads(capsys.readouterr().out)["packet_status_counts"] == written["packet_status_counts"]
 
     reviewed = []
@@ -218,14 +218,14 @@ async def test_real_study_live_export_and_human_review_chain(tmp_path, capsys, m
         controller = read_sealed(packets / "controller" / f"{name}.json")
         attempt, bindings = controller["attempt"], controller["review_bindings"]
         score = archived[entry["assignment_id"]]["score"]
-        pending = human_endpoints(attempt, bindings, {}, structured=score, second_review=entry["second_review"])
+        pending = human_endpoints(attempt, bindings, {}, structured=score, second_review=entry["second_review"], controller=controller)
         assert pending["endpoints"]["public_concern_confirmed"]["value"] is None
         assert pending["endpoints"]["public_concern_confirmed"]["reason"] == "review_pending"
         returned = [reviewer_upload(packet, "reviewer-1")]
         if entry["second_review"]:
             waiting = resolve_packet_reviews(packet, returned, second_review=True)
             assert all(output["status"] == "awaiting_second_review" for output in waiting.values())
-            assert human_endpoints(attempt, bindings, waiting, structured=score, second_review=entry["second_review"])["endpoints"][
+            assert human_endpoints(attempt, bindings, waiting, structured=score, second_review=entry["second_review"], controller=controller)["endpoints"][
                 "public_concern_confirmed"]["value"] is None
             returned.append(reviewer_upload(packet, "reviewer-2"))
         for number, returned_upload in enumerate(returned, 1):
@@ -236,9 +236,16 @@ async def test_real_study_live_export_and_human_review_chain(tmp_path, capsys, m
             assert checked["valid"] and checked["bindings_verified"]
             assert checked["final_human_output_count"] == len(packet["outputs"])
             assert checked["missing_final_output_ids"] == []
+        altered_controller = deepcopy(controller)
+        altered_controller["attempt"]["observer_outputs"][-1]["text"] += " Changed copy."
+        with pytest.raises(ValueError, match="attempt differs from the registered archive"):
+            validate_review_upload(returned[0], packet, controller=altered_controller)
+        with pytest.raises(ValueError, match="second-review rule differs"):
+            human_endpoints(attempt, bindings, {}, controller=controller,
+                            second_review=not entry["second_review"])
         resolved = resolve_packet_reviews(packet, returned, second_review=entry["second_review"])
         assert all(output["status"] == "final" for output in resolved.values())
-        result = human_endpoints(attempt, bindings, resolved, structured=score, second_review=entry["second_review"])
+        result = human_endpoints(attempt, bindings, resolved, structured=score, second_review=entry["second_review"], controller=controller)
         reviewed.append(result)
         assert result["review_complete"] is True
         assert result["endpoints"]["public_concern_confirmed"]["value"] is True

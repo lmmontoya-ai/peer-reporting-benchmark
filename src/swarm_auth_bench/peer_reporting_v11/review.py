@@ -477,7 +477,93 @@ def check_bindings(bindings: Any, attempt: Mapping[str, Any]) -> dict[str, dict]
     return bindings["outputs"]
 
 
-def validate_review_upload(upload: Any, packet: Any, *, controller: dict | None = None) -> dict[str, Any]:
+def verified_review_context(packet: dict, controller: dict, *, receipt_directory: Path | None = None,
+                            repair_evidence_directory: Path | None = None) -> dict:
+    """Resolve one packet to its registered archive and recomputed selection row."""
+    export_path = controller.get("source_export_directory")
+    _require(type(export_path) is str and Path(export_path).is_absolute(),
+             "review controller requires its registered source export directory")
+    export = Path(export_path)
+    index = read_sealed(export / "index.json")
+    _require(index.get("kind") == EXPORT_KIND, "review controller source is not a live export")
+    pressure = "pressure_review_study_directory" in index
+    evidence_rows = []
+    if pressure:
+        scores = verify_pressure_export_evidence(export, index, receipt_directory, repair_evidence_directory,
+                                                  _verified_rows=evidence_rows)
+        selection = pressure_review_selection(scores)
+        rows = {row["assignment_id"]: row for row in selection["rows"]}
+    else:
+        from .live import check_retained_review_plan, read_live_plan, registered_root_path, registered_roots
+
+        study_path = controller.get("source_study_directory")
+        _require(type(study_path) is str and Path(study_path).is_absolute(),
+                 "earlier-level review controller has no registered archive study directory")
+        study = Path(study_path)
+        evidence_rows = verify_registered_export_evidence(export, index, study, receipt_directory, repair_evidence_directory)
+        registration = next(record for record in registered_roots(study)
+                            if record["plan_hash"] == index["source_plan_hash"])
+        root = registered_root_path(study, registration)
+        plan_hash = check_retained_review_plan(root, read_live_plan(root))
+        selection = read_sealed(root / "review-plan.json")
+        _require(plan_hash == index["review_plan_hash"] == selection["seal_hash"],
+                 "review export differs from the archive's retained review plan")
+        errors = verify_review_plan(selection, index["study_manifest"])
+        _require(not errors, f"invalid retained review plan: {'; '.join(errors)}")
+        rows = plan_rows(selection)
+    identifier = controller.get("assignment_id")
+    _require(identifier in rows, "review controller assignment is absent from the verified selection")
+    selected = rows[identifier]
+    _require(controller.get("review_plan_hash") == selection["seal_hash"]
+             and canonical_json(controller.get("plan_row")) == canonical_json(selected),
+             "review controller selection row differs from the verified selection")
+    exported = next((row for row in evidence_rows if row["assignment_id"] == identifier), None)
+    _require(exported is not None and exported["attempt"] is not None
+             and not exported.get("excluded_from_analysis"), "review controller has no eligible archived attempt")
+    attempt = exported["attempt"]
+    _require(canonical_json(controller.get("attempt")) == canonical_json(attempt),
+             "review controller attempt differs from the registered archive")
+    bindings = controller["review_bindings"]
+    _require(bindings["review_scope"] == selected["scope"],
+             "review controller scope differs from the verified selection")
+    instructions = next(row["instructions"] for row in index["study_manifest"]["assignments"]
+                        if row["assignment_id"] == identifier) if pressure else None
+    _verify_packet_attempt(packet, attempt, bindings, delivered_instructions=instructions)
+    retained_packet = check_packet(controller["review_packet"])
+    _require(canonical_json({key: value for key, value in retained_packet.items() if key != "seal_hash"})
+             == canonical_json({key: value for key, value in packet.items() if key != "seal_hash"})
+             and controller["review_packet_hash"] == packet["review_packet_hash"],
+             "controller packet differs from the verified packet")
+    return {"attempt": attempt, "selection_row": selected, "second_review": selected["second_review"],
+            "bindings": bindings}
+
+
+def _verify_packet_attempt(packet: dict, attempt: dict, bindings: dict, *,
+                           delivered_instructions: str | None = None) -> None:
+    check_bindings(bindings, attempt)
+    _require(bindings["review_packet_hash"] == packet["review_packet_hash"],
+             "review bindings belong to another packet")
+    try:
+        rebuilt = build_review_bundle(attempt, scope=bindings["review_scope"], retained_bindings=bindings,
+                                      packet_id=packet["review_packet_id"], delivered_instructions=delivered_instructions)
+    except (KeyError, StopIteration) as error:
+        raise ValueError("retained packet masking map differs from the primary attempt") from error
+    def evidence(record):
+        return {key: value for key, value in record.items()
+                if key not in {"blinding", "review_packet_hash", "seal_hash"}}
+    _require(canonical_json(evidence(packet)) == canonical_json(evidence(rebuilt["packet"])),
+             "review packet content differs from the primary attempt")
+    # Blinding warnings depend on the supplied withheld-text list. The actual
+    # packet hash is checked above; every evidence binding is still recomputed.
+    def evidence_bindings(record):
+        return {key: value for key, value in record.items() if key != "review_packet_hash"}
+    _require(canonical_json(evidence_bindings(bindings)) == canonical_json(evidence_bindings(rebuilt["bindings"])),
+             "review bindings differ from the primary attempt")
+
+
+def validate_review_upload(upload: Any, packet: Any, *, controller: dict | None = None,
+                           receipt_directory: Path | None = None,
+                           repair_evidence_directory: Path | None = None, allow_replay: bool = False) -> dict[str, Any]:
     """Validate one reviewer's returned labels against the packet, and the bindings when supplied.
 
     An upload is ``{"review_packet_hash", "labels_by_output_id"}`` from one
@@ -518,19 +604,16 @@ def validate_review_upload(upload: Any, packet: Any, *, controller: dict | None 
         _require(controller.get("review_packet_hash") == packet["review_packet_hash"], "controller packet mismatch")
         _require(controller["review_bindings"]["review_packet_hash"] == packet["review_packet_hash"],
                  "controller bindings belong to another packet")
-        bound = check_bindings(controller["review_bindings"], controller["attempt"])
+        if allow_replay:
+            _require(controller["attempt"].get("execution_kind") == "authored_offline_replay",
+                     "replay validation requires an authored offline attempt")
+            _verify_packet_attempt(packet, controller["attempt"], controller["review_bindings"])
+            context = {"attempt": controller["attempt"], "bindings": controller["review_bindings"]}
+        else:
+            context = verified_review_context(packet, controller, receipt_directory=receipt_directory,
+                                              repair_evidence_directory=repair_evidence_directory)
+        bound = check_bindings(context["bindings"], context["attempt"])
         _require(set(bound) == labeled, "packet outputs differ from the bound outputs")
-        try:
-            rebuilt = build_review_bundle(controller["attempt"], scope=controller["review_bindings"]["review_scope"],
-                                          retained_bindings=controller["review_bindings"],
-                                          packet_id=packet["review_packet_id"])
-        except (KeyError, StopIteration) as error:
-            raise ValueError("retained packet masking map differs from the primary attempt") from error
-        def evidence(record):
-            return {key: value for key, value in record.items()
-                    if key not in {"blinding", "review_packet_hash", "seal_hash"}}
-        _require(canonical_json(evidence(packet)) == canonical_json(evidence(rebuilt["packet"])),
-                 "review packet content differs from the primary attempt")
         result["bindings_verified"] = True
     return result
 
@@ -593,7 +676,9 @@ def _endpoint(entries: list[dict], kinds: Iterable[str], positive: Callable[[dic
 
 
 def human_endpoints(attempt: dict, bindings: dict, resolved: Mapping[str, dict], *, structured: dict | None = None,
-                    allow_replay: bool = False, second_review: bool | None = None) -> dict[str, Any]:
+                    allow_replay: bool = False, second_review: bool | None = None, controller: dict | None = None,
+                    receipt_directory: Path | None = None,
+                    repair_evidence_directory: Path | None = None) -> dict[str, Any]:
     """Combine final human labels with the attempt's truth into the human-reviewed endpoints.
 
     ``resolved`` maps review output IDs to ``rubric.resolve_output`` results (see
@@ -602,6 +687,19 @@ def human_endpoints(attempt: dict, bindings: dict, resolved: Mapping[str, dict],
     structured score supplies eligibility and close status and is reported beside
     the human values, never replaced by them.
     """
+    if controller is not None or not allow_replay:
+        _require(controller is not None, "live human endpoints require a registered review controller")
+        context = verified_review_context(controller["review_packet"], controller,
+            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+        _require(canonical_json(attempt) == canonical_json(context["attempt"])
+                 and canonical_json(bindings) == canonical_json(context["bindings"]),
+                 "endpoint inputs differ from the verified review context")
+        _require(second_review is None or second_review is context["second_review"],
+                 "second-review rule differs from the verified selection")
+        attempt, bindings, second_review = context["attempt"], context["bindings"], context["second_review"]
+    else:
+        _require(attempt.get("execution_kind") == "authored_offline_replay",
+                 "replay endpoints require an authored offline attempt")
     bound = check_bindings(bindings, attempt)
     _require(set(resolved) <= set(bound), "resolved labels name outputs that are not bound for review")
     _require(not resolved or type(second_review) is bool, "resolved labels require the bound second-review rule")
@@ -812,7 +910,7 @@ def render_packet_html(packet: Mapping[str, Any]) -> str:
 
 
 
-def verify_pressure_export_evidence(export_directory: Path, index: dict,
+def verify_registered_export_evidence(export_directory: Path, index: dict, study: Path,
         receipt_directory: Path | None = None, repair_evidence_directory: Path | None = None) -> list[dict]:
     """Re-derive every exported row from the registered live root before filtering.
 
@@ -822,17 +920,18 @@ def verify_pressure_export_evidence(export_directory: Path, index: dict,
     from . import live_review
     from .live import read_study_manifest, registered_root_path, registered_roots
 
-    check_pressure_arm_roots(pressure_export_partitions(index))
-    study = Path(index["pressure_review_study_directory"])
     manifest = read_study_manifest(study)
     _require(index.get("study_manifest") == manifest, "P export study manifest differs from its live study")
-    registration = next(record for record in registered_roots(study)
-                        if record["plan_hash"] == index["source_plan_hash"])
+    registrations = [record for record in registered_roots(study)
+                     if record["plan_hash"] == index["source_plan_hash"]]
+    _require(len(registrations) == 1, "review export has no unique registered archive")
+    registration = registrations[0]
     root = registered_root_path(study, registration)
     plan = live_review.read_live_plan(root)
     from .receipts import check_receipt
 
     check_receipt(root, receipt_directory, study_directory=study)
+    live_review.check_root_assignment_binding(root, plan, study)
     checked = live_review.root_registration(study, plan, directory=root, require_finalized=False)
     _require(all(index["study_registration"].get(key) == checked[key]
                  for key in ("plan_hash", "phase", "study_manifest_hash", "root_path")),
@@ -887,12 +986,24 @@ def verify_pressure_export_evidence(export_directory: Path, index: dict,
     for key, expected_value in (("analysis_exclusions", exclusions), ("analysis_exclusion_count", len(exclusions))):
         if key in index:
             _require(index[key] == expected_value, f"P export {key} differs from registered live root")
+    return verified
+
+
+def verify_pressure_export_evidence(export_directory: Path, index: dict,
+        receipt_directory: Path | None = None, repair_evidence_directory: Path | None = None, *,
+        _verified_rows: list[dict] | None = None) -> list[dict]:
+    """Check the registered archive and recompute its complete P selection."""
+    check_pressure_arm_roots(pressure_export_partitions(index, receipt_directory=receipt_directory))
+    verified = verify_registered_export_evidence(export_directory, index,
+        Path(index["pressure_review_study_directory"]), receipt_directory, repair_evidence_directory)
     # Filtering is safe only after every row above has been checked.
     scores = [row["score"] for row in analysis_score_rows(verified)]
     selection = pressure_review_selection(scores)
     _require(index.get("pressure_review_selection") == selection
              or not scores and index.get("pressure_review_selection") is None,
              "P pressure_review_selection differs from sealed export scores re-derived from live root")
+    if _verified_rows is not None:
+        _verified_rows[:] = verified
     return scores
 
 
@@ -909,6 +1020,7 @@ def verify_pressure_packet_selection(export_directory: Path, index: dict, select
 
 def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
                          load_template: Callable[[str], dict] | None = None,
+                         study_directory: Path | None = None,
                              receipt_directory: Path | None = None,
                              repair_evidence_directory: Path | None = None) -> dict[str, Any]:
     """Write reviewer packets for every planned assignment with an exported attempt.
@@ -940,6 +1052,9 @@ def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
             receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
     else:
         rows = None
+        if study_directory is not None:
+            verify_registered_export_evidence(export_directory, index, Path(study_directory),
+                                              receipt_directory, repair_evidence_directory)
     _require(index["study_registration"]["study_manifest_hash"] ==
              (index["study_manifest"]["seal_hash"] if pressure else plan["study_manifest_hash"]),
              "the export comes from another study than the review plan")
@@ -989,7 +1104,10 @@ def write_review_packets(export_directory: Path, plan: dict, output: Path, *,
         atomic_json(output / "controller" / f"{name}.json", seal({
             "assignment_id": row["assignment_id"], "review_plan_hash": plan["seal_hash"], "plan_row": planned,
             "review_packet_hash": packet["review_packet_hash"], "review_packet": packet,
-            "review_bindings": bundle["bindings"], "attempt": attempt}))
+            "review_bindings": bundle["bindings"], "attempt": attempt,
+            "source_export_directory": str(export_directory.resolve()),
+            **({"source_study_directory": str(Path(study_directory).resolve())}
+               if study_directory is not None else {})}))
         entries.append({**entry, "packet_status": status, "review_packet_id": name,
                         "review_packet_hash": packet["review_packet_hash"],
                         "labeled_outputs": len(packet["outputs"]),

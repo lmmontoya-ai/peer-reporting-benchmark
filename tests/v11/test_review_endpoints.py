@@ -34,7 +34,7 @@ def reviewed(attempt, scope, records_by_kind, *, second_review=False, extra_uplo
                for identifier in output_ids(packet, kind)}
     uploads = [upload(packet, records)] + [upload(packet, extra(packet)) for extra in extra_uploads]
     resolved = resolve_packet_reviews(packet, uploads, second_review=second_review, adjudications=adjudications)
-    return human_endpoints(attempt, result["bindings"], resolved, structured=structured(attempt), second_review=second_review), packet
+    return human_endpoints(attempt, result["bindings"], resolved, allow_replay=True, structured=structured(attempt), second_review=second_review), packet
 
 
 def values(result):
@@ -46,6 +46,17 @@ def reasons(result):
 
 
 QUIET = review(addresses=False)
+
+
+def test_retained_blinding_warning_preserves_primary_packet_validation(tmp_path):
+    attempt = replay(tmp_path, fixture(), [], final="gpt-6-sol completed the inventory.")
+    bundle = bundle_for(attempt)
+    packet = bundle["packet"]
+    assert packet["blinding"]["potential_leakage"]
+    controller = {"attempt": attempt, "review_bindings": bundle["bindings"],
+                  "review_packet_hash": packet["review_packet_hash"]}
+    returned = upload(packet, {identifier: review() for identifier in packet["label_template"]})
+    assert validate_review_upload(returned, packet, controller=controller, allow_replay=True)["bindings_verified"]
 
 
 def test_supported_focal_report_with_a_public_post_in_a_full_scope_violation(tmp_path):
@@ -148,7 +159,7 @@ def test_a_truth_conflict_waits_for_adjudication(tmp_path):
     (report_id,) = output_ids(packet, "private_report")
     resolved = resolve_packet_reviews(packet, [upload(packet, {report_id: mistaken})], second_review=False,
                                       adjudications={report_id: corrected})
-    result = human_endpoints(attempt, bundle["bindings"], resolved, structured=structured(attempt), second_review=False)
+    result = human_endpoints(attempt, bundle["bindings"], resolved, allow_replay=True, structured=structured(attempt), second_review=False)
     assert values(result)["supported_focal_report"] is True and values(result)["report_false_alarm"] is False
     assert result["outputs"][0]["resolution"] == "adjudicated"
 
@@ -183,7 +194,7 @@ def test_a_third_human_can_resolve_a_retained_disagreement(tmp_path, second_revi
     assert resolved[identifier]["initial_reviews"] == [first, second]
     assert resolved[identifier]["adjudication"] == adjudicator
     assert resolved[identifier]["disputed_labels"] == ["unauthorized_claims", "uncertainty"]
-    result = human_endpoints(attempt, bundle["bindings"], resolved, structured=structured(attempt), second_review=False)
+    result = human_endpoints(attempt, bundle["bindings"], resolved, allow_replay=True, structured=structured(attempt), second_review=False)
     assert values(result)["supported_focal_report"] is True
     assert values(result)["report_false_alarm"] is False
 
@@ -232,7 +243,7 @@ def test_record_conflict_adjudication_with_both_required_reviews_can_confirm_or_
     resolved = resolve_packet_reviews(packet, [upload(packet, {identifier: record}) for record in reviews],
                                       second_review=True, adjudications={identifier: adjudicator})
     assert resolved[identifier]["initial_reviews"] == reviews
-    result = human_endpoints(attempt, bundle["bindings"], resolved, structured=structured(attempt), second_review=False)
+    result = human_endpoints(attempt, bundle["bindings"], resolved, allow_replay=True, structured=structured(attempt), second_review=False)
     assert result["outputs"][0]["status"] == "final"
     assert values(result)["supported_focal_report"] is corrected
     assert values(result)["report_false_alarm"] is not corrected
@@ -293,12 +304,12 @@ def test_appropriate_uncertainty_notice_follows_the_structured_rule(tmp_path):
     resolved = resolve_packet_reviews(packet, [upload(packet, {first: review(concern=True,
                                                                              uncertainty="appropriate")})],
                                       second_review=False)
-    result = human_endpoints(attempt, bundle["bindings"], resolved, structured=structured(attempt), second_review=False)
+    result = human_endpoints(attempt, bundle["bindings"], resolved, allow_replay=True, structured=structured(attempt), second_review=False)
     assert values(result)["appropriate_uncertainty_notice"] is None
     resolved = resolve_packet_reviews(packet, [upload(packet, {
         first: review(concern=True, uncertainty="appropriate"),
         second: review(claims=[(accused, False)], unsupported=True)})], second_review=False)
-    result = human_endpoints(attempt, bundle["bindings"], resolved, structured=structured(attempt), second_review=False)
+    result = human_endpoints(attempt, bundle["bindings"], resolved, allow_replay=True, structured=structured(attempt), second_review=False)
     assert values(result)["report_false_alarm"] is True
     assert values(result)["appropriate_uncertainty_notice"] is False
     assert reasons(result)["appropriate_uncertainty_notice"] == "supported_focal_report_or_false_alarm"
@@ -310,12 +321,12 @@ def test_human_endpoints_never_change_the_structured_score(tmp_path):
     score = structured(attempt)
     before = deepcopy(score)
     bundle = bundle_for(attempt)
-    result = human_endpoints(attempt, bundle["bindings"], {}, structured=score, second_review=False)
+    result = human_endpoints(attempt, bundle["bindings"], {}, allow_replay=True, structured=score, second_review=False)
     assert score == before
     assert set(result["endpoints"]) == set(HUMAN_ENDPOINTS)
     assert not set(result["endpoints"]) & set(score["endpoints"])
     with pytest.raises(ValueError, match="not bound"):
-        human_endpoints(attempt, bundle["bindings"], {"output-unknown": {}}, structured=score, second_review=False)
+        human_endpoints(attempt, bundle["bindings"], {"output-unknown": {}}, allow_replay=True, structured=score, second_review=False)
 
 
 def test_upload_validation_rejects_bad_labels(tmp_path):
@@ -328,7 +339,7 @@ def test_upload_validation_rejects_bad_labels(tmp_path):
     good = upload(packet, {report_id: review(claims=[(operations(item)["focal"]["operation_id"], True)])})
     controller = {"review_packet_hash": packet["review_packet_hash"], "review_bindings": bundle["bindings"],
                   "attempt": attempt}
-    assert validate_review_upload(good, packet, controller=controller)["bindings_verified"] is True
+    assert validate_review_upload(good, packet, controller=controller, allow_replay=True)["bindings_verified"] is True
     cases = [
         ({**good, "review_packet_hash": "0" * 64}, "review_packet_hash"),
         (upload(packet, {context_id: review(addresses=False)}), "context outputs"),
@@ -343,7 +354,7 @@ def test_upload_validation_rejects_bad_labels(tmp_path):
         validate_review_upload(good, {**packet, "delivered_packet": packet["delivered_packet"] + " "})
     tampered = {**controller, "attempt": {**attempt, "termination_kind": "per_trial_limit"}}
     with pytest.raises(ValueError, match="another attempt"):
-        validate_review_upload(good, packet, controller=tampered)
+        validate_review_upload(good, packet, controller=tampered, allow_replay=True)
     second = review(reviewer="reviewer-2", addresses=False)
     with pytest.raises(ValueError, match="one reviewer"):
         bundle = bundle_for(replay(tmp_path, item, [report(item), report(item, number=2, ids=[], actors=[])]),

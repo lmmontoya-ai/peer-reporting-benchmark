@@ -475,7 +475,8 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
                             for row in manifest["assignments"])
     if contains_pressure:
         partitions = registered_pressure_partitions(Path(study_directory), phase=plan["phase"],
-            study_manifest_hash=registration["study_manifest_hash"], source_plan_hash=plan["seal_hash"])
+            study_manifest_hash=registration["study_manifest_hash"], source_plan_hash=plan["seal_hash"],
+            receipt_directory=receipt_directory)
         check_pressure_arm_roots(partitions)
         check_pressure_export_population(data["rows"], partitions, source_plan_hash=plan["seal_hash"])
     # Spec 12: rows excluded from analysis keep their scores but stay out of the summary's counts and cells.

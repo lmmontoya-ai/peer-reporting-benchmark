@@ -36,7 +36,8 @@ def check_pressure_arm_roots(partitions: list[tuple[str, list[dict]]], *, unit: 
 
 
 def registered_pressure_partitions(study_directory: Path, *, phase: str, study_manifest_hash: str,
-                                   source_plan_hash: str) -> list[tuple[str, list[dict]]]:
+                                   source_plan_hash: str,
+                                   receipt_directory: Path | None = None) -> list[tuple[str, list[dict]]]:
     """Read every registered phase root's hash-bound lane plans, before analysis exclusions."""
     manifest = read_study_manifest(study_directory)
     _require(manifest["seal_hash"] == study_manifest_hash, "P review population belongs to another study")
@@ -51,13 +52,13 @@ def registered_pressure_partitions(study_directory: Path, *, phase: str, study_m
                  and plan["source"]["study_manifest_hash"] == study_manifest_hash
                  and registration["study_manifest_hash"] == study_manifest_hash,
                  "P review root plan differs from its study registration")
-        if plan["phase"] != phase:
-            continue
         entries, seen = [], set()
+        lane_plans = []
         for lane in plan["lanes"]:
             lane_plan = read_sealed(safe_child(root, lane["path"]) / "phase-plan.json")
-            _require(lane_plan["seal_hash"] == lane["plan_hash"] and lane_plan["phase"] == phase,
+            _require(lane_plan["seal_hash"] == lane["plan_hash"],
                      "P review lane plan differs from its sealed root plan")
+            lane_plans.append(lane_plan)
             for entry in lane_plan["planned_order"]:
                 identifier = entry["entry_id"]
                 _require(identifier not in seen and identifier in study_assignments,
@@ -76,8 +77,22 @@ def registered_pressure_partitions(study_directory: Path, *, phase: str, study_m
                 if identifier not in fixtures:
                     stored = read_sealed(safe_child(study_directory, manifest["fixtures"][identifier]["path"]))
                     fixtures[identifier] = {key: value for key, value in stored.items() if key != "seal_hash"}
-        assignments = check_assignment_binding(entries, manifest=manifest, source=plan["source"], phase=phase,
+        phases = {study_assignments[entry["entry_id"]]["split"] for entry in entries}
+        _require(len(phases) == 1, "P review root assignments require one sealed-study phase")
+        canonical_phase = phases.pop()
+        assignments = check_assignment_binding(entries, manifest=manifest, source=plan["source"], phase=canonical_phase,
                                                  fixtures=fixtures)
+        _require(plan["phase"] == registration["phase"] == canonical_phase
+                 and all(lane_plan["phase"] == canonical_phase for lane_plan in lane_plans),
+                 "P review root phase differs from its sealed-study assignments")
+        has_primary_evidence = any((root / "lanes").rglob("journal.jsonl")) or any(
+            (root / "lanes").rglob("attempt.json"))
+        if registration["state"] == "finalized" or has_primary_evidence:
+            from .receipts import check_receipt
+
+            check_receipt(root, receipt_directory, study_directory=study_directory)
+        if canonical_phase != phase:
+            continue
         partitions.append((plan["seal_hash"], assignments))
     _require(source_plan_hash in {identity for identity, _ in partitions},
              "P review source root is not registered in the study phase")
@@ -102,7 +117,7 @@ def check_pressure_export_population(rows: list[dict], partitions: list[tuple[st
                  f"level P arm {arm} export omits planned assignments from its registered root")
 
 
-def pressure_export_partitions(index: dict) -> list[tuple[str, list[dict]]]:
+def pressure_export_partitions(index: dict, *, receipt_directory: Path | None = None) -> list[tuple[str, list[dict]]]:
     """Reopen the bound study registry so roots added after export are checked too."""
     directory = index.get("pressure_review_study_directory")
     _require(type(directory) is str and Path(directory).is_absolute(),
@@ -111,6 +126,7 @@ def pressure_export_partitions(index: dict) -> list[tuple[str, list[dict]]]:
     _require(index["source_plan_hash"] == registration["plan_hash"] and index["phase"] == registration["phase"],
              "P review export root binding differs")
     partitions = registered_pressure_partitions(Path(directory), phase=index["phase"],
-        study_manifest_hash=registration["study_manifest_hash"], source_plan_hash=index["source_plan_hash"])
+        study_manifest_hash=registration["study_manifest_hash"], source_plan_hash=index["source_plan_hash"],
+        receipt_directory=receipt_directory)
     check_pressure_export_population(index["rows"], partitions, source_plan_hash=index["source_plan_hash"])
     return partitions
