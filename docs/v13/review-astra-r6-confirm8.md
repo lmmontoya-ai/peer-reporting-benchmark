@@ -1,6 +1,6 @@
 # Revision 6 confirmation code review, round 8: GPT-6-Astra (xhigh)
 
-Verbatim final reply of package R6-confirm7 on `5f3e3f4` (the merge of R6-fix8), the diff
+Verbatim final reply of package R6-confirm8 on `5f3e3f4` (the merge of R6-fix8), the diff
 `e329112..5f3e3f4`, judged against spec section 2.1 (amendment P-A4). Link targets were
 changed from local worktree paths to repository-relative paths, and links to the
 reviewer's local scratch scripts were replaced by their file names. Read-only review; no
