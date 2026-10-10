@@ -252,7 +252,6 @@ def test_live_export_serializes_pressure_events_scores_summary_and_selection(tmp
         "planned_arms": ["pressure_core_xhigh"], "check_arm_selection": ["pressure_core_xhigh"],
         "journaled_authorizations": [], "study_registry_listing": [],
         "read_study_manifest": {"assignments": [assignment]},
-        "registered_pressure_partitions": [("plan", [assignment])],
     }.items():
         monkeypatch.setattr(live_review, name, lambda *args, _result=result, **kwargs: _result)
     def inspect(directory, *, bundle, scorer, amendments):
@@ -261,6 +260,8 @@ def test_live_export_serializes_pressure_events_scores_summary_and_selection(tmp
                 "planned_count": 1, "rows": [{"assignment_id": raw["assignment_id"], "attempt": raw,
                                               "score": scorer(raw), "excluded_from_analysis": False}]}
     monkeypatch.setattr(live_review, "inspect_live_root", inspect)
+    monkeypatch.setattr(live_review, "inspect_pressure_chain",
+                        lambda *args, source_data, **kwargs: (source_data, []))
     from swarm_auth_bench.peer_reporting_v11 import receipts
     monkeypatch.setattr(receipts, "check_receipt", lambda *a, **k: None)
     output = tmp_path / "export"

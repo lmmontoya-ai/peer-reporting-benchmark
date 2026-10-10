@@ -934,10 +934,11 @@ def render_packet_html(packet: Mapping[str, Any]) -> str:
 
 def verify_registered_export_evidence(export_directory: Path, index: dict, study: Path,
         receipt_directory: Path | None = None, repair_evidence_directory: Path | None = None) -> list[dict]:
-    """Re-derive every exported row from the registered live root before filtering.
+    """Re-derive every exported row from its registered starting root before filtering.
 
-    An export retains the root's entire planned population. Every row, including
-    unscored and excluded rows, must equal the live archive's current evidence.
+    An export retains its complete planned population, including P successor
+    roots. Every row, including unscored and excluded rows, must equal the live
+    archive's current evidence.
     """
     from . import live_review
     from .live import read_study_manifest, registered_root_path, registered_roots
@@ -966,17 +967,21 @@ def verify_registered_export_evidence(export_directory: Path, index: dict, study
                  for item in (plan.get("consumed_attempts") or {}).get("prior_roots", [])}]
     live_review.verify_consumed_ledger(root, plan, prior, study_directory=study,
         receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
-    from .ledger_repair import verify_root_ledger_repairs
+    if plan["tool_schema_version"] == "peer-reporting-v11-tools-v2":
+        data, repairs = live_review.inspect_pressure_chain(root, plan, study, scorer=score_trial,
+            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+    else:
+        from .ledger_repair import verify_root_ledger_repairs
 
-    repairs = verify_root_ledger_repairs(root, plan, journals, evidence_directory=repair_evidence_directory)
-    _require(index.get("ledger_repairs", []) == repairs, "P export ledger repairs differ from the current root")
+        repairs = verify_root_ledger_repairs(root, plan, journals, evidence_directory=repair_evidence_directory)
+        amendments = live_review.study_amendments(study) if plan["phase"] == "smoke" else []
+        data = live_review.inspect_live_root(root, scorer=score_trial, amendments=amendments)
+        _require(not data["amendment_errors"], "; ".join(data["amendment_errors"]))
+    _require(index.get("ledger_repairs", []) == repairs, "P export ledger repairs differ from the current chain")
     declarations = [{"kind": "ledger_repaired", "lane_id": repair["lane_id"], "repair_hash": repair["seal_hash"]}
                     for repair in repairs]
     _require(index.get("declared_deviations", []) == declarations,
-             "P export ledger repair declarations differ from the current root")
-    amendments = live_review.study_amendments(study) if plan["phase"] == "smoke" else []
-    data = live_review.inspect_live_root(root, scorer=score_trial, amendments=amendments)
-    _require(not data["amendment_errors"], "; ".join(data["amendment_errors"]))
+             "P export ledger repair declarations differ from the current chain")
     _require(data["plan_hash"] == index["source_plan_hash"] and data["phase"] == index["phase"],
              "P export inspection differs from its live root")
     expected = {row["assignment_id"]: row for row in data["rows"]}
@@ -1015,7 +1020,8 @@ def verify_pressure_export_evidence(export_directory: Path, index: dict,
         receipt_directory: Path | None = None, repair_evidence_directory: Path | None = None, *,
         _verified_rows: list[dict] | None = None) -> list[dict]:
     """Check the registered archive and recompute its complete P selection."""
-    check_pressure_arm_roots(pressure_export_partitions(index, receipt_directory=receipt_directory))
+    check_pressure_arm_roots(pressure_export_partitions(index, receipt_directory=receipt_directory,
+            repair_evidence_directory=repair_evidence_directory))
     verified = verify_registered_export_evidence(export_directory, index,
         Path(index["pressure_review_study_directory"]), receipt_directory, repair_evidence_directory)
     scores = _pressure_export_scores(index, verified)
@@ -1109,7 +1115,8 @@ def write_review_packets(export_directory: Path, plan: dict | None, output: Path
             _require(type(directory) is str and Path(directory).is_absolute()
                      and Path(directory).resolve() == study,
                      "P export study directory differs from its registered study directory")
-            check_pressure_arm_roots(pressure_export_partitions(index, receipt_directory=receipt_directory))
+            check_pressure_arm_roots(pressure_export_partitions(index, receipt_directory=receipt_directory,
+                repair_evidence_directory=repair_evidence_directory))
         check_seal(plan)
         _require(plan == expected, "P selection differs from sealed export scores")
         rows = {row["assignment_id"]: row for row in plan["rows"]}
