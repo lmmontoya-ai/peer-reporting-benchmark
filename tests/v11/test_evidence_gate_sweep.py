@@ -64,7 +64,7 @@ def test_pressure_export_cannot_use_an_earlier_level_review_plan(tmp_path, monke
     atomic_json(output / "index.json", seal({key: value for key, value in index.items() if key != "seal_hash"}))
     packets = tmp_path / "packets"
     with pytest.raises(ValueError, match="level P export requires its pressure review selection"):
-        write_review_packets(output, earlier_plan, packets)
+        write_review_packets(output, earlier_plan, packets, study_directory=study)
     assert not packets.exists()
 
 

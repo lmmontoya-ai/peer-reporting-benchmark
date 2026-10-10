@@ -96,7 +96,7 @@ def test_native_156_trial_index_mismatch_refuses_through_600_call_core_preparati
             write_review_packets(
                 original_export,
                 index["pressure_review_selection"],
-                tmp_path / "packets",
+                tmp_path / "packets", study_directory=study,
                 receipt_directory=receipts,
             )
         with pytest.raises(ValueError, match="index archive status differs"):
@@ -386,7 +386,7 @@ def test_sibling_registration_phase_checked_before_filtering(
                 write_review_packets(
                     output,
                     read_sealed(output / "index.json")["pressure_review_selection"],
-                    tmp_path / "packets",
+                    tmp_path / "packets", study_directory=study,
                     receipt_directory=receipts,
                 )
             else:
@@ -581,7 +581,7 @@ def test_shared_export_rederivation_rechecks_current_root_repairs_after_export(
         write_review_packets(
             export,
             index["pressure_review_selection"],
-            tmp_path / "packets",
+            tmp_path / "packets", study_directory=study,
             receipt_directory=receipts,
             repair_evidence_directory=evidence,
         )
@@ -625,7 +625,7 @@ def test_native_post_run_consumers_require_committed_receipts(
             write_review_packets(
                 output,
                 read_sealed(output / "index.json")["pressure_review_selection"],
-                tmp_path / "packets",
+                tmp_path / "packets", study_directory=study,
                 receipt_directory=empty,
             )
         elif consumer == "pilot":

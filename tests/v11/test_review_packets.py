@@ -5,6 +5,7 @@ from copy import deepcopy
 
 import pytest
 
+from swarm_auth_bench.events import content_hash
 from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, seal
 from swarm_auth_bench.peer_reporting_v11.cli import main
 from swarm_auth_bench.peer_reporting_v11.review import (
@@ -209,7 +210,7 @@ def test_bundles_refuse_withheld_text_in_the_delivered_evidence(tmp_path):
         build_review_bundle(attempt, scope="everything")
 
 
-def test_review_packets_command_and_unregistered_upload_consistency(tmp_path, wp6_study, capsys):
+def test_explicit_replay_packets_and_unregistered_upload_consistency(tmp_path, wp6_study, capsys):
     study, manifest, _ = wp6_study
     plan = build_review_plan(manifest)
     plan_path = tmp_path / "plan.json"
@@ -225,8 +226,10 @@ def test_review_packets_command_and_unregistered_upload_consistency(tmp_path, wp
              by_scope["low_effort", "ambiguity", "reports_and_posts"]: None}
     export = export_directory(tmp_path, wp6_study, plan, picks)
     output = tmp_path / "packets"
-    assert main(["review-packets", str(export), "--plan", str(plan_path), "--output", str(output)]) == 0
-    result = json.loads(capsys.readouterr().out)
+    assert main(["review-packets", str(export), "--plan", str(plan_path), "--output", str(output)]) == 2
+    assert "requires --study" in json.loads(capsys.readouterr().out)["error"]
+    assert not output.exists()
+    result = write_review_packets(export, plan, output, replay=True)
     assert result["packet_status_counts"] == {"packet_written": 3, "no_outputs_to_label": 1, "no_attempt": 1}
     index = read_sealed(output / "index.json")
     rows = {row["assignment_id"]: row for row in index["rows"]}
@@ -251,8 +254,7 @@ def test_review_packets_command_and_unregistered_upload_consistency(tmp_path, wp
     assert checked["bindings_verified"] is True and checked["final_human_output_count"] == 1
     assert len(checked["missing_final_output_ids"]) == 3
     other = output / "packets-again"
-    assert main(["review-packets", str(export), "--plan", str(plan_path), "--output", str(other)]) == 0
-    capsys.readouterr()
+    assert write_review_packets(export, plan, other, replay=True)["packets"] == result["packets"]
     foreign = upload(packet, records)
     foreign_packet = read_sealed(next((other / "reviewer").glob("*.json")))
     with pytest.raises(ValueError, match="review_packet_hash"):
@@ -260,7 +262,7 @@ def test_review_packets_command_and_unregistered_upload_consistency(tmp_path, wp
     with pytest.raises(ValueError, match="another study"):
         changed = deepcopy({key: value for key, value in plan.items() if key != "seal_hash"})
         changed["study_manifest_hash"] = "0" * 64
-        write_review_packets(export, seal(changed), tmp_path / "wrong")
+        write_review_packets(export, seal(changed), tmp_path / "wrong", replay=True)
 
 
 @pytest.mark.parametrize("tampering", ["empty_rows", "scope", "second_review", "seed", "broken_seal"])
@@ -287,7 +289,7 @@ def test_packet_writing_refuses_tampered_and_resealed_plans(tmp_path, wp6_study,
     atomic_json(export / "index.json", seal({**index, "review_plan_hash": bad_plan["seal_hash"]}))
     output = tmp_path / "packets"
     with pytest.raises(ValueError, match="invalid review plan:.*(rows|seed|seal)"):
-        write_review_packets(export, bad_plan, output)
+        write_review_packets(export, bad_plan, output, replay=True)
     assert not output.exists()
 
 
@@ -305,7 +307,7 @@ def test_packet_writing_requires_the_export_review_plan_hash(tmp_path, wp6_study
     atomic_json(export / "index.json", seal(index))
     output = tmp_path / "packets"
     with pytest.raises(ValueError, match="review_plan_hash"):
-        write_review_packets(export, plan, output)
+        write_review_packets(export, plan, output, replay=True)
     assert not output.exists()
 
 
@@ -325,5 +327,31 @@ def test_packet_writing_verifies_the_manifest_named_by_the_export(tmp_path, wp6_
     atomic_json(export / "index.json", seal(index))
     output = tmp_path / "packets"
     with pytest.raises(ValueError, match="study_manifest|seal|another study"):
+        write_review_packets(export, plan, output, replay=True)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_explicit_replay_checks_every_retained_attempt_kind(tmp_path, wp6_study, selected):
+    _, manifest, _ = wp6_study
+    plan = build_review_plan(manifest)
+    selected_ids = {row["assignment_id"] for row in plan["rows"]}
+    assignment = next(row["assignment_id"] for row in manifest["assignments"]
+                      if row["level"] == "L0" and (row["assignment_id"] in selected_ids) == selected)
+    export = export_directory(tmp_path, wp6_study, plan, {assignment: lambda item: [post("Review this output.")]})
+    output = tmp_path / "missing-replay-option"
+    with pytest.raises(ValueError, match="registered study directory"):
         write_review_packets(export, plan, output)
+    assert not output.exists()
+    index = read_sealed(export / "index.json")
+    row = index["rows"][0]
+    attempt_path = export / row["attempt_path"]
+    attempt = {key: value for key, value in read_sealed(attempt_path).items() if key != "seal_hash"}
+    assert attempt["execution_kind"] == "authored_offline_replay"
+    attempt["execution_kind"] = "live_model"
+    atomic_json(attempt_path, seal(attempt))
+    row["attempt_hash"] = content_hash(attempt)
+    atomic_json(export / "index.json", seal({key: value for key, value in index.items() if key != "seal_hash"}))
+    with pytest.raises(ValueError, match="authored offline attempt"):
+        write_review_packets(export, plan, output, replay=True)
     assert not output.exists()

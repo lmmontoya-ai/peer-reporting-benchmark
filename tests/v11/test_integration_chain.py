@@ -4,11 +4,13 @@ No Codex process, provider, VM, fake bundle, or hand-built export is used.
 """
 
 import json
+import shutil
 from copy import deepcopy
 
 import pytest
 
-from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed
+from swarm_auth_bench.events import content_hash
+from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, seal
 from swarm_auth_bench.peer_reporting_v11 import live
 from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
 from swarm_auth_bench.peer_reporting_v11.cli import main
@@ -22,7 +24,11 @@ from swarm_auth_bench.peer_reporting_v11.review import (
     validate_review_upload,
     write_review_packets,
 )
-from swarm_auth_bench.peer_reporting_v11.review_plan import build_review_plan, verify_review_plan
+from swarm_auth_bench.peer_reporting_v11.review_plan import (
+    build_review_plan,
+    pressure_review_selection,
+    verify_review_plan,
+)
 from swarm_auth_bench.peer_reporting_v11.score import score_trial
 
 from .live_fakes import Harness, authorization, caps_record, qualifier_steps, report_steps, run_phase
@@ -192,11 +198,45 @@ async def test_real_study_live_export_and_human_review_chain(tmp_path, capsys, m
     assert all(row["score"] is None and "attempt_path" not in row
                for row in index["rows"] if row["status"] == "unrun")
 
+    primary = {path: path.read_bytes() for path in collection.rglob("*")
+               if path.is_file() and (path.name == "journal.jsonl" or "attempts" in path.parts)}
+    changed_export = tmp_path / "changed-export"
+    shutil.copytree(export, changed_export)
+    changed_index = read_sealed(changed_export / "index.json")
+    changed_row = next(row for row in changed_index["rows"] if row["status"] == "archived")
+    attempt_path = changed_export / changed_row["attempt_path"]
+    changed_attempt = {key: value for key, value in read_sealed(attempt_path).items() if key != "seal_hash"}
+    final = next(row for row in changed_attempt["observer_outputs"] if row["source_kind"] == "final_response")
+    final["text"] = "I have a concern about the operation."
+    atomic_json(attempt_path, seal(changed_attempt))
+    changed_row["attempt_hash"] = content_hash(changed_attempt)
+    atomic_json(changed_export / "index.json", seal({key: value for key, value in changed_index.items() if key != "seal_hash"}))
+    for directory in (export, changed_export):
+        missing_study = tmp_path / (directory.name + "-missing-study")
+        with pytest.raises(ValueError, match="registered study directory"):
+            write_review_packets(directory, plan, missing_study)
+        assert main(["review-packets", str(directory), "--plan", str(plan_path), "--output", str(missing_study)]) == 2
+        assert "requires --study" in json.loads(capsys.readouterr().out)["error"]
+        assert not missing_study.exists()
+    inconsistent = tmp_path / "inconsistent-packets"
+    with pytest.raises(ValueError, match="exported attempt differs from registered live root"):
+        write_review_packets(changed_export, plan, inconsistent, study_directory=study)
+    assert main(["review-packets", str(changed_export), "--plan", str(plan_path), "--output", str(inconsistent),
+                 "--study", str(study)]) == 2
+    assert "exported attempt differs from registered live root" in json.loads(capsys.readouterr().out)["error"]
+    assert not inconsistent.exists()
+    with pytest.raises(ValueError, match="authored offline attempt"):
+        write_review_packets(changed_export, plan, inconsistent, replay=True)
+    with pytest.raises(ValueError, match="ordinary review plan"):
+        write_review_packets(export, pressure_review_selection([]), inconsistent, study_directory=study)
+    assert not inconsistent.exists()
+    assert primary == {path: path.read_bytes() for path in primary}
+
     wrong_plan = build_review_plan(manifest, seed=protocol["review_seed"], frozen_at_utc="2026-10-05T00:00:00Z")
     assert verify_review_plan(wrong_plan, manifest) == [] and wrong_plan["seal_hash"] != plan["seal_hash"]
     refused = tmp_path / "refused-packets"
     with pytest.raises(ValueError, match="review_plan_hash"):
-        write_review_packets(export, wrong_plan, refused)
+        write_review_packets(export, wrong_plan, refused, study_directory=study)
     assert not refused.exists()
 
     packets = tmp_path / "packets"

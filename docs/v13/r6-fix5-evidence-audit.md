@@ -1,4 +1,4 @@
-# Evidence gate audit through R6-fix7 (P-A4)
+# Evidence gate audit through R6-fix8 (P-A4)
 
 [Specification section 2.1](spec.md#21-evidence-and-trust-boundary-amendment-p-a4)
 is normative. The sealed study, lane journals and archived attempts, approval
@@ -33,8 +33,9 @@ plan or read from an environment variable.
 | `inspect_live_root` within export/re-derivation | Lane indexes and attempt summaries | Journaled archive presence and retained archived attempts. An index that hides a journaled archive refuses outside the per-row quarantine handler. A start without an archive retains the existing interrupted/recovery behavior. This lane-index check also refuses inconsistent earlier-level indexes; earlier levels do not keep the old handling for this mismatch. |
 | `export_live_review` | Plans, registrations, consumed ledger, indexes, amendments, repair records and declarations | Canonical study binding; study starts; journal and attempt evidence; current repairs rebuilt against their committed incident evidence; each P root's committed receipt before archive access. |
 | `registered_pressure_partitions`, `pressure_export_partitions` | Registrations, root/lane plans and exported population | Every root's entries are checked against sealed-study assignments before phase filtering; the canonical split supplies the phase, which both plan and registration must equal. P siblings with retained journal/attempt evidence require committed receipts independently of registration state; finalized P plans also require receipts. Excluded/unscored assignments remain in the planned population. |
-| P packet production, `build_pilot_decision`, `validate_core_decision` | Export population, rows, attempts, scores, exclusions, repair declarations, selection and decision | Shared verifier checks the source receipt, current repairs and declarations, reopens the source archive, rederives every row/attempt/score, and recomputes selection before filtering. Pilot mechanical counts and selection are recomputed; user flag resolutions and ceiling choices remain primary inputs. |
-| Earlier-level review-plan authoring/verification and packet production | Review plan and export binding | Full deterministic plan recomputation from the study and protocol seed; exact retained study/authorized plan hash. Earlier-level archives require no P-A4 receipt. |
+| P packet production, `build_pilot_decision`, `validate_core_decision` | Export population, rows, attempts, scores, exclusions, repair declarations, selection and decision | Packet production requires the registered study and verifies the complete export before routing or writing. The verified study determines the P route; its directory must equal the export locator after resolution. The source receipt, current repairs and declarations, and every archive row/attempt/score are checked. Packet selection reuses those verified rows without a second full archive derivation. Pilot mechanical counts and selection are recomputed; user flag resolutions and ceiling choices remain primary inputs. |
+| Earlier-level review-plan authoring/verification and packet production | Review plan, manifest copy, export rows/attempts and archive binding | Live packets require the registered study and the same complete registered-export verification before routing or writing. The verified study requires an ordinary review plan; deterministic recomputation checks its study and protocol seed, plus the retained export plan hash. Applicable receipt and repair checks remain in the shared verifier. Earlier-level archives require no P-A4 receipt. |
+| Authored replay packet production | Authored export, sealed manifest, review plan and attempts | API callers must opt into `replay=True` without a registered study. Every retained attempt, including assignments outside the plan, must have `execution_kind=authored_offline_replay` and match its hash before any output is written. The CLI requires `--study` and has no replay option. |
 | Core decision execution binding | Retained decision and eligible-lane declarations | Exact authorized plan's offline-recomputed decision; canonical assignment arms and lanes. This execution check reads no score exports and imports no post-hoc modules. |
 | Human upload validation | Controller attempt, selection row, packet and private bindings | Shared `verified_review_context` resolves the export to its registered archive and checks its receipt, then checks the controller copy and recomputed selection. The packet builder reconstructs evidence-bearing content from that verified attempt with retained masking IDs: output text/payloads, context, notices/reactions, instructions, delivered and retrievable records, and record checks. Consistently changed packet/controller hashes do not authorize changed content. |
 | Human endpoints | Resolution and any supplied structured score | Existing resolver recomputes resolution from submitted initial reviews, adjudication, authorization truth and the second-review rule from the verified, recomputed selection; complete resolution comparison. Live endpoints require the same verified context as uploads. Supplied structured scores are checked by rescoring the primary attempt. |
@@ -92,16 +93,34 @@ their bytes. Historical v1 settlement-only recovery has no retained timing/count
 evidence to check against and retains its existing recovery path; this journal addition is scoped
 to tool set v2 as requested.
 
-Earlier-level live packet consumers use the same registered-export verifier
-when given their study directory. The private controller retains that source
-locator; earlier exports are unchanged. Authored offline replay examples have
-no registered archive. Their unit callers explicitly opt into replay validation
-and endpoints; the live upload CLI does not offer that option, and live endpoint
-calls without a registered controller refuse.
-`test_review_packets.py::test_review_packets_command_and_unregistered_upload_consistency`
-checks that the live CLI reports the absent archive and that explicitly opted-in
-authored replay validation still succeeds. The native earlier-level integration
-chain checks registered-archive validation and endpoint rule consistency.
+Earlier-level live packet production requires its registered study and uses
+`verify_registered_export_evidence` before selecting the review route or writing.
+The private controller retains that study locator; earlier exports are unchanged.
+The verified study supplies assignment levels, so a changed exported manifest or
+ordinary plan cannot route a P archive through earlier-level packet production.
+P packets check that the export's retained study directory resolves to the supplied
+study. They reuse verified rows for selection instead of deriving the archive twice.
+
+Authored offline replay exports have no registered archive. Packet API callers must
+explicitly pass `replay=True`, and every retained attempt must be authored offline
+before any output is written. The packet CLI requires `--study` and offers no replay
+option. Authored validation and endpoint callers retain their explicit replay
+options; live endpoint calls without a registered controller refuse.
+`test_review_packets.py::test_explicit_replay_packets_and_unregistered_upload_consistency`
+checks replay packet production and validation. Its retained-attempt-kind test
+refuses live attempts both inside and outside the review plan.
+`test_packet_archive_consistency.py` covers the altered P manifest/answer, missing
+or different study locators, a positive native P CLI/API case, and one complete
+archive verification per packet call. The native earlier-level integration chain
+refuses the altered final answer through CLI/API with and without a study, preserves
+primary bytes, and accepts the unchanged archive-backed export.
+
+Astra's unchanged `test_earlier_packet_consistency.py` was run offline against
+its retained native fixtures. Both CLI reproductions returned exit 2 for missing
+`--study`; their historical exit-0 assertions therefore fail as expected. Six
+separate API refusal checks using those exact altered exports passed: omitted
+study, supplied registered study, and explicit replay for each reproduction.
+No packet directory was written and primary attempt/journal bytes stayed equal.
 
 ## R6-fix7 final offline validation
 
