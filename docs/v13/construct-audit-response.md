@@ -185,8 +185,17 @@ disagreement refuses. Primary evidence is protected by a receipt of its hashes, 
 when a root finishes and before any of its trials is exported. Reviews judge findings
 against this boundary.
 
+R6-fix6 fixed the ten findings and added P-A4's receipts. Astra's sixth confirmation
+review ([review-astra-r6-confirm6.md](review-astra-r6-confirm6.md)), judged against
+section 2.1, found six of the ten fixed and no new kind of finding. Four were fixed only
+for their first reproduction: a pause record left unchecked in an interrupted-archive
+crash state, a sibling root hidden by changing both of its phase copies, upload
+validation that rebuilt a packet from the controller's attempt copy instead of the
+archive, and a second-review rule taken from the caller instead of the review selection.
+Astra's wording comment on the receipt's coverage is applied in section 2.1 item 3.
+
 ## Next
 
-R6-fix6 fixes all ten findings and implements P-A4's receipts. Astra then confirms against
-section 2.1. No model call runs before the user authorizes the v2 compatibility plan and
-the gate and pilot plan.
+R6-fix7 fixes the four remaining findings. Astra then confirms against section 2.1. No
+model call runs before the user authorizes the v2 compatibility plan and the gate and
+pilot plan.

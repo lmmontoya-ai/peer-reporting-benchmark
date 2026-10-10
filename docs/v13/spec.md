@@ -119,8 +119,13 @@ records and summaries.
    - When a level P root or a tool set v2 compatibility root finishes, a receipt is
      committed to the public repository before any of the root's trials is exported,
      scored or reviewed.
-   - The receipt lists the SHA-256 of the study manifest, the root plan, and each lane
-     plan, journal and archived attempt. It holds hashes only.
+   - The receipt lists the SHA-256 of the root's own files: the study manifest, the root
+     plan and each lane plan, which name what ran, and each lane journal and archived
+     attempt. It holds hashes only. The plans are derived records; the receipt includes
+     them so that it names what ran, and item 1 still applies to them.
+   - Other primary evidence is not in the receipt. A4.1 evidence has its own commit.
+     Approval texts, flag resolutions, and human review uploads and adjudications are
+     retained as submitted and checked against the records they name.
    - Every later step that reads the root's journals or attempts refuses unless the files
      equal a receipt held in a local Git commit. These steps include export, the shared
      re-derivation behind packets and the pilot decision, and the build of any root that
@@ -1156,3 +1161,4 @@ Amendment P-A4 ([review-astra-r6-confirm4.md](review-astra-r6-confirm4.md),
 | A disagreement between an index and the journal became a quarantined observation; a disagreement refuses | R6-confirm5 N1 | 2.1 item 2 |
 | Primary evidence can be rewritten consistently; a committed receipt protects each level P root before export | user decision after R6-confirm5 | 2.1 item 3 |
 | Review findings are judged against this boundary | user decision after R6-confirm5 | 2.1 item 4 |
+| The receipt's coverage, and how other primary evidence is protected, are stated | R6-confirm6 spec comment | 2.1 item 3 |
