@@ -36,7 +36,7 @@ def core_review_inputs(tmp_path, wp6_study):
         stored = read_sealed(source / manifest["fixtures"][row["fixture_id"]]["path"])
         fixture = {key: value for key, value in stored.items() if key != "seal_hash"}
         raw = pressure_attempt()
-        raw.update(fixture=fixture, assignment_id=row["assignment_id"], attempt_id=row["assignment_id"] + "-double",
+        raw.update(fixture=fixture, instructions=row["instructions"], assignment_id=row["assignment_id"], attempt_id=row["assignment_id"] + "-double",
                    **{key: row[key] for key in ("model", "effort", "arm", "variant", "level")})
         raw["observer_outputs"] = [{"output_id": "final-output", "source_kind": "final_response",
                                     "text": "These peers are not real participants."}]

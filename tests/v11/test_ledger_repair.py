@@ -46,6 +46,8 @@ def committed_evidence(directory, raw, identity, journal):
 
 
 def bind_lane(lane, evidence):
+    lane["evidence"] = evidence
+    lane.setdefault("evidence_directories", []).append(evidence)
     binding = build_ledger_repair_binding(evidence, study=lane["study"].name, root=lane["root"].name,
                                          lane_id=LANE, plan_hash=lane["plan"]["seal_hash"], commit="HEAD",
                                          approval_text=APPROVAL)
@@ -139,7 +141,8 @@ def corrupt_lane(lane):
 def command(lane, capsys):
     code = main(["repair-ledger", str(lane["root"]), "--study", str(lane["study"]), "--lane", LANE,
                  "--reason", "Single-bit storage corruption.", "--approval-text", APPROVAL,
-                 "--binding", str(lane["binding"])])
+                 "--binding", str(lane["binding"])] + [part for directory in lane["evidence_directories"]
+                       for part in ("--repair-evidence-directory", str(directory))])
     return code, json.loads(capsys.readouterr().out)
 
 
@@ -167,12 +170,12 @@ def test_cli_repair_retains_seals_journals_verifies_and_exports(lane, capsys, tm
     assert entries[-1]["data"]["repair_hash"] == record["seal_hash"]
     changed = {name for name, value in before.items() if file_hashes(lane["root"])[name] != value}
     assert changed == {f"lanes/{LANE}/budget-ledger.json", f"lanes/{LANE}/journal.jsonl"}
-    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 0
+    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])] + ["--repair-evidence-directory", str(lane["evidence"])]) == 0
     verified = json.loads(capsys.readouterr().out)
     assert verified["ledger_repairs"] == [{"record": report["repair_record"], **record}]
     assert verified["lanes"][LANE]["ledger"]["settled_tokens"] == 1700
     assert main(["export-review", str(lane["root"]), "--study", str(lane["study"]),
-                 "--output", str(tmp_path / "export"), "--no-score"]) == 0
+                 "--output", str(tmp_path / "export"), "--no-score"] + ["--repair-evidence-directory", str(lane["evidence"])]) == 0
     exported = json.loads(capsys.readouterr().out)
     index = read_sealed(tmp_path / "export" / "index.json")
     assert exported["ledger_repairs"] == index["ledger_repairs"] == verified["ledger_repairs"]
@@ -321,10 +324,10 @@ def test_verify_and_export_refuse_tampered_repair_evidence(lane, capsys, tmp_pat
             entries[-1].pop("hash")
             entries[-1]["hash"] = content_hash(entries[-1])
             journal_path.write_bytes("".join(canonical_json(entry) + "\n" for entry in entries).encode())
-    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 2
+    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])] + ["--repair-evidence-directory", str(lane["evidence"])]) == 2
     assert "error" in json.loads(capsys.readouterr().out)
     assert main(["export-review", str(lane["root"]), "--study", str(lane["study"]),
-                 "--output", str(tmp_path / "export"), "--no-score"]) == 2
+                 "--output", str(tmp_path / "export"), "--no-score"] + ["--repair-evidence-directory", str(lane["evidence"])]) == 2
     assert "error" in json.loads(capsys.readouterr().out)
     assert not (tmp_path / "export").exists()
 
@@ -378,7 +381,7 @@ def test_historical_repair_verifies_after_further_ordinary_ledger_updates(lane, 
     assert lane["budget"].admit("later")
     lane["budget"].observe("later", "later-usage", 5)
     lane["budget"].settle("later", 5)
-    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 0
+    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])] + ["--repair-evidence-directory", str(lane["evidence"])]) == 0
     assert len(json.loads(capsys.readouterr().out)["ledger_repairs"]) == 1
 
 
@@ -517,7 +520,7 @@ def test_astra_fabrications_refuse_without_or_with_genuine_binding(lane, capsys,
     else:
         with pytest.raises(SystemExit) as error:
             main(["repair-ledger", str(lane["root"]), "--study", str(lane["study"]), "--lane", LANE,
-                  "--reason", "Single-bit storage corruption.", "--approval-text", APPROVAL])
+                  "--reason", "Single-bit storage corruption.", "--approval-text", APPROVAL] + ["--repair-evidence-directory", str(lane["evidence"])])
         assert error.value.code == 2
         capsys.readouterr()
     assert file_hashes(lane["root"]) == before
@@ -557,8 +560,8 @@ def test_interrupted_repair_resumes_and_verification_requires_completion(lane, c
     assert intended.endswith(b"\n")
     with pytest.raises(ValueError, match="prepared but not completed"):
         ledger_repair.verify_root_ledger_repairs(lane["root"], lane["plan"],
-                                               live.lane_journals(lane["root"], lane["plan"]))
-    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 2
+                                               live.lane_journals(lane["root"], lane["plan"]), evidence_directory=lane["evidence"])
+    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])] + ["--repair-evidence-directory", str(lane["evidence"])]) == 2
     capsys.readouterr()
     code, report = command(lane, capsys)
     assert code == 0 and report["repair"]["status"] == "complete"
@@ -567,7 +570,7 @@ def test_interrupted_repair_resumes_and_verification_requires_completion(lane, c
     assert len([record for record in iter_events(lane["directory"] / "journal.jsonl")
                 if record["kind"] == "ledger_repaired"]) == 1
     assert (lane["directory"] / "journal.jsonl").read_bytes().endswith(intended)
-    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 0
+    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])] + ["--repair-evidence-directory", str(lane["evidence"])]) == 0
     capsys.readouterr()
 
 
@@ -635,12 +638,12 @@ def test_interrupted_declaration_write_resumes_verifies_and_exports(lane, capsys
     else:
         with pytest.raises(ValueError, match="prepared but not completed"):
             ledger_repair.verify_root_ledger_repairs(lane["root"], lane["plan"],
-                                                   live.lane_journals(lane["root"], lane["plan"]))
+                                                   live.lane_journals(lane["root"], lane["plan"]), evidence_directory=lane["evidence"])
     before = file_hashes(lane["root"])
-    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 2
+    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])] + ["--repair-evidence-directory", str(lane["evidence"])]) == 2
     capsys.readouterr()
     assert main(["export-review", str(lane["root"]), "--study", str(lane["study"]),
-                 "--output", str(tmp_path / "refused-export"), "--no-score"]) == 2
+                 "--output", str(tmp_path / "refused-export"), "--no-score"] + ["--repair-evidence-directory", str(lane["evidence"])]) == 2
     capsys.readouterr()
     assert not (tmp_path / "refused-export").exists()
     assert file_hashes(lane["root"]) == before
@@ -661,10 +664,10 @@ def test_interrupted_declaration_write_resumes_verifies_and_exports(lane, capsys
         # A full visible declaration is synced again before completion (Astra A4 round 3).
         assert fsync_sizes[0] == len(checkpoint) + len(intended)
     assert len([event for event in iter_events(journal_path) if event["kind"] == "ledger_repaired"]) == 1
-    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])]) == 0
+    assert main(["verify", str(lane["root"]), "--study", str(lane["study"])] + ["--repair-evidence-directory", str(lane["evidence"])]) == 0
     capsys.readouterr()
     assert main(["export-review", str(lane["root"]), "--study", str(lane["study"]),
-                 "--output", str(tmp_path / "export"), "--no-score"]) == 0
+                 "--output", str(tmp_path / "export"), "--no-score"] + ["--repair-evidence-directory", str(lane["evidence"])]) == 0
     capsys.readouterr()
 
 
@@ -772,31 +775,31 @@ def test_prior_roots_recheck_repairs_in_ledger_prepare_verify_and_export(lane, c
     assert command(lane, capsys)[0] == 0
     rows, fixtures, source = live.load_study(lane["study"], "smoke")
     ledger = live.prior_root_ledger([lane["root"]], phase="smoke", source=source,
-                                  study_directory=lane["study"], bundle=fake_bundle())
+                                  study_directory=lane["study"], bundle=fake_bundle(), repair_evidence_directory=lane["evidence_directories"])
     successor_plan = live.build_assignment_plan("smoke", rows, fixtures, caps_record(), revision="successor",
                                                 source=source, gate_evidence={}, bundle=fake_bundle(),
                                                 study_manifest=live.read_study_manifest(lane["study"]),
                                                 consumed_attempts=ledger)
     successor = lane["study"] / "roots" / "successor"
     live.prepare_live_root(successor, successor_plan, study_directory=lane["study"],
-                           prior_roots=[lane["root"]], bundle=fake_bundle())
+                           prior_roots=[lane["root"]], bundle=fake_bundle(), repair_evidence_directory=lane["evidence_directories"])
     assert live.verify_live_root(successor, study_directory=lane["study"], prior_roots=[lane["root"]],
-                                 bundle=fake_bundle())["consumed_attempt_ledger"]["checked"]
+                                 bundle=fake_bundle(), repair_evidence_directory=lane["evidence_directories"])["consumed_attempt_ledger"]["checked"]
     record = read_sealed(lane["directory"] / "ledger-repairs" / "repair-1.json")
     suffix = f"{record['corrupt_sha256']}.corrupt" if damage == "retained" else f"binding-{record['binding_hash']}.json"
     (lane["directory"] / "ledger-repairs" / suffix).unlink()
     with pytest.raises((OSError, ValueError)):
         live.prior_root_ledger([lane["root"]], phase="smoke", source=source,
-                               study_directory=lane["study"], bundle=fake_bundle())
+                               study_directory=lane["study"], bundle=fake_bundle(), repair_evidence_directory=lane["evidence_directories"])
     refused = lane["study"] / "roots" / "refused"
     with pytest.raises((OSError, ValueError)):
         live.prepare_live_root(refused, successor_plan, study_directory=lane["study"],
-                               prior_roots=[lane["root"]], bundle=fake_bundle())
+                               prior_roots=[lane["root"]], bundle=fake_bundle(), repair_evidence_directory=lane["evidence_directories"])
     assert not refused.exists()
     with pytest.raises((OSError, ValueError)):
-        live.verify_live_root(successor, study_directory=lane["study"], prior_roots=[lane["root"]], bundle=fake_bundle())
+        live.verify_live_root(successor, study_directory=lane["study"], prior_roots=[lane["root"]], bundle=fake_bundle(), repair_evidence_directory=lane["evidence_directories"])
     assert main(["export-review", str(successor), "--study", str(lane["study"]), "--prior-root", str(lane["root"]),
-                 "--output", str(tmp_path / "export"), "--no-score"]) == 2
+                 "--output", str(tmp_path / "export"), "--no-score"] + ["--repair-evidence-directory", str(lane["evidence"])]) == 2
     capsys.readouterr()
     assert not (tmp_path / "export").exists()
 
@@ -835,12 +838,12 @@ def test_second_repair_resumes_and_rechecks_first_repair(lane, capsys, tmp_path,
         patch.setattr(_Journal, "append_prepared", interrupted)
         assert command(lane, capsys)[0] == 2
     assert command(lane, capsys)[0] == 0
-    report = live.verify_live_root(lane["root"], study_directory=lane["study"], bundle=fake_bundle())
+    report = live.verify_live_root(lane["root"], study_directory=lane["study"], bundle=fake_bundle(), repair_evidence_directory=lane["evidence_directories"])
     assert len(report["ledger_repairs"]) == 2
     first = read_sealed(lane["directory"] / "ledger-repairs" / "repair-1.json")
     (lane["directory"] / "ledger-repairs" / f"{first['corrupt_sha256']}.corrupt").unlink()
     with pytest.raises(OSError):
-        live.verify_live_root(lane["root"], study_directory=lane["study"], bundle=fake_bundle())
+        live.verify_live_root(lane["root"], study_directory=lane["study"], bundle=fake_bundle(), repair_evidence_directory=lane["evidence_directories"])
 
 
 @pytest.mark.parametrize("length", ["full", "full_unsynced"])

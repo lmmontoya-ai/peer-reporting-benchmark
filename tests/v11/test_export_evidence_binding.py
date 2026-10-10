@@ -7,14 +7,20 @@ from pathlib import Path
 import pytest
 
 from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, seal
-from swarm_auth_bench.peer_reporting_v11.pilot_decision import build_pilot_decision, export_reference, validate_core_decision
+from swarm_auth_bench.peer_reporting_v11.pilot_decision import (
+    build_pilot_decision,
+    export_reference,
+    validate_core_decision,
+)
 from swarm_auth_bench.peer_reporting_v11.review import write_review_packets
 from swarm_auth_bench.peer_reporting_v11.review_plan import pressure_review_selection
 from swarm_auth_bench.peer_reporting_v11.review_sampling import analysis_score_rows
 
 from .review_root_helpers import register_review_root
-from .test_pilot_decision import core_build, decision_inputs as decision_inputs
-from .test_review_population import core_review_inputs as core_review_inputs, export_root, export_rows
+from .test_pilot_decision import core_build
+from .test_pilot_decision import decision_inputs as decision_inputs
+from .test_review_population import core_review_inputs as core_review_inputs
+from .test_review_population import export_root, export_rows
 
 
 def reseal_index(path, index):
@@ -144,8 +150,10 @@ def test_all_unrun_pressure_rows_keep_the_registered_source_and_empty_selection(
         gate_evidence={}, study_manifest=manifest)
     root = study / "roots" / "unrun"
     live.prepare_live_root(root, built, study_directory=study)
+    from .receipt_helpers import commit_receipt
+    receipts = commit_receipt(root, tmp_path / "receipts", study_directory=study)
     export = tmp_path / "export"
-    export_live_review(root, export, study_directory=study, scorer=score_trial,
+    export_live_review(root, export, study_directory=study, scorer=score_trial, receipt_directory=receipts,
                        pressure_review_selector=pressure_review_selection)
     index = read_sealed(export / "index.json")
     assert len(index["rows"]) == 24
@@ -158,11 +166,11 @@ def test_all_unrun_pressure_rows_keep_the_registered_source_and_empty_selection(
     stored = read_sealed(study / manifest["fixtures"][earlier["fixture_id"]]["path"])
     earlier_fixture = {key: value for key, value in stored.items() if key != "seal_hash"}
     source = built[0]["source"]
-    ledger = live.prior_root_ledger([root], phase="calibration", source=source, study_directory=study)
+    ledger = live.prior_root_ledger([root], phase="calibration", source=source, study_directory=study, receipt_directory=receipts)
     earlier_plan = live.build_assignment_plan("calibration", [earlier], {earlier["fixture_id"]: earlier_fixture},
         wp6_inputs["caps_record"], revision="earlier-archive", source=source, gate_evidence={},
         study_manifest=manifest, consumed_attempts=ledger)
     assert "compound_type" not in next(iter(earlier_plan[1].values()))["planned_order"][0]
-    live.prepare_live_root(study / "roots" / "earlier", earlier_plan, study_directory=study, prior_roots=[root])
-    assert verify_pressure_export_evidence(export, index) == []
-    assert write_review_packets(export, pressure_review_selection([]), tmp_path / "packets")["packets"] == 0
+    live.prepare_live_root(study / "roots" / "earlier", earlier_plan, study_directory=study, prior_roots=[root], receipt_directory=receipts)
+    assert verify_pressure_export_evidence(export, index, receipt_directory=receipts) == []
+    assert write_review_packets(export, pressure_review_selection([]), tmp_path / "packets", receipt_directory=receipts)["packets"] == 0

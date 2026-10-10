@@ -10,10 +10,14 @@ from swarm_auth_bench.peer_reporting_v11.review import write_review_packets
 from swarm_auth_bench.peer_reporting_v11.review_plan import build_review_plan
 
 from .review_root_helpers import register_review_root
+from .test_ledger_repair import APPROVAL, LANE, file_hashes
+from .test_ledger_repair import lane as lane
 from .test_pilot_decision import decision_inputs as decision_inputs
-from .test_ledger_repair import APPROVAL, LANE, file_hashes, lane as lane
-from .test_review_population import core_review_inputs as core_review_inputs, export_root, export_rows
-from .test_study_assignment_binding import core as core, core_template as core_template, reseal_root
+from .test_review_population import core_review_inputs as core_review_inputs
+from .test_review_population import export_root, export_rows
+from .test_study_assignment_binding import core as core
+from .test_study_assignment_binding import core_template as core_template
+from .test_study_assignment_binding import reseal_root
 
 
 @pytest.mark.parametrize("consumer", ["consumption", "prior_ledger", "export"])
@@ -45,7 +49,7 @@ def test_repair_gate_refuses_primary_assignment_substitution_before_writes(lane)
     before = file_hashes(lane["root"])
     with pytest.raises(ValueError, match="assignment arm differs from sealed study"):
         repair_ledger(lane["root"], study_directory=lane["study"], lane_id=LANE,
-                      reason="Repair approved evidence.", approval_text=APPROVAL, binding_path=lane["binding"])
+                      reason="Repair approved evidence.", approval_text=APPROVAL, binding_path=lane["binding"], evidence_directory=lane["evidence"])
     assert file_hashes(lane["root"]) == before
 
 
@@ -67,6 +71,7 @@ def test_pressure_export_cannot_use_an_earlier_level_review_plan(tmp_path, monke
 @pytest.mark.parametrize("empty", [False, True])
 def test_pressure_export_must_retain_the_whole_live_root(decision_inputs, empty):
     from pathlib import Path
+
     from swarm_auth_bench.peer_reporting_v11.pilot_decision import build_pilot_decision, export_reference
     from swarm_auth_bench.peer_reporting_v11.review_plan import pressure_review_selection
 
@@ -84,7 +89,9 @@ def test_pressure_export_must_retain_the_whole_live_root(decision_inputs, empty)
 @pytest.mark.parametrize("field", ["eligibility", "task", "endpoint"])
 def test_human_endpoints_refuse_resealed_structured_scores(tmp_path, field):
     from copy import deepcopy
+
     from swarm_auth_bench.peer_reporting_v11.review import human_endpoints
+
     from .review_helpers import bundle_for, fixture, replay, structured
 
     attempt = replay(tmp_path, fixture(), [])

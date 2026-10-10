@@ -45,6 +45,7 @@ def bind_review_root_observations(monkeypatch, root, plan, rows):
     """Inject primary archive observations for plan-only unit doubles, never export rows."""
     from copy import deepcopy
     from pathlib import Path
+
     from swarm_auth_bench.peer_reporting_v11 import live_review
 
     def patch(name, primary, position=0):
@@ -55,6 +56,13 @@ def bind_review_root_observations(monkeypatch, root, plan, rows):
             return original(*args, **kwargs)
         monkeypatch.setattr(live_review, name, call)
 
+    from swarm_auth_bench.peer_reporting_v11 import ledger_repair, receipts
+    original_receipt = receipts.check_receipt
+    original_repairs = ledger_repair.verify_root_ledger_repairs
+    monkeypatch.setattr(receipts, "check_receipt", lambda directory, *a, **k:
+                        None if Path(directory).resolve() == root.resolve() else original_receipt(directory, *a, **k))
+    monkeypatch.setattr(ledger_repair, "verify_root_ledger_repairs", lambda directory, *a, **k:
+                        [] if Path(directory).resolve() == root.resolve() else original_repairs(directory, *a, **k))
     patch("check_root_assignment_binding", lambda *a, **k: None)
     patch("check_abandoned_root", lambda *a, **k: None)
     patch("lane_journals", lambda *a, **k: {lane["lane_id"]: [] for lane in plan["lanes"]})

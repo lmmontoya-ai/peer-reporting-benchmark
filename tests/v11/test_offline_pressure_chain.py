@@ -4,6 +4,7 @@ import json
 import shutil
 from collections import Counter, deque
 from pathlib import Path
+from time import perf_counter
 
 import pytest
 
@@ -19,6 +20,7 @@ from swarm_auth_bench.peer_reporting_v11.pilot_decision import (
     export_reference,
     validate_core_decision,
 )
+from swarm_auth_bench.peer_reporting_v11.receipts import check_receipt
 from swarm_auth_bench.peer_reporting_v11.review import write_review_packets
 from swarm_auth_bench.peer_reporting_v11.review_plan import pressure_review_selection
 from swarm_auth_bench.peer_reporting_v11.schemas import TOOL_SCHEMA_VERSION_P
@@ -26,6 +28,7 @@ from swarm_auth_bench.peer_reporting_v11.score import score_trial, summarize
 
 from .live_fakes import Harness, authorization, qualifier_steps, run_phase
 from .r6_observers import CASES, assert_case, case_for, observer
+from .receipt_helpers import commit_receipt
 from .test_pressure_fixtures import fixture
 
 
@@ -94,6 +97,8 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
                              auth=authorization(top, root=compatibility))
     assert status["status"] == "complete" and len(harness.created) == 6
     assert all(lane["qualified"] for lane in live.verify_live_root(compatibility, bundle=bundle)["lanes"].values())
+    receipts = commit_receipt(compatibility, tmp_path / "receipts")
+    timings = {}
     roots, seen, all_scores = [], set(), []
     decision = None
     def selected_case(entry):
@@ -111,15 +116,17 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
         root = study / "roots" / name
         built = live.build_phase_plan("calibration", caps, revision="r6-offline-" + name, study_directory=study,
                                       compatibility_directories=[compatibility], prior_roots=roots,
-                                      bundle=bundle, arms=list(arms), pilot_decision=decision,
+                                      bundle=bundle, arms=list(arms), pilot_decision=decision, receipt_directory=receipts,
                                       pilot_decision_verifier=validate_core_decision if decision else None)
         live.prepare_live_root(root, built, study_directory=study, prior_roots=roots, bundle=bundle,
-                               pilot_decision_verifier=validate_core_decision if decision else None)
+                               pilot_decision_verifier=validate_core_decision if decision else None, receipt_directory=receipts,
+                               compatibility_directories=[compatibility])
         top = live.read_live_plan(root)
         assert top["maximum_live_calls"] == expected and top["tool_schema_version"] == TOOL_SCHEMA_VERSION_P
         assert top["gate_evidence"]["qualification"]
         assert {e["tool_manifest_hash"] for e in top["gate_evidence"]["qualification"].values()} == {bundle.tool_set(TOOL_SCHEMA_VERSION_P).tool_manifest_hash}
-        assert live.verify_live_root(root, bundle=bundle, study_directory=study, prior_roots=roots)["unreconciled_starts"] == []
+        assert live.verify_live_root(root, bundle=bundle, study_directory=study, prior_roots=roots,
+                                         compatibility_directories=[compatibility], receipt_directory=receipts)["unreconciled_starts"] == []
         entries = [entry for lane in top["lanes"] for entry in read_sealed(root / lane["path"] / "phase-plan.json")["planned_order"]]
         queues = {}
         for lane in top["lanes"]:
@@ -134,14 +141,20 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
             return steps + [("message", script["final_response"])]
         harness = Harness(tmp_path / (name + "-homes"), script_for)
         status = await run_phase(root, top, harness, bundle=bundle, study_directory=study, prior_roots=roots,
-                                 compatibility_directories=[compatibility], auth=authorization(top))
+                                 compatibility_directories=[compatibility], auth=authorization(top), receipt_directory=receipts)
         assert status["status"] == "complete" and len(harness.created) == expected
         assert all(not queue for queue in queues.values())
-        verified = live.verify_live_root(root, bundle=bundle, study_directory=study, prior_roots=roots)
+        verified = live.verify_live_root(root, bundle=bundle, study_directory=study, prior_roots=roots,
+                                         compatibility_directories=[compatibility], receipt_directory=receipts)
         assert sum(lane["valid_outcomes"] for lane in verified["lanes"].values()) == expected
+        commit_receipt(root, receipts, study_directory=study)
+        started = perf_counter()
+        check_receipt(root, receipts, study_directory=study)
+        timings[str(expected)] = perf_counter() - started
+        (tmp_path / "receipt-timings.json").write_bytes(json.dumps(timings).encode("utf-8") + b"\n")
         export = tmp_path / (name + "-export")
         exported = export_live_review(root, export, study_directory=study, prior_roots=roots, bundle=bundle,
-                                      scorer=score_trial, summarize=summarize,
+                                      scorer=score_trial, summarize=summarize, receipt_directory=receipts,
                                       pressure_review_selector=pressure_review_selection)
         assert exported["status_counts"] == {"archived": expected} and exported["lane_errors"] == {}
         index = read_sealed(export / "index.json")
@@ -168,7 +181,7 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
         selected = index["pressure_review_selection"]["rows"]
         assert selected and all(row["scope"] == "full" for row in selected)
         packet_output = tmp_path / (name + "-packets")
-        finished = write_review_packets(export, index["pressure_review_selection"], packet_output)
+        finished = write_review_packets(export, index["pressure_review_selection"], packet_output, receipt_directory=receipts)
         assert finished["packets"] == len(selected)
         packets = [read_sealed(path) for path in (packet_output / "reviewer").glob("*.json")]
         assert all("visibility" not in packet and "pressure" not in packet for packet in packets)
@@ -180,7 +193,7 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
                        for message in packet["observed_peer_messages"])
         if name == "gate-pilot":
             reference = export_reference(export)
-            decision = build_pilot_decision(gate_exports=[reference], pilot_exports=[reference])
+            decision = build_pilot_decision(gate_exports=[reference], pilot_exports=[reference], receipt_directory=receipts)
             assert decision["decision"] == "proceed" and decision["Psel"] == "P3"
             assert decision["pooled_gate"]["hits"] == 36
             atomic_json(tmp_path / "pilot-decision.json", decision)

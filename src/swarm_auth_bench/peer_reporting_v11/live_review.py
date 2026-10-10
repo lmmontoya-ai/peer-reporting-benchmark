@@ -335,6 +335,7 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
     bundle = _tool_set_for_plan(plan, bundle)
     _require(plan["phase"] != "compatibility",
              "compatibility attempts are engineering checks, not behavioral observations")
+    pressure = plan["tool_schema_version"] == "peer-reporting-v11-tools-v2"
     rows: list[dict] = []
     lane_errors: dict[str, str] = {}
     authorizations: dict[str, str | None] = {}
@@ -342,6 +343,8 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
         try:
             state = _PhaseState(safe_child(directory, lane["path"]), bundle=bundle)
         except _ERRORS as error:
+            if pressure:
+                raise ValueError(f"lane evidence is inconsistent: {error}") from error
             lane_errors[lane["lane_id"]] = str(error)
             state = None
         if state is not None:
@@ -349,8 +352,10 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
                 _require(state.plan_hash == lane["plan_hash"], "lane plan differs from the sealed live plan")
                 state.verify_budget_history()
             except _ERRORS as error:
-                lane_errors[lane["lane_id"]] = str(error)
                 state.journal.close()
+                if pressure:
+                    raise ValueError(f"lane evidence is inconsistent: {error}") from error
+                lane_errors[lane["lane_id"]] = str(error)
                 state = None
         if state is None:
             lane_plan = read_sealed(safe_child(directory, f"{lane['path']}/phase-plan.json"))
@@ -363,6 +368,11 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
             continue
         try:
             for entry in state.plan["planned_order"]:
+                indexed = state.index["entries"][entry["entry_id"]]
+                archives = [record for record in state.journal.of_kind("attempt_archived")
+                            if record["data"]["attempt_id"] == entry["attempt_id"]]
+                _require(not archives or indexed["status"] == "archived",
+                         "lane index archive status differs from the lane journal")
                 row = {"assignment_id": entry["entry_id"], **_labels(entry, plan["phase"], lane["lane_id"]),
                        "status": "unrun", "attempt": None, "score": None, "evidence_error": None,
                        "score_error": None, "excluded_from_analysis": False, "authorization_hash": None,
@@ -378,8 +388,12 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
                     row["status"], row["attempt"] = _read_attempt(state, entry, fixture, phase=plan["phase"],
                                                                   bundle=bundle)
                 except _ERRORS as error:
+                    if pressure:
+                        raise ValueError(f"attempt evidence is inconsistent: {error}") from error
                     row.update(status="quarantined_attempt", attempt=None, evidence_error=str(error))
                 if row["attempt"] is not None and row["authorization_error"] is not None:
+                    if pressure:
+                        raise ValueError(f"attempt authorization differs from its approval: {row['authorization_error']}")
                     row.update(status="quarantined_authorization", attempt=None,
                                evidence_error=row["authorization_error"])
                 if row["attempt"] is not None and row["attempt"]["excluded_from_analysis"]:
@@ -411,7 +425,9 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
                        prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None,
                        scorer: Callable[[dict], dict] | None = None,
                        summarize: Callable[[list[dict]], dict] | None = None,
-                       pressure_review_selector: Callable[[list[dict]], dict] | None = None) -> dict:
+                       pressure_review_selector: Callable[[list[dict]], dict] | None = None,
+                           receipt_directory: Path | None = None,
+                           repair_evidence_directory: Path | None = None) -> dict:
     """Write a fresh researcher export: one sealed attempt per archived row and a sealed index.
 
     ``study_directory`` is the study directory in which the root is registered,
@@ -432,15 +448,19 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     bundle = _tool_set_for_plan(plan, bundle)
     _require(plan["phase"] != "compatibility",
              "compatibility attempts are engineering checks, not behavioral observations")
+    from .receipts import check_receipt
+
     check_root_assignment_binding(directory, plan, study_directory)
+    check_receipt(directory, receipt_directory, study_directory=study_directory)
     registration = root_registration(study_directory, plan, directory=directory, require_finalized=False)
     check_abandoned_root(directory, registration)
     journals = lane_journals(directory, plan)
     from .ledger_repair import verify_root_ledger_repairs
 
-    ledger_repairs = verify_root_ledger_repairs(directory, plan, journals)
+    ledger_repairs = verify_root_ledger_repairs(directory, plan, journals, evidence_directory=repair_evidence_directory)
     start_claims = check_start_claims(study_directory, plan, directory, journals)
-    ledger = verify_consumed_ledger(directory, plan, prior_roots, bundle=bundle, study_directory=study_directory)
+    ledger = verify_consumed_ledger(directory, plan, prior_roots, bundle=bundle, study_directory=study_directory,
+        receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
     selected_arms = check_arm_selection(plan, planned_arms(directory, plan))
     review_plan_hash = check_retained_review_plan(directory, plan) if plan["phase"] == "collection" else None
     amendments = study_amendments(study_directory) if plan["phase"] == "smoke" else []

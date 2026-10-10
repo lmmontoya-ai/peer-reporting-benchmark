@@ -118,7 +118,9 @@ def _review(args: argparse.Namespace) -> dict:
         plan = read_sealed(args.plan) if args.plan else read_sealed(args.export / "index.json").get("pressure_review_selection")
         if plan is None:
             raise ValueError("review-packets requires --plan for earlier levels")
-        return write_review_packets(args.export, plan, args.output)
+        return write_review_packets(args.export, plan, args.output,
+            receipt_directory=args.receipt_directory,
+            repair_evidence_directory=args.repair_evidence_directory)
     from .review import validate_review_upload
 
     return validate_review_upload(read_json(args.upload), read_json(args.packet),
@@ -243,12 +245,27 @@ def _parser() -> argparse.ArgumentParser:
         _study(command, "study directory in which a behavioral root is registered")
         _prior_roots(command)
         _amendments(command)
+    for command in (build, verify, export, decision, repair, cleanup, propose, abandon, *
+                    [commands.choices[name] for name in LIVE_COMMANDS], commands.choices["review-packets"]):
+        command.add_argument("--receipt-directory", type=Path, help="directory of committed P-A4 receipts")
+        command.add_argument("--repair-evidence-directory", type=Path, action="append", help="independently retained A4.1 evidence")
+    for command in (verify, cleanup, propose):
+        command.add_argument("--compatibility", type=Path, action="append", default=[])
+    receipt = commands.add_parser("root-receipt", help="write the P-A4 primary evidence receipt offline")
+    receipt.add_argument("root", type=Path)
+    receipt.add_argument("--receipt-directory", type=Path, required=True)
+    receipt.add_argument("--study", type=Path)
     return parser
 
 
 def _run(args: argparse.Namespace) -> dict:
     from .bundle import load_bundle
 
+    if args.command == "root-receipt":
+        from .receipts import write_receipt
+
+        path = write_receipt(args.root, args.receipt_directory, study_directory=args.study)
+        return {"receipt": str(path), "live_model_calls": 0}
     if args.command == "pilot-decision":
         from .pilot_decision import build_pilot_decision, export_reference
 
@@ -256,7 +273,9 @@ def _run(args: argparse.Namespace) -> dict:
             pilot_exports=[export_reference(path) for path in args.pilot_export],
             flag_resolutions=read_json(args.flag_resolutions) if args.flag_resolutions else None,
             confirmed_scripting_remarks=read_json(args.scripting_remarks) if args.scripting_remarks else None,
-            ceiling_choice=args.ceiling_choice)
+            ceiling_choice=args.ceiling_choice,
+                receipt_directory=args.receipt_directory,
+                repair_evidence_directory=args.repair_evidence_directory)
         _write_new_json_files({args.output: record})
         return {"output": str(args.output), "seal_hash": record["seal_hash"], "decision": record["decision"],
                 "Psel": record["Psel"], "eligible_lanes": record["eligible_lanes"], "live_model_calls": 0}
@@ -265,7 +284,10 @@ def _run(args: argparse.Namespace) -> dict:
         from .resources import propose_caps
 
         proposal = propose_caps([root for group in args.root for root in group], study_directory=args.study,
-                                phase=args.phase, protocol=load_protocol())
+                                phase=args.phase, protocol=load_protocol(),
+                                    receipt_directory=args.receipt_directory,
+                                    repair_evidence_directory=args.repair_evidence_directory,
+                                    compatibility_directories=args.compatibility)
         _write_new_json_files({args.output: proposal})
         return {"output": str(args.output), "caps": proposal["caps"], "status": proposal["status"],
                 "proposal_hash": proposal["seal_hash"], "live_model_calls": 0}
@@ -312,21 +334,28 @@ def _run(args: argparse.Namespace) -> dict:
         if args.study is None or smoke_root is None:
             raise ValueError("--amendment requires --study and the smoke root (the smoke command's root or --smoke)")
         for path in args.amendments:
-            record_amendment(args.study, read_json(path), smoke_roots=[smoke_root], bundle=load_bundle())
+            record_amendment(args.study, read_json(path), smoke_roots=[smoke_root], bundle=load_bundle(),
+                receipt_directory=args.receipt_directory,
+                repair_evidence_directory=args.repair_evidence_directory)
     if args.command == "abandon-root":
         from .live import abandon_root
 
-        return abandon_root(args.study, args.plan_hash, reason=args.reason, root=args.root, bundle=load_bundle())
+        return abandon_root(args.study, args.plan_hash, reason=args.reason, root=args.root, bundle=load_bundle(),
+            receipt_directory=args.receipt_directory, repair_evidence_directory=args.repair_evidence_directory)
     if args.command == "reconcile-cleanup":
         from .live import reconcile_cleanup
 
         return asyncio.run(reconcile_cleanup(args.root, sorted(set(args.attempts)), reason=args.reason,
-                                             study_directory=args.study, bundle=load_bundle()))
+                                             study_directory=args.study, bundle=load_bundle(),
+                                                 receipt_directory=args.receipt_directory,
+                                                 repair_evidence_directory=args.repair_evidence_directory,
+                                                 compatibility_directories=args.compatibility))
     if args.command == "repair-ledger":
         from .ledger_repair import repair_ledger
 
         return repair_ledger(args.root, study_directory=args.study, lane_id=args.lane, reason=args.reason,
-                             approval_text=args.approval_text, binding_path=args.binding)
+                             approval_text=args.approval_text, binding_path=args.binding,
+                             evidence_directory=args.repair_evidence_directory, receipt_directory=args.receipt_directory)
     if args.command == "ledger-repair-binding":
         from .ledger_repair import build_ledger_repair_binding
 
@@ -364,16 +393,24 @@ def _run(args: argparse.Namespace) -> dict:
                                 prior_roots=args.prior_roots, bundle=bundle, review_plan=review, arms=args.arms,
                                 tool_schema_version=args.tool_schema_version,
                                 pilot_decision=read_sealed(args.pilot_decision) if args.pilot_decision else None,
-                                pilot_decision_verifier=decision_verifier)
+                                pilot_decision_verifier=decision_verifier,
+                                    receipt_directory=args.receipt_directory,
+                                    repair_evidence_directory=args.repair_evidence_directory)
         study = args.study if args.phase != "compatibility" else None
         return {**prepare_live_root(args.root, plan, study_directory=study, prior_roots=args.prior_roots,
                                     bundle=bundle, review_plan=review,
-                                    pilot_decision_verifier=decision_verifier), "selected_arms": plan[0]["selected_arms"]}
+                                    pilot_decision_verifier=decision_verifier,
+                                        receipt_directory=args.receipt_directory,
+                                        repair_evidence_directory=args.repair_evidence_directory,
+                                        compatibility_directories=args.compatibility), "selected_arms": plan[0]["selected_arms"]}
     if args.command == "verify":
         from .live import verify_live_root
 
         report = verify_live_root(args.root, bundle=load_bundle(), prior_roots=args.prior_roots,
-                                  study_directory=args.study)
+                                  study_directory=args.study,
+                                      receipt_directory=args.receipt_directory,
+                                      repair_evidence_directory=args.repair_evidence_directory,
+                                      compatibility_directories=args.compatibility)
         return {key: value for key, value in report.items() if key != "lanes"} | {
             "lanes": {lane: {key: value for key, value in item.items() if key != "entries"}
                       for lane, item in report["lanes"].items()}}
@@ -393,7 +430,9 @@ def _run(args: argparse.Namespace) -> dict:
         scorer, summarize = _scorer(not args.no_score)
         return export_live_review(args.root, args.output, study_directory=args.study, prior_roots=args.prior_roots,
                                   bundle=load_bundle(), scorer=scorer, summarize=summarize,
-                                  pressure_review_selector=pressure_review_selection)
+                                  pressure_review_selector=pressure_review_selection,
+                                      receipt_directory=args.receipt_directory,
+                                      repair_evidence_directory=args.repair_evidence_directory)
     from .live import read_live_plan, reviewed_runtime_factory, run_live_phase
 
     plan = read_live_plan(args.root)
@@ -403,7 +442,9 @@ def _run(args: argparse.Namespace) -> dict:
         args.root, caps_record=read_json(args.caps), authorization=read_json(args.authorization),
         runtime_factory=reviewed_runtime_factory, compatibility_directories=args.compatibility,
         smoke_directory=args.smoke, stop_file=args.stop_file, hard_stop_file=args.hard_stop_file,
-        prior_roots=args.prior_roots, study_directory=args.study, bundle=load_bundle()))
+        prior_roots=args.prior_roots, study_directory=args.study, bundle=load_bundle(),
+            receipt_directory=args.receipt_directory,
+            repair_evidence_directory=args.repair_evidence_directory))
 
 
 def main(argv: list[str] | None = None) -> int:

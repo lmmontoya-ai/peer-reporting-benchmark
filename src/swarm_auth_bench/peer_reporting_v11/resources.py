@@ -86,7 +86,9 @@ def _ignore_reason(row: dict) -> str | None:
 
 
 def propose_caps(roots: Iterable[Path], *, study_directory: Path, phase: str, protocol: dict,
-                 prior_caps: dict | None = None) -> dict:
+                 prior_caps: dict | None = None,
+                     receipt_directory: Path | None = None, repair_evidence_directory: Path | None = None,
+                 compatibility_directories: list[Path] | tuple = ()) -> dict:
     """Return a sealed proposal; read evidence only through the live archive verifier.
 
     Calibration uses compatibility roots. Either smoke or collection selects
@@ -133,9 +135,14 @@ def propose_caps(roots: Iterable[Path], *, study_directory: Path, phase: str, pr
         missing = [item["plan_hash"] for item in prior if item["plan_hash"] not in by_hash]
         if missing:
             raise ValueError(f"supply every sealed prior root as an input; missing {missing}")
+        from .receipts import check_receipt
+
+        check_receipt(root, receipt_directory, study_directory=study_directory if source_phase == "calibration" else None)
         report = live.verify_live_root(
             root, prior_roots=[by_hash[item["plan_hash"]] for item in prior],
-            study_directory=study_directory if source_phase == "calibration" else None)
+            study_directory=study_directory if source_phase == "calibration" else None,
+            compatibility_directories=compatibility_directories,
+                receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
         registration = report.get("study_registration")
         if source_phase == "calibration" and (registration or {}).get("state") != "finalized":
             raise ValueError("calibration evidence requires a finalized study registration")

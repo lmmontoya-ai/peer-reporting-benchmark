@@ -96,6 +96,8 @@ async def test_v2_compatibility_cli_qualifies_and_evidence_requires_matching_too
     caps_path = tmp_path / "caps.json"
     atomic_json(caps_path, caps)
     bundle = load_bundle()
+    from .receipt_helpers import commit_receipt
+    receipts = tmp_path / "receipts"
     roots = {}
     for version in (bundle.schema_version, TOOL_SCHEMA_VERSION_P):
         root = tmp_path / version
@@ -117,6 +119,8 @@ async def test_v2_compatibility_cli_qualifies_and_evidence_requires_matching_too
         assert (await run_phase(root, top, harness, bundle=bundle))["status"] == "complete"
         report = live.verify_live_root(root, bundle=bundle)
         assert all(lane["qualified"] for lane in report["lanes"].values())
+        if version == TOOL_SCHEMA_VERSION_P:
+            commit_receipt(root, receipts)
         roots[version] = root
         payload = read_sealed(next(root.glob("lanes/*/attempts/*/attempt.json")))
         requests = payload["observer_result"]["world_state"]["requests"]
@@ -129,14 +133,14 @@ async def test_v2_compatibility_cli_qualifies_and_evidence_requires_matching_too
             assert set(receipt) == {"status", "report_id"}
     for version, root in roots.items():
         selected = bundle.tool_set(version)
-        evidence, notes = live.compatibility_evidence([root], bundle=selected)
+        evidence, notes = live.compatibility_evidence([root], bundle=selected, receipt_directory=receipts)
         assert len(evidence) == 6 and notes == []
         assert {row["tool_manifest_hash"] for row in evidence.values()} == {selected.tool_manifest_hash}
         other = next(value for key, value in roots.items() if key != version)
-        evidence, notes = live.compatibility_evidence([other], bundle=selected)
+        evidence, notes = live.compatibility_evidence([other], bundle=selected, receipt_directory=receipts)
         assert evidence == {} and notes
         gates = live.check_phase_gates("calibration", list(top["calls_by_lane"]), bundle=selected, source={},
-                                       compatibility_directories=[other])
+                                       compatibility_directories=[other], receipt_directory=receipts)
         assert not gates["passed"] and len(gates["failures"]) >= 6
 
 

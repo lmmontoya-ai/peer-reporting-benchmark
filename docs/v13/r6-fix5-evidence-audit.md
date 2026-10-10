@@ -1,48 +1,153 @@
-# R6-fix5 evidence gate audit
+# Evidence gate audit through R6-fix6 (P-A4)
 
-The sealed study's assignment table and fixtures are the primary plan inputs. A
-content seal detects changes relative to a retained reference; it does not make
-an independently resealed plan, export, selection, or decision authoritative.
+[Specification section 2.1](spec.md#21-evidence-and-trust-boundary-amendment-p-a4)
+is normative. The sealed study, lane journals and archived attempts, approval
+texts and flag resolutions, A4.1 evidence, and submitted human reviews and
+adjudications are primary evidence. Every other retained record is derived.
+A resealed derived record must still agree with its primary inputs. A mismatch
+refuses the operation; it cannot remove an observation from a denominator or
+turn it into an excluded, quarantined or unscored row.
 
-Earlier-level plan, prepared-root and export formats are unchanged. The explicit
-L0/S archive regression compares their bytes with and without the added
-predicates, freezing nonce and journal time. P exports retain their existing
-study locator and review-selection fields even when every row is unscored.
-Historical lane plans keep their shape: fixture-only fixed labels are checked
-against the primary sealed study fixtures.
-Runtime assignment checks use execution code only. Scoring and outcome-selected
-review stay offline.
+The receipt is the only added retained root-evidence record. It hashes file
+bytes, including the study manifest, root plan, lane plans, journals and every
+file in archived attempt directories. Keys are relative to the root. A v2
+compatibility root precedes the study and therefore has no study-manifest file
+to hash. The canonical sealed JSON bytes must equal both the receipt on disk
+and its exact committed blob at local Git HEAD. No receipt path is stored in a
+plan or read from an environment variable.
 
-| Consumer or gate | Primary evidence checked |
-| --- | --- |
-| `build_phase_plan`, `build_assignment_plan` | Sealed study assignments, fixed labels and instructions, fixture content, study caps; phase builds also regenerate/verify the study and check actual prerequisite roots. |
-| `prepare_live_root` | Every canonical study assignment and fixture; lane identity, count, index and caps derived from those entries. Core preparation revalidates the final pilot decision from its exports before any root or registry write. |
-| `verify_live_root`, `run_live_phase` | Canonical study assignments, fixtures and study caps; retained lane plans, journals, attempts, budget history and study start claims. Run also requires user authorization naming the exact sealed plan and current prerequisite evidence. |
-| `compatibility_evidence`, `smoke_evidence`, `check_phase_gates` | Actual archived observer results and tool/caps/catalog bindings. Smoke also checks its study registration, exact smoke assignment IDs, start claims, cleanups and approved failed-attempt amendments. |
-| `consumed_attempts_in_root`, `prior_root_ledger`, `verify_consumed_ledger`; preparation's prior-root ingestion | Canonical study assignments before ingestion; durable journal starts and lane index checkpoints, study registration/path and start claims, supersession records and retained ledger-repair evidence. |
-| `abandon_root` | Registered path and matching plan when present; actual lane journals and absence of all starts. A pending root whose plan was never written still requires journal inspection when its directory exists. |
-| `record_amendment`, `amended_attempts` | Explicit approval and study identity; verified smoke attempts, failed transport/usage status and cleared cleanup debt. An amendment cannot make a valid or unstarted attempt a failed exclusion. |
-| `reconcile_cleanup` | Verified root/start evidence and an actual environment check. Tests inject the environment check; this work never contacted a guest. |
-| `repair_ledger`, `verify_root_ledger_repairs` | Canonical study bindings; approved committed corruption evidence, identity marker, unique single-bit reconstruction, durable journal attribution and exact repair/declaration bytes. |
-| Resource proposal and caps freezing | Verified registered roots and archived usage/wall measurements; freezing requires the user's explicit approval of the exact proposed caps. |
-| `export_live_review` | Canonical root/study assignment binding before writing; registered root path, study starts, consumed ledger, repair records and amendments; every normalized archived attempt and its transport evidence. |
-| `registered_pressure_partitions`, `pressure_export_partitions` | Live study registry and every registered root's hash-bound lane plans, with every entry checked against the full canonical study assignment and primary sealed fixtures when historical labels are omitted. Excluded/unscored rows remain part of the population. |
-| P packet production, `build_pilot_decision`, `validate_core_decision` | One shared verifier reopens the registered source root, re-derives every row with the scorer, compares the entire planned population, every row and archived attempt, declared exclusions and attempt hashes, then recomputes the review selection. Filtering happens afterwards. |
-| Earlier-level review-plan authoring/verification and packet production | Full deterministic plan recomputation from the sealed study and protocol seed at the CLI and packet consumer. Live retention checks the study/seed and exact authorized plan hash; selection contents do not determine live trial execution. |
-| Core decision execution binding | The offline-recomputed decision retained in the exact authorized plan, its study binding and eligible lanes; lane identity and core status independently come from canonical study assignments. Runtime does not rescore or import post-hoc modules. |
-| Human review upload, resolution and endpoints | Exact packet/output identities and private bindings to the original attempt; schema and human/adjudication records; record-derived authorization truth. Any supplied structured score is checked by rescoring the attempt, including the existing explicit replay-score view. |
-| Offline replay and summaries | Retained plan/fixture hashes and instructions; replay provenance is explicit and default live scoring cannot count it as a primary model observation. Replay and summary outputs are not live admission evidence. |
+| Consumer or gate | Derived records read | Primary evidence checked before use |
+| --- | --- | --- |
+| `build_phase_plan`, `build_assignment_plan` | Assignment copies, lane plans, gate evidence, consumed ledger, core decision | Canonical sealed-study assignments, labels, fixtures and instructions; protocol execution policy; actual compatibility/smoke attempts; prior journals; offline-recomputed core decision. Prerequisite v2/P archives require committed receipts. |
+| `prepare_live_root` | Root/lane plans, smoke population, gate bindings, consumed ledger, core decision | Study assignments and caps; fixed phase policy; canonical smoke population; current prior-root starts and repair evidence; recomputed pilot decision before any root write. v2 compatibility prerequisites and P prior roots require receipts. |
+| `verify_live_root`, `run_live_phase` | Plans, indexes, budgets, start claims, registrations, supersession, consumed ledger, retained review plan | Study assignments/fixtures/instructions/caps; journal hash chains, attempt checkpoints, exact usage history and user authorization. Later-root verification and run recheck receipts of prior/prerequisite archives. |
+| `compatibility_evidence`, `check_phase_gates` | Qualification declarations and plan tool/catalog/caps copies | Actual verified archived qualification results and current protocol tool/catalog/caps bindings; a v2 compatibility root's committed receipt before reading its archives. |
+| `smoke_evidence` | Smoke population copy, registration, amendments | Population read directly from the sealed study at each call; all corresponding starts and archived outcomes, cleanup evidence and user-approved failed-attempt amendments. The collection plan's population copy must equal the study's. |
+| Study pause loading and admission (`study_provider_pauses`, `check_study_pauses`, `reconcile_study_pauses`, admission reload/window counting) | Study pause records, claiming/root identifiers, timestamps and window counts | Owning root's hash-chained journal, archive hash and retained pause in the attempt; the same `check_study_pauses` comparison used in owning-root verification, plus study starts and registered ownership. A genuine unarchived settlement may still be recovered under the existing crash rule. |
+| `consumed_attempts_in_root`, `prior_root_ledger`, `verify_consumed_ledger`; preparation's prior-root ingestion | Lane indexes, consumed ledger, registrations, supersession and repair records | Canonical assignments; journaled starts and index checkpoints; study start claims and owning paths; committed corruption evidence and exact repair declarations. P/v2 prior archives require receipts before their journals are opened. |
+| `abandon_root` | Registration and abandonment data | Registered plan/path and absence of journaled starts; P receipts checked before journal inspection, with an explicit directory accepted by API and CLI. Pending roots without a written plan retain the existing journal-inspection crash check. |
+| `record_amendment`, `amended_attempts` | Amendment identity and excluded-attempt declarations | User approval text and study identity; verified failed smoke attempts, transport/usage results and cleanup evidence. Valid and unstarted trials cannot be amended into failed exclusions. |
+| `reconcile_cleanup` | Cleanup and start declarations | Current P/v2 root receipt before archive verification; verified root/start evidence and the actual environment-check result. Tests inject that check; this package's validation does not contact a guest. |
+| `repair_ledger`, `verify_root_ledger_repairs` and their consumers | Binding, repair records, completion and journal declarations | Explicitly supplied independently retained evidence locations; binding rebuilt with the existing builder against its named local Git commit; unique single-bit reconstruction, identity marker and exact journal prefix. The repair checks its current P root's receipt before reading its journal. All consumers recheck the binding commit, including repair resumption and current/prior-root verification. |
+| Resource proposal and caps freezing | Root plans, registrations, repair/usage summaries and proposed caps | Verified actual archived usage/wall measurements and journal evidence. P/v2 input archives require receipts. Freezing uses the user's approval of the exact proposal. |
+| `inspect_live_root` within export/re-derivation | Lane indexes and attempt summaries | Journaled archive presence and retained archived attempts. An index that hides a journaled archive refuses outside the per-row quarantine handler. A start without an archive retains the existing interrupted/recovery behavior. |
+| `export_live_review` | Plans, registrations, consumed ledger, indexes, amendments, repair records and declarations | Canonical study binding; study starts; journal and attempt evidence; current repairs rebuilt against their committed incident evidence; each P root's committed receipt before archive access. |
+| `registered_pressure_partitions`, `pressure_export_partitions` | Registrations, root/lane plans and exported population | Every registration's actual root plan is checked before phase filtering; entries equal sealed-study assignments and fixture-only historical labels. Excluded/unscored assignments remain in the planned population. |
+| P packet production, `build_pilot_decision`, `validate_core_decision` | Export population, rows, attempts, scores, exclusions, repair declarations, selection and decision | Shared verifier checks the source receipt, current repairs and declarations, reopens the source archive, rederives every row/attempt/score, and recomputes selection before filtering. Pilot mechanical counts and selection are recomputed; user flag resolutions and ceiling choices remain primary inputs. |
+| Earlier-level review-plan authoring/verification and packet production | Review plan and export binding | Full deterministic plan recomputation from the study and protocol seed; exact retained study/authorized plan hash. Earlier-level archives require no P-A4 receipt. |
+| Core decision execution binding | Retained decision and eligible-lane declarations | Exact authorized plan's offline-recomputed decision; canonical assignment arms and lanes. This execution check reads no score exports and imports no post-hoc modules. |
+| Human upload validation | Packet and private bindings | Existing packet builder reconstructs evidence-bearing content from the primary attempt with retained masking IDs: output text/payloads, context, notices/reactions, instructions, delivered and retrievable records, and record checks. Consistently changed packet/controller hashes do not authorize changed content. |
+| Human endpoints | Resolution and any supplied structured score | Existing resolver recomputes resolution from submitted initial reviews, adjudication, authorization truth and the explicitly bound second-review rule; complete resolution comparison. Supplied structured scores are checked by rescoring the primary attempt. |
+| Receipt writing and checking | Receipt | Deterministic live-file hashes; exact on-disk bytes and the matching committed Git blob at HEAD. Changed, added or missing attempt/journal files refuse. |
 
-Whole arms in distinct roots can still produce distinct exports. A partial or
-empty index from a larger source root is refused, even if the remaining arms are
-internally complete. Legitimate declared exclusions, quarantined/unrun rows and
-scoring errors remain representable when they match the primary root.
+Historical lane omission fallback is limited to `compound_type`; non-S/P
+entries also omit `difficulty`, `block`, `prevalence_k`, `post_condition`,
+`visibility` and `pressure`, and S entries omit `visibility` and `pressure`.
+Every other serialized assignment label must be present and equal. No earlier
+plan, prepared-root or export field was added or removed.
 
-Human approvals and semantic labels remain explicit inputs. Content hashes do not
-establish human authorship or reviewer independence; the existing upload validator
-states that limitation.
+The current root's execution verifier remains usable during execution and crash
+recovery, before a receipt can exist. It performs the internal consistency
+checks of section 2.1 item 3. The post-run gates listed above require the receipt;
+a later root also requires receipts of the prerequisite/prior roots it reads.
+Pure fixture builders, authored offline replay, scorers and summaries retain
+their existing formats. They consume primary supplied inputs or produce derived
+outputs; none independently admits a live trial or authorizes a score export or
+pilot/core decision. The gates that use their outputs recompute them.
 
-## Changes and regressions
+Earlier-level serialization and the execution/post-hoc import boundary are
+unchanged. Publication of a receipt commit remains outside these offline checks,
+as section 2.1 item 3 states.
+
+## R6-fix6 change and test map
+
+The implementation is committed as `491b6a0` and `a079cb8`. The latter closes
+receipt handling in abandonment, repair and cleanup, supports receipt refresh,
+and updates an earlier serialization-only test double. The finding regressions are in
+`tests/v11/test_r6_evidence_consistency.py`; receipt byte and Git cases are in
+`tests/v11/test_receipts.py`. The table names the exact test functions, with
+parameterized cases counted by pytest.
+
+| Finding | Code change | Regression test |
+| --- | --- | --- |
+| N1: lane index | `live_review.inspect_live_root` refuses an index that hides a journaled archive, before quarantine handling. | `test_native_156_trial_index_mismatch_refuses_through_600_call_core_preparation`: unchanged primary bytes, four-flag P2 baseline, two altered indexes, inspection/export/packets/pilot/core preparation all refuse. |
+| N2: registration phase | `review_population.registered_pressure_partitions` checks each registration against its root plan before filtering. | `test_sibling_registration_phase_checked_before_filtering`: sibling phase mismatch at export, packets and pilot. |
+| N3: packet content | `review.validate_review_upload` rebuilds the packet with `build_review_bundle` and its retained masking map. | `test_packet_content_recomputed_after_consistent_hash_changes`: text, payload, context, instructions and record evidence, with consistent changed hashes. |
+| N4: resolution | `review.human_endpoints` recomputes the complete resolver result with an explicitly supplied second-review rule. | `test_endpoint_resolution_recomputed_from_reviews_and_bound_rule`: disagreement, missing second review and absent adjudication; legitimate endpoints remain valid. |
+| N5: smoke population | `live.smoke_evidence` reads the sealed study; shared plan binding checks its population copy. | `test_one_of_twelve_smoke_population_refuses_collection_preparation_and_run`: one successful smoke attempt cannot admit collection. |
+| N6: pauses | Study pause loading compares every record with its owner's journal/archive through `check_study_pauses`, before admission and window counting. | `test_successor_pause_admission_checks_owning_journal`: altered timestamps and window counts refuse before successor transport creation. |
+| N7: execution policy | `live.check_execution_policy` binds all fixed lane policy fields to the protocol and phase. | `test_lane_execution_policy_refuses_before_prepare_verify_or_run`: four fields; compatibility's legitimate continuation remains covered by existing qualification chains. |
+| N8: repairs after export | `review.verify_pressure_export_evidence` reruns `verify_root_ledger_repairs` and compares exported repair/deviation declarations. | `test_shared_export_rederivation_rechecks_current_root_repairs_after_export`: missing current-root receipt refuses repair, valid completed repair passes, then missing, inconsistent or incomplete records refuse shared verification and packet production. |
+| N9: binding commit | `ledger_repair.check_binding_evidence` rebuilds every consumed binding from explicit evidence directories and the named local Git commit. | `test_repair_consumer_rechecks_named_local_commit`, `test_root_verification_rechecks_binding_against_committed_external_evidence`; existing repeated-repair and repair-resumption tests. |
+| N10: historical labels | `live.check_assignment_binding` lists historical omissions; all other labels must be present and equal. | `test_historical_entry_requires_ordinary_labels`: three missing ordinary labels and a valid omitted `compound_type`; existing explicit-label mismatch cases. |
+
+| Receipt requirement | Code change | Tests |
+| --- | --- | --- |
+| Execution-side module; deterministic hashes-only record | `receipts.receipt_bytes`, with no post-hoc imports, hashes the live manifest, root/lane plans, journals and every archived attempt file under relative paths. | `test_valid_committed_receipt_is_deterministic_and_holds_hashes_only`; native pressure chain checks the study-bound record. |
+| One offline command, named by plan seal | `root-receipt ROOT --receipt-directory DIR [--study STUDY]` writes `<plan seal>.json`. | `test_cli_writes_an_offline_receipt_without_committing`. |
+| Exact recomputed, disk and HEAD bytes | `receipts.check_receipt` uses the shared `git_evidence.committed_files` helper; no receipt parsing. | `test_receipt_requires_exact_disk_and_head_content`: missing, staged/uncommitted, changed disk and different committed bytes. |
+| Refresh after an authorized primary change | The same writing command replaces derived receipt bytes at the same plan-hash path; the check still requires a new exact HEAD commit. | `test_receipt_refresh_requires_a_new_commit`: writing new hashes alone refuses; committing the refreshed record passes. |
+| Changed, added or missing primary file refuses | Receipt discovery includes extra lane journals/plans and every file in attempt directories. | `test_primary_file_changes_after_commit_refuse`: changed, added and missing attempt or journal, each after a real commit. |
+| P and v2 compatibility scope; earlier levels unchanged | `receipts.requires_receipt` checks canonical lane levels or v2 compatibility tool set. | `test_earlier_level_root_needs_no_receipt`; L0/S byte-identity guard; earlier-fixture goldens. |
+| Export and shared packet/pilot gates | Explicit directory passed to `export_live_review` and `verify_pressure_export_evidence`, before journals/archives are read. | `test_native_post_run_consumers_require_committed_receipts`: export, packets and pilot cases; complete offline pressure chain. |
+| Later-root build, preparation and verification | `consumed_attempts_in_root` covers prior ingestion; `compatibility_evidence` and `check_prerequisite_receipts` cover v2 prerequisites. | `test_native_post_run_consumers_require_committed_receipts`: build/prepare/verify with a P prior; `test_v2_compatibility_prerequisite_receipt_required_at_later_root_gates`: three prerequisite gates. |
+| Other post-run root readers | `abandon_root`, `repair_ledger` and `reconcile_cleanup` check the current root before journal/archive use. | Native missing-receipt abandonment/cleanup cases stop before journal inspection or verification; N8's real repair case checks missing and valid receipts; `test_unstarted_pressure_abandonment_cli_accepts_committed_receipt` covers API/CLI propagation without changing primary bytes. |
+| Explicit argument, no environment lookup | One `receipt_directory` argument is propagated through entry points; CLI exposes `--receipt-directory`. | CLI receipt and core cases, missing-directory refusals, native chain. |
+| Real Git helper for existing P chains | `tests/v11/receipt_helpers.commit_receipt` commits exact bytes in an isolated system-temp Git repository. | `test_revision6_entire_offline_chain`, native CLI pilot/core fixtures and v2 integration qualification. |
+
+An authorized repair or cleanup can append journal evidence. Its refreshed receipt
+must be committed before a later reader uses those changed bytes. Writing the
+refreshed record does not satisfy the gate by itself.
+
+## R6-fix6 final offline validation
+
+The full suite ran on final execution code commit `a079cb8` as four simultaneous
+`uv run --offline python -m pytest -q <files> -p no:cacheprovider` processes.
+The groups cover all 74 test files exactly once, with no overlap or omissions.
+Each process used its own system-temp `--basetemp` outside Git repositories;
+`PEER_V1_CONTROLLER_DIR` was unset. All four exited zero. Only this audit document
+changed after the run began.
+
+| Worker | Files | Collected | Result | Pytest duration |
+| --- | ---: | ---: | --- | ---: |
+| 1 | 18 | 1,349 | 1,348 passed, 1 skipped | 1,008.36 seconds (16:48) |
+| 2 | 18 | 1,111 | 1,111 passed | 2,004.77 seconds (33:24) |
+| 3 | 19 | 886 | 885 passed, 1 xfailed | 1,651.50 seconds (27:31) |
+| 4 | 19 | 1,114 | 1,114 passed | 1,846.94 seconds (30:46) |
+
+Total: **4,458 passed, 1 skipped, 1 expected xfail; 4,460 collected**.
+Four-worker wall time was **2,006.53 seconds (33:26.53)**. All 54 new cases passed.
+The skip is `test_score.py::test_p1_collection_regression`, whose private
+controller directory is unset. The existing strict Win32 xfail is
+`test_windows_ledger_storage.py::test_atomic_ledger_update_while_reader_is_open`.
+It covers Windows readers denying `os.replace`; it was not introduced here.
+
+The L0/S plan/root/export byte-identity guard and all earlier-fixture golden
+checks passed. Both execution boundaries passed:
+`test_live_w09.py::test_no_execution_module_imports_a_post_hoc_module` and
+`test_pilot_decision.py::test_runtime_binding_does_not_load_post_hoc_code_or_read_exports`.
+The changed Python files pass Ruff. `git diff --check` and byte scans found no
+CR bytes, mojibake markers or newly added non-ASCII text in the 27 changed files.
+Existing U+00E9 literals in `test_ledger_repair.py` remain unchanged.
+No provider/model calls, guest access, push or merge occurred.
+
+## R6-fix6 receipt-check timing
+
+`test_revision6_entire_offline_chain` times one complete `check_receipt` call
+after committing each native fake-transport root's receipt. The filesystem is
+warm from verification and receipt writing. The check includes discovering and
+hashing the live files and comparing disk and Git HEAD content. It does not
+normalize or score trials. Other suite workers were active during these checks.
+
+| Native root | Archived trials | Receipt check |
+| --- | ---: | ---: |
+| Gate/pilot | 156 | 1.450 seconds |
+| Core | 600 | 4.539 seconds |
+
+These are individual measurements from this offline suite run, not performance
+limits or measurements of real provider transcripts.
+
+## R6-fix5 historical changes and validation
 
 A changes `src/swarm_auth_bench/peer_reporting_v11/live.py`. One shared canonical
 assignment checker runs at build, prepare, root verification and run start;
@@ -87,7 +192,7 @@ assertions in `test_live_r2.py` and `test_resources.py` were updated because the
 primary-binding refusal now occurs earlier. The table above lists every consumer
 group and its primary evidence. There are 64 new parameterized test cases in total.
 
-## Final offline validation
+### Historical offline validation (R6-fix5)
 
 The complete suite ran on code commit `0322d98` as four simultaneous
 `uv run --offline python -m pytest -q` processes over disjoint sets of all 72 test
@@ -116,7 +221,7 @@ passed. No spec or review document was edited. Every commit was checked with
 `git diff --check` and a byte scan for carriage returns; changed files contain zero
 CR bytes. No real provider/model calls, guest access, push or merge occurred.
 
-## Full re-derivation cost
+### Historical full re-derivation cost (R6-fix5)
 
 The final code's shared export verifier was timed in one fresh Python process,
 using the native fake-transport archives from this full run and a warm filesystem.
