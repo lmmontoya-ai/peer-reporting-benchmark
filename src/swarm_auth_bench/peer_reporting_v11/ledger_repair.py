@@ -506,7 +506,8 @@ def _retain_bytes(path: Path, raw: bytes) -> None:
 
 
 def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reason: str,
-                  approval_text: str, binding_path: Path, evidence_directory: Path | None = None) -> dict:
+                  approval_text: str, binding_path: Path, evidence_directory: Path | None = None,
+                  receipt_directory: Path | None = None) -> dict:
     """Prepare or finish one approved repair under root, lane and ledger locks."""
     from .live import (
         COORDINATOR_LOCK,
@@ -516,6 +517,7 @@ def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reaso
         root_registration,
     )
     from .phase import INDEX_KIND, PLAN_KIND
+    from .receipts import check_receipt
 
     for description, text in (("reason", reason), ("approval text", approval_text)):
         if type(text) is not str or not text.strip():
@@ -530,6 +532,7 @@ def repair_ledger(directory: Path, *, study_directory: Path, lane_id: str, reaso
         stack.enter_context(_exclusive(directory / COORDINATOR_LOCK))
         plan = read_live_plan(directory)
         check_root_assignment_binding(directory, plan, study_directory)
+        check_receipt(directory, receipt_directory, study_directory=study_directory)
         registration = root_registration(study_directory, plan, directory=directory, require_finalized=True)
         check_abandoned_root(directory, registration)
         lanes = [lane for lane in plan["lanes"] if lane["lane_id"] == lane_id]

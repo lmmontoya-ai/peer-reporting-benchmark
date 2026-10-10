@@ -67,8 +67,6 @@ def write_receipt(root: Path, receipt_directory: Path, *, study_directory: Path 
     receipt_directory = Path(receipt_directory)
     receipt_directory.mkdir(parents=True, exist_ok=True)
     path = safe_child(receipt_directory, plan["seal_hash"] + ".json")
-    if path.exists() and path.read_bytes() != raw:
-        raise EvidenceError("existing receipt differs from live primary evidence")
     path.write_bytes(raw)
     return path
 

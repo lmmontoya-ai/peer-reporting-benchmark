@@ -245,7 +245,7 @@ def _parser() -> argparse.ArgumentParser:
         _study(command, "study directory in which a behavioral root is registered")
         _prior_roots(command)
         _amendments(command)
-    for command in (build, verify, export, decision, repair, cleanup, propose, *
+    for command in (build, verify, export, decision, repair, cleanup, propose, abandon, *
                     [commands.choices[name] for name in LIVE_COMMANDS], commands.choices["review-packets"]):
         command.add_argument("--receipt-directory", type=Path, help="directory of committed P-A4 receipts")
         command.add_argument("--repair-evidence-directory", type=Path, action="append", help="independently retained A4.1 evidence")
@@ -340,7 +340,8 @@ def _run(args: argparse.Namespace) -> dict:
     if args.command == "abandon-root":
         from .live import abandon_root
 
-        return abandon_root(args.study, args.plan_hash, reason=args.reason, root=args.root, bundle=load_bundle())
+        return abandon_root(args.study, args.plan_hash, reason=args.reason, root=args.root, bundle=load_bundle(),
+            receipt_directory=args.receipt_directory, repair_evidence_directory=args.repair_evidence_directory)
     if args.command == "reconcile-cleanup":
         from .live import reconcile_cleanup
 
@@ -353,7 +354,8 @@ def _run(args: argparse.Namespace) -> dict:
         from .ledger_repair import repair_ledger
 
         return repair_ledger(args.root, study_directory=args.study, lane_id=args.lane, reason=args.reason,
-                             approval_text=args.approval_text, binding_path=args.binding, evidence_directory=args.repair_evidence_directory)
+                             approval_text=args.approval_text, binding_path=args.binding,
+                             evidence_directory=args.repair_evidence_directory, receipt_directory=args.receipt_directory)
     if args.command == "ledger-repair-binding":
         from .ledger_repair import build_ledger_repair_binding
 

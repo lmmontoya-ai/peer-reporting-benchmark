@@ -1,6 +1,7 @@
 """Round-five consistency findings against retained primary evidence."""
 
 import asyncio
+import json
 import shutil
 from copy import deepcopy
 
@@ -105,10 +106,10 @@ def test_native_156_trial_index_mismatch_refuses_through_600_call_core_preparati
                 ceiling_choice="a",
                 receipt_directory=receipts,
             )
-        forged = deepcopy(record)
-        forged.update(Psel="P3", ceiling=False, ceiling_choice=None)
-        forged["rungs"]["P3"].update(test_aware_count=2, correct_answer_count=10, passes=True)
-        forged = seal({key: value for key, value in forged.items() if key != "seal_hash"})
+        altered = deepcopy(record)
+        altered.update(Psel="P3", ceiling=False, ceiling_choice=None)
+        altered["rungs"]["P3"].update(test_aware_count=2, correct_answer_count=10, passes=True)
+        altered = seal({key: value for key, value in altered.items() if key != "seal_hash"})
         manifest = live.read_study_manifest(study)
         rows = [
             row
@@ -132,7 +133,7 @@ def test_native_156_trial_index_mismatch_refuses_through_600_call_core_preparati
             source=live.read_live_plan(root)["source"],
             gate_evidence={},
             study_manifest=manifest,
-            pilot_decision=forged,
+            pilot_decision=altered,
             pilot_decision_verifier=lambda value, **kwargs: value,
         )
         assert built[0]["maximum_live_calls"] == 600
@@ -521,6 +522,18 @@ def test_shared_export_rederivation_rechecks_current_root_repairs_after_export(
     binding_path = tmp_path / "binding.json"
     atomic_json(binding_path, binding)
     ledger.write_bytes(raw)
+    with pytest.raises(ValueError, match="receipt mismatch"):
+        repair_ledger(
+            root,
+            study_directory=study,
+            lane_id=selected["lane_id"],
+            reason="Restore journal-consistent bytes.",
+            approval_text=APPROVAL,
+            binding_path=binding_path,
+            evidence_directory=evidence,
+            receipt_directory=tmp_path / "missing-receipts",
+        )
+    assert ledger.read_bytes() == raw
     repaired = repair_ledger(
         root,
         study_directory=study,
@@ -529,6 +542,7 @@ def test_shared_export_rederivation_rechecks_current_root_repairs_after_export(
         approval_text=APPROVAL,
         binding_path=binding_path,
         evidence_directory=evidence,
+        receipt_directory=old_receipts,
     )
     receipts = commit_receipt(root, tmp_path / "receipts", study_directory=study)
     export = tmp_path / "export"
@@ -594,10 +608,10 @@ def test_root_verification_rechecks_binding_against_committed_external_evidence(
 
 
 @pytest.mark.parametrize(
-    "consumer", ["export", "packets", "pilot", "build_prior", "prepare_prior", "verify_prior"]
+    "consumer", ["export", "packets", "pilot", "build_prior", "prepare_prior", "verify_prior", "abandon", "cleanup"]
 )
 def test_native_post_run_consumers_require_committed_receipts(
-    tmp_path, flagged_native_pilot, wp6_inputs, consumer
+    tmp_path, flagged_native_pilot, wp6_inputs, monkeypatch, consumer
 ):
     record, study, root, compatibility, receipts, output = flagged_native_pilot
     empty = tmp_path / "missing-receipts"
@@ -629,6 +643,16 @@ def test_native_post_run_consumers_require_committed_receipts(
                 study_directory=study,
                 receipt_directory=empty,
             )
+        elif consumer == "abandon":
+            monkeypatch.setattr(live, "_journal_starts", lambda *args: pytest.fail("journal read before receipt"))
+            live.abandon_root(study, live.read_live_plan(root)["seal_hash"], root=root,
+                              reason="Check the registered root.", receipt_directory=empty)
+        elif consumer == "cleanup":
+            monkeypatch.setattr(live, "verify_live_root", lambda *a, **k: pytest.fail("archive verification before receipt"))
+            top = live.read_live_plan(root)
+            entry = read_sealed(root / top["lanes"][0]["path"] / "phase-plan.json")["planned_order"][0]
+            asyncio.run(live.reconcile_cleanup(root, [entry["attempt_id"]], reason="Check retained cleanup.",
+                                               study_directory=study, receipt_directory=empty))
         else:
             manifest = live.read_study_manifest(study)
             row = next(
@@ -677,6 +701,33 @@ def test_native_post_run_consumers_require_committed_receipts(
                         study / live.STUDY_REGISTRY / live.FINALIZED_DIRECTORY / (top["seal_hash"] + ".json")
                     ).unlink()
                     (root / live.SUPERSEDED_DIRECTORY / (top["seal_hash"] + ".json")).unlink()
+
+
+def test_unstarted_pressure_abandonment_cli_accepts_committed_receipt(tmp_path, wp6_study, wp6_inputs, capsys):
+    from swarm_auth_bench.peer_reporting_v11.cli import main
+    from swarm_auth_bench.peer_reporting_v11.receipts import receipt_bytes
+
+    manifest = live.read_study_manifest(wp6_study[0])
+    row = next(row for row in manifest["assignments"] if row["level"] == "P")
+    fixture = read_sealed(wp6_study[0] / manifest["fixtures"][row["fixture_id"]]["path"])
+    fixture = {key: value for key, value in fixture.items() if key != "seal_hash"}
+    study = tmp_path / "study"
+    study.mkdir()
+    atomic_json(study / live.STUDY_MANIFEST, manifest)
+    root = study / "roots" / "unstarted-pressure"
+    built = live.build_assignment_plan(
+        "calibration", [row], {row["fixture_id"]: fixture}, wp6_inputs["caps_record"],
+        revision="unstarted-pressure", source={"study_manifest_hash": manifest["seal_hash"]},
+        gate_evidence={}, study_manifest=manifest)
+    live.prepare_live_root(root, built, study_directory=study)
+    top = live.read_live_plan(root)
+    directory = commit_receipt(root, tmp_path / "receipts", study_directory=study)
+    before = receipt_bytes(root, study_directory=study)
+    assert main(["abandon-root", str(study), "--plan-hash", top["seal_hash"], "--root", str(root),
+                 "--reason", "Retire the unstarted plan.", "--receipt-directory", str(directory)]) == 0
+    assert json.loads(capsys.readouterr().out)["root_journals_checked"] is True
+    assert live.registered_roots(study)[0]["state"] == "abandoned"
+    assert receipt_bytes(root, study_directory=study) == before
 
 
 @pytest.mark.parametrize("consumer", ["build", "prepare", "verify"])

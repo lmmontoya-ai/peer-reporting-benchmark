@@ -1572,7 +1572,8 @@ def check_abandoned_root(root: Path, registration: dict) -> None:
 
 
 def abandon_root(study_directory: Path, plan_hash: str, *, reason: str, root: Path | None = None,
-                 bundle: ProtocolBundle | None = None) -> dict:
+                 bundle: ProtocolBundle | None = None, receipt_directory: Path | None = None,
+                 repair_evidence_directory: Path | None = None) -> dict:
     """Seal an abandonment record for a pending root, or a finalized root whose journals show no start.
 
     An abandoned root never runs and no longer has to be named as a prior root.
@@ -1620,9 +1621,14 @@ def abandon_root(study_directory: Path, plan_hash: str, *, reason: str, root: Pa
                     lane_dirs |= {safe_child(root, lane["path"]) for lane in plan["lanes"]}
                 for lane_dir in sorted(lane_dirs):
                     stack.enter_context(_exclusive(lane_dir / LOCK_FILE))
+            if plan is not None:
+                from .receipts import check_receipt
+
+                check_receipt(root, receipt_directory, study_directory=study_directory)
             started = set(_journal_starts(root))
             if plan is not None:
-                _, consumed = consumed_attempts_in_root(root, bundle=bundle, study_directory=study_directory)
+                _, consumed = consumed_attempts_in_root(root, bundle=bundle, study_directory=study_directory,
+                    receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
                 started |= consumed
             if superseded_by(root, {"seal_hash": plan_hash}):
                 raise ValueError("this root is already superseded by a later root")
@@ -2798,8 +2804,11 @@ async def reconcile_cleanup(directory: Path, attempt_ids: list[str] | tuple, *, 
     plan = read_live_plan(directory)
     bundle = _tool_set_for_plan(plan, bundle)
     check = environment_check or verify_live_environment
+    from .receipts import check_receipt
+
     with ExitStack() as stack:
         stack.enter_context(_exclusive(directory / COORDINATOR_LOCK))  # a running root refuses
+        check_receipt(directory, receipt_directory, study_directory=study_directory)
         report = verify_live_root(directory, bundle=bundle,
             compatibility_directories=compatibility_directories,
                                   study_directory=study_directory,

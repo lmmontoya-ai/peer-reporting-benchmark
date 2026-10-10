@@ -48,6 +48,19 @@ def test_valid_committed_receipt_is_deterministic_and_holds_hashes_only(receipt_
     assert b"\r" not in raw
 
 
+def test_receipt_refresh_requires_a_new_commit(receipt_root):
+    root, lane, attempt, directory = receipt_root
+    commit_receipt(root, directory)
+    path = directory / (live.read_live_plan(root)["seal_hash"] + ".json")
+    original = path.read_bytes()
+    attempt.write_bytes(attempt.read_bytes() + b" ")
+    assert write_receipt(root, directory) == path and path.read_bytes() != original
+    with pytest.raises(ValueError, match="receipt mismatch"):
+        check_receipt(root, directory)
+    commit_receipt(root, directory)
+    check_receipt(root, directory)
+
+
 @pytest.mark.parametrize("state", ["missing", "uncommitted", "disk_mismatch", "committed_mismatch"])
 def test_receipt_requires_exact_disk_and_head_content(receipt_root, state):
     root, lane, attempt, directory = receipt_root

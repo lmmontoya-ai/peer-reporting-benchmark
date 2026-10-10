@@ -637,6 +637,9 @@ def test_export_labels_preserve_the_four_social_fields():
 
 def test_export_live_review_serializes_social_scores_and_summary(tmp_path, monkeypatch):
     """Exercise export serialization with hand-built evidence; no generator or runtime is needed."""
+    from swarm_auth_bench.peer_reporting_v11 import receipts
+
+    monkeypatch.setattr(receipts, "check_receipt", lambda *args, **kwargs: None)
     root, output = tmp_path / "root", tmp_path / "export"
     raw = social_attempt(assignment_id="social-assignment", attempt_id="social-attempt")
     with_reports(raw, claim(raw))
