@@ -82,7 +82,7 @@ from .phase import _PhaseState
 from .review_population import (
     check_pressure_arm_roots,
     check_pressure_export_population,
-    registered_pressure_partitions,
+    registered_pressure_population,
 )
 
 ADAPTER_VERSION = "peer-reporting-v11-live-review-v1"
@@ -421,6 +421,68 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
             "planned_count": plan["maximum_live_calls"]}
 
 
+def inspect_pressure_chain(directory: Path, plan: dict, study_directory: Path, *,
+                           bundle: ProtocolBundle | None = None, scorer: Callable[[dict], dict] | None = None,
+                           receipt_directory: Path | None = None, repair_evidence_directory: Path | None = None,
+                           source_data: dict | None = None) -> tuple[dict, list[dict]]:
+    """Re-derive one arm population, choosing journaled starts before unrun plans.
+
+    Single-root rows retain their established format and inherit the index's
+    source_plan_hash. Multi-root rows explicitly name source_root_plan_hash.
+    """
+    population = registered_pressure_population(study_directory, phase=plan["phase"],
+        study_manifest_hash=plan["source"]["study_manifest_hash"], source_plan_hash=plan["seal_hash"],
+        receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+    identities = population.source_roots(plan["seal_hash"])
+    arms = {arm for arm, latest in population.arm_latest.items() if latest == plan["seal_hash"]}
+    _require(population.roots[plan["seal_hash"]].directory.resolve() == Path(directory).resolve(),
+             "P review source directory differs from its registered root")
+    rows, started, repairs, authorizations = {}, set(), [], {}
+    from .ledger_repair import verify_root_ledger_repairs
+    from .receipts import check_receipt
+
+    for identity in identities:
+        root = population.roots[identity]
+        check_receipt(root.directory, receipt_directory, study_directory=study_directory)
+        check_root_assignment_binding(root.directory, root.plan, study_directory)
+        registration = root_registration(study_directory, root.plan, directory=root.directory, require_finalized=False)
+        check_abandoned_root(root.directory, registration)
+        journals = lane_journals(root.directory, root.plan)
+        check_start_claims(study_directory, root.plan, root.directory, journals)
+        repairs.extend(verify_root_ledger_repairs(root.directory, root.plan, journals,
+                                                evidence_directory=repair_evidence_directory))
+        amendments = study_amendments(study_directory) if plan["phase"] == "smoke" else []
+        data = source_data if identity == plan["seal_hash"] and source_data is not None else inspect_live_root(
+            root.directory, bundle=bundle, scorer=scorer, amendments=amendments)
+        _require(not data["amendment_errors"], "; ".join(data["amendment_errors"]))
+        if len(identities) == 1:
+            check_pressure_export_population(data["rows"], population.partitions, source_plan_hash=plan["seal_hash"])
+            return data, repairs
+        authorizations.update(data["authorization_evidence"])
+        for row in data["rows"]:
+            if row["arm"] not in arms:
+                continue
+            identifier = row["assignment_id"]
+            is_started = identifier in root.started
+            _require(not is_started or identifier not in started,
+                     f"P review assignment {identifier} started in two chain roots")
+            if identifier not in started:
+                rows[identifier] = {**row, "source_root_plan_hash": identity}
+            if is_started:
+                started.add(identifier)
+    ordered = sorted(rows.values(), key=lambda row: row["planned_order"])
+    check_pressure_arm_roots(population.partitions)
+    check_pressure_export_population(ordered, population.partitions, source_plan_hash=plan["seal_hash"])
+    return {"adapter_version": ADAPTER_VERSION, "phase": plan["phase"], "plan_hash": plan["seal_hash"],
+            "rows": ordered, "lane_errors": {}, "amendment_errors": [],
+            "authorization_evidence": dict(sorted(authorizations.items())),
+            "status_counts": dict(Counter(row["status"] for row in ordered)),
+            "verified_model_observations": sum(bool(row["attempt"] and row["attempt"]["model_execution_confirmed"])
+                                               for row in ordered),
+            "planned_count": sum(len(pop) for identity, pop in population.partitions
+                                 if identity == plan["seal_hash"])}, repairs
+
+
 def export_live_review(directory: Path, output: Path, *, study_directory: Path | None = None,
                        prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None,
                        scorer: Callable[[dict], dict] | None = None,
@@ -433,8 +495,9 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     ``study_directory`` is the study directory in which the root is registered,
     and the root must sit at its registered path and agree with the study's
     start ledger. ``prior_roots`` must be exactly the prior roots sealed in the
-    plan's consumed-attempt ledger; the export refuses if an assignment ran in
-    two roots. The index carries the study's registry listing and amendments,
+    plan's consumed-attempt ledger. A P population exports from its latest
+    successor, including all earlier chain starts; an assignment started in two roots
+    refuses. The index carries the study's registry listing and amendments,
     every journaled authorization with its evidence check, and ``review_plan_hash``.
     Post-hoc scoring, summaries and level P review selection are injected callbacks;
     this archive module never imports their implementation into the execution layer.
@@ -474,11 +537,10 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     contains_pressure = any(row["level"] == "P" and row["assignment_id"] in identifiers
                             for row in manifest["assignments"])
     if contains_pressure:
-        partitions = registered_pressure_partitions(Path(study_directory), phase=plan["phase"],
-            study_manifest_hash=registration["study_manifest_hash"], source_plan_hash=plan["seal_hash"],
-            receipt_directory=receipt_directory)
-        check_pressure_arm_roots(partitions)
-        check_pressure_export_population(data["rows"], partitions, source_plan_hash=plan["seal_hash"])
+        data, ledger_repairs = inspect_pressure_chain(directory, plan, Path(study_directory), bundle=bundle,
+            scorer=scorer, receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory,
+            source_data=data)
+        authorizations.update(data["authorization_evidence"])
     # Spec 12: rows excluded from analysis keep their scores but stay out of the summary's counts and cells.
     from .review_sampling import analysis_score_rows
 

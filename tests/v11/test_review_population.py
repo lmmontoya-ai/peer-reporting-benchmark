@@ -1,4 +1,4 @@
-"""Phase-wide P sampling is refused when one arm's sealed plans span roots."""
+"""Phase-wide P sampling requires one verified successor population per arm."""
 
 import pytest
 
@@ -265,3 +265,17 @@ def test_registered_population_binds_all_primary_assignment_labels(core_review_i
     with pytest.raises(ValueError, match="assignment .* differs from sealed study"):
         registered_pressure_partitions(study, phase="calibration", study_manifest_hash=manifest["seal_hash"],
                                        source_plan_hash=top["seal_hash"])
+
+
+def test_successor_without_consumed_prior_link_refuses_even_with_derived_marker(core_review_inputs):
+    study, manifest, assignments, _ = core_review_inputs
+    first, first_plan, _ = register_review_root(study, manifest, assignments, "earlier")
+    _, successor_plan, _ = register_review_root(study, manifest, assignments[-1:], "successor")
+    markers = first / live.SUPERSEDED_DIRECTORY
+    markers.mkdir()
+    atomic_json(markers / f"{successor_plan['seal_hash']}.json", seal({
+        "kind": live.SUPERSEDED_KIND, "superseded_plan_hash": first_plan["seal_hash"],
+        "superseding_plan_hash": successor_plan["seal_hash"]}))
+    with pytest.raises(ValueError, match="pressure_core_xhigh.*outside a verified successor chain"):
+        registered_pressure_partitions(study, phase="calibration", study_manifest_hash=manifest["seal_hash"],
+                                       source_plan_hash=successor_plan["seal_hash"])
