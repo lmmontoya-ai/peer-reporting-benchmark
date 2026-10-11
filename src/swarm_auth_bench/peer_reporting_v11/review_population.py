@@ -12,11 +12,11 @@ from ..peer_reporting.storage import read_sealed, safe_child
 from .live import (
     check_assignment_binding,
     check_start_claims,
+    checked_pressure_registrations,
     lane_journals,
     read_live_plan,
     read_study_manifest,
     registered_root_path,
-    registered_roots,
     verify_consumed_ledger,
 )
 
@@ -76,9 +76,9 @@ def registered_pressure_population(study_directory: Path, *, phase: str, study_m
     _require(manifest["seal_hash"] == study_manifest_hash, "P review population belongs to another study")
     study_assignments = {row["assignment_id"]: row for row in manifest["assignments"]}
     roots = {}
-    for registration in registered_roots(study_directory):
+    for registration in checked_pressure_registrations(study_directory, receipt_directory=receipt_directory):
         root = registered_root_path(study_directory, registration)
-        if registration["state"] == "abandoned" and not (root / "live-plan.json").exists():
+        if registration["state"] == "abandoned":
             continue
         plan = read_live_plan(root)
         _require(plan["seal_hash"] == registration["plan_hash"] and plan["phase"] == registration["phase"]
