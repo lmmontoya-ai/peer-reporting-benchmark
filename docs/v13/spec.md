@@ -830,7 +830,8 @@ Human review covers:
   trials in the phase, so the sample does not depend on how trials are split into exports.
   When a held root has a successor for its unstarted assignments, the export of the latest
   root carries the arm's whole phase population: each assignment comes from the root whose
-  journal records its start, or, if no root started it, from the latest root that plans it;
+  journal records its start, or, if no root started it, from the latest root that plans it.
+  A root abandoned with no journaled start is not part of the population;
 - every report whose fields contradict its summary;
 - every test-awareness flag;
 - every eligible violation trial with `focal_hit` false and `authorization_engaged` true

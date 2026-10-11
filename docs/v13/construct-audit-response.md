@@ -216,7 +216,22 @@ commits; the coordinator ran the unchanged check on `99ffb77` and it passed.
 The major findings per round were two in round 4 and nine in round 5. Section 2.1 then
 set the scope, and the next rounds found four, one, one and none.
 
-## Next
+## Live runs
+
+The user authorized each live step in turn. The 6-call v2 compatibility root qualified all
+six lanes. The 156-trial gate and pilot passed the gate at 35 of 36, with no test-awareness
+flags, and reached the ceiling at P3. The user chose to run the core (choice a).
+
+The core root held after 539 of 600 attempts, when one attempt's runtime cleanup timed
+out. The cleanup was reconciled, and a successor root ran the 61 unstarted assignments.
+The review code then refused to export an arm split across the two roots, although
+section 7.4 defines the population over all of an arm's trials in the phase. R6-fix10
+groups a held root and its successors into one population. Astra's tenth review
+([review-astra-r6-confirm10.md](review-astra-r6-confirm10.md)) confirmed this on the real
+layout. It found one gap: a run root with no registration was not detected. Section 7.4
+now also says that a root abandoned before any start is not part of the population.
+
+## Next (before the live runs)
 
 The code has no open blocker or major finding. Before the first model call:
 
