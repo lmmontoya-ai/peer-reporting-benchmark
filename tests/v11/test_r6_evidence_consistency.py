@@ -398,6 +398,8 @@ def test_sibling_registration_phase_checked_before_filtering(
                 )
     finally:
         registration_path.unlink()
+        assert sibling.resolve().parent == (study / "roots").resolve()
+        shutil.rmtree(sibling)
 
 
 async def test_one_of_twelve_smoke_population_refuses_collection_preparation_and_run(tmp_path):

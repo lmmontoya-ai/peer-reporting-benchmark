@@ -279,3 +279,49 @@ def test_successor_without_consumed_prior_link_refuses_even_with_derived_marker(
     with pytest.raises(ValueError, match="pressure_core_xhigh.*outside a verified successor chain"):
         registered_pressure_partitions(study, phase="calibration", study_manifest_hash=manifest["seal_hash"],
                                        source_plan_hash=successor_plan["seal_hash"])
+
+
+@pytest.mark.parametrize("evidence", ["plan", "journal", "attempt"])
+def test_population_discovers_unregistered_retained_roots(core_review_inputs, evidence):
+    study, manifest, assignments, _ = core_review_inputs
+    _, source, _ = register_review_root(study, manifest, assignments, "source")
+    root, plan, _ = register_review_root(study, manifest, assignments[-1:], "unregistered")
+    (study / live.STUDY_REGISTRY / f"{plan['seal_hash']}.json").unlink()
+    if evidence != "plan":
+        (root / live.LIVE_PLAN_FILE).unlink()
+        path = root / plan["lanes"][0]["path"] / (
+            "journal.jsonl" if evidence == "journal" else "attempts/retained/attempt.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+    with pytest.raises(ValueError, match="retained root inventory differs.*unregistered"):
+        registered_pressure_partitions(study, phase="calibration", study_manifest_hash=manifest["seal_hash"],
+                                       source_plan_hash=source["seal_hash"])
+
+
+@pytest.mark.parametrize("mutation", ["missing_root", "different_path", "duplicate_path"])
+def test_population_requires_registration_and_retained_paths_to_match(core_review_inputs, mutation):
+    study, manifest, assignments, _ = core_review_inputs
+    root, plan, _ = register_review_root(study, manifest, assignments, "source")
+    path = study / live.STUDY_REGISTRY / f"{plan['seal_hash']}.json"
+    registration = read_sealed(path)
+    if mutation == "missing_root":
+        (root / live.LIVE_PLAN_FILE).unlink()
+    elif mutation == "different_path":
+        registration["root_path"] = "roots/absent"
+        atomic_json(path, seal({key: value for key, value in registration.items() if key != "seal_hash"}))
+    else:
+        registration["plan_hash"] = "0" * 64
+        atomic_json(path.parent / f"{registration['plan_hash']}.json",
+                    seal({key: value for key, value in registration.items() if key != "seal_hash"}))
+    with pytest.raises(ValueError, match="retained root inventory differs"):
+        registered_pressure_partitions(study, phase="calibration", study_manifest_hash=manifest["seal_hash"],
+                                       source_plan_hash=plan["seal_hash"])
+
+
+def test_population_ignores_directories_without_retained_root_evidence(core_review_inputs):
+    study, manifest, assignments, _ = core_review_inputs
+    _, plan, _ = register_review_root(study, manifest, assignments, "source")
+    (study / "roots" / "empty").mkdir()
+    partitions = registered_pressure_partitions(study, phase="calibration",
+        study_manifest_hash=manifest["seal_hash"], source_plan_hash=plan["seal_hash"])
+    assert {identity for identity, _ in partitions} == {plan["seal_hash"]}

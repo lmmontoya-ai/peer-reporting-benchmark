@@ -1139,6 +1139,52 @@ def registered_root_path(study_directory: Path, registration: dict) -> Path:
     return safe_child(Path(study_directory), relative)
 
 
+def checked_pressure_registrations(study_directory: Path, *,
+                                   receipt_directory: Path | None = None) -> list[dict]:
+    """Require the P registry to match retained roots before filtering a population."""
+    directory = Path(study_directory) / ROOTS_DIRECTORY
+    roots = {}
+    if directory.is_dir():
+        for root in sorted(directory.iterdir()):
+            if not root.is_dir() or not ((root / LIVE_PLAN_FILE).exists()
+                    or any((root / "lanes").rglob("journal.jsonl"))
+                    or any((root / "lanes").rglob("attempt.json"))):
+                continue
+            relative = f"{ROOTS_DIRECTORY}/{root.name}"
+            if root.resolve().parent != directory.resolve() or not ROOT_PATH.fullmatch(relative):
+                raise EvidenceError("P retained root is not at its study's roots/<name> path")
+            roots[relative] = root
+    registrations = registered_roots(study_directory)
+    for entry in registrations:
+        registered_root_path(study_directory, entry)
+    paths = {entry["root_path"] for entry in registrations}
+    if paths != set(roots) or len(paths) != len(registrations):
+        raise EvidenceError("P retained root inventory differs from study registrations; "
+                            f"unregistered {sorted(set(roots) - paths)}, "
+                            f"without retained root {sorted(paths - set(roots))}")
+    manifest_hash = read_study_manifest(study_directory)["seal_hash"]
+    for entry in registrations:
+        root = roots[entry["root_path"]]
+        if registered_root_path(study_directory, entry) != root.resolve():
+            raise EvidenceError("P retained root path differs from its study registration")
+        plan = read_live_plan(root)
+        if (plan["seal_hash"] != entry["plan_hash"] or plan["phase"] != entry["phase"]
+                or plan["source"]["study_manifest_hash"] != manifest_hash
+                or entry["study_manifest_hash"] != manifest_hash):
+            raise EvidenceError("P root plan differs from its study registration")
+        if entry["state"] == "abandoned":
+            abandonment = entry["abandoned"]
+            if (any(abandonment.get(key) != entry[key]
+                    for key in ("plan_hash", "root_path", "phase", "study_manifest_hash"))
+                    or abandonment.get("consumed_attempt_ids") != []):
+                raise EvidenceError("P root abandonment differs from its study registration")
+            from .receipts import check_receipt
+
+            check_receipt(root, receipt_directory, study_directory=study_directory)
+            check_abandoned_root(root, entry)
+    return registrations
+
+
 def require_registered_path(study_directory: Path, registration: dict, directory: Path) -> None:
     """Spec 10: accept a behavioral root only at its registered path, so a copy elsewhere is refused."""
     if Path(directory).resolve() != registered_root_path(study_directory, registration):
@@ -1873,7 +1919,10 @@ def prior_root_ledger(prior_roots: list[Path] | tuple, *, phase: str, source: di
     """The consumed-attempt ledger for a new root: every root of this study and phase that is registered and not
     abandoned must be named."""
     records, consumed_all, seen = [], set(), set()
-    registrations = {entry["plan_hash"]: entry for entry in registered_roots(study_directory)}
+    entries = (checked_pressure_registrations(study_directory, receipt_directory=receipt_directory)
+               if bundle is not None and bundle.schema_version == TOOL_SCHEMA_VERSION_P
+               else registered_roots(study_directory))
+    registrations = {entry["plan_hash"]: entry for entry in entries}
     for root in prior_roots:
         plan, consumed = consumed_attempts_in_root(root, bundle=bundle, study_directory=study_directory,
             receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
@@ -1888,7 +1937,8 @@ def prior_root_ledger(prior_roots: list[Path] | tuple, *, phase: str, source: di
         records.append({"plan_hash": plan["seal_hash"], "revision": plan["revision"],
                         "consumed_attempt_ids": sorted(consumed)})
         consumed_all |= consumed
-    registered = active_registered_roots(study_directory, phase)
+    registered = {entry["plan_hash"] for entry in entries
+                  if entry["phase"] == phase and entry["state"] != "abandoned"}
     if registered != seen:
         raise ValueError(f"name every {phase} root registered in this study as a prior root, or abandon a pending "
                          f"one; missing {sorted(registered - seen)}, unregistered {sorted(seen - registered)}")
@@ -2032,7 +2082,10 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
             (study_directory / STUDY_REGISTRY).mkdir(exist_ok=True)
             stack.enter_context(_exclusive(study_directory / STUDY_REGISTRY / REGISTRY_LOCK))
             sealed = {record["plan_hash"]: record for record in ledger["prior_roots"]}
-            registrations = {entry["plan_hash"]: entry for entry in registered_roots(study_directory)}
+            entries = (checked_pressure_registrations(study_directory, receipt_directory=receipt_directory)
+                       if top["tool_schema_version"] == TOOL_SCHEMA_VERSION_P
+                       else registered_roots(study_directory))
+            registrations = {entry["plan_hash"]: entry for entry in entries}
             for root in prior_roots:
                 root = Path(root)
                 prior_plan = read_live_plan(root)
@@ -2053,7 +2106,9 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
             if set(supplied) != set(sealed):
                 raise ValueError("supply every prior root sealed in this plan; missing "
                                  f"{sorted(set(sealed) - set(supplied))}")
-            if active_registered_roots(study_directory, top["phase"]) != set(sealed):
+            active = {entry["plan_hash"] for entry in entries
+                      if entry["phase"] == top["phase"] and entry["state"] != "abandoned"}
+            if active != set(sealed):
                 raise LivePhaseError("the study registered another root of this phase after this plan was built")
         # Even identical compatibility roots need separate execution authorizations.
         top = {**top, "root_instance_nonce": secrets.token_hex(16)}

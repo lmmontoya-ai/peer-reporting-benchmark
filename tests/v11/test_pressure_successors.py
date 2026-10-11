@@ -17,6 +17,7 @@ from swarm_auth_bench.peer_reporting_v11.pilot_decision import (
     export_reference,
     validate_core_decision,
 )
+from swarm_auth_bench.peer_reporting_v11.receipts import check_receipt, receipt_bytes
 from swarm_auth_bench.peer_reporting_v11.review import (
     human_endpoints,
     validate_review_upload,
@@ -228,6 +229,81 @@ def test_earlier_chain_export_refuses_and_names_latest(successor_inputs, group):
     earlier = exports[group, 1]
     with pytest.raises(ValueError, match=f"export latest root .*{group}-v2"):
         verify_pressure_export_evidence(earlier, read_sealed(earlier / "index.json"), receipt_directory=receipts)
+
+
+@pytest.mark.parametrize("remove_related_records", [False, True])
+def test_retained_successor_requires_registration_for_population_consumers(
+        successor_inputs, tmp_path, remove_related_records):
+    _, study, _, receipts, groups, exports, decision = successor_inputs
+    first, first_plan = groups["core"][0][0]
+    latest, latest_plan = groups["core"][0][1]
+    identity = latest_plan["seal_hash"]
+    registrations = live.registered_roots(study)
+    roots = [live.registered_root_path(study, record) for record in registrations]
+    before = {root: receipt_bytes(root, study_directory=study) for root in roots}
+    removed = [study / live.STUDY_REGISTRY / f"{identity}.json",
+               study / live.STUDY_REGISTRY / live.FINALIZED_DIRECTORY / f"{identity}.json"]
+    if remove_related_records:
+        removed += [path for root in roots for path in (root / live.SUPERSEDED_DIRECTORY).glob(f"{identity}.json")]
+        removed += [path for path in (study / live.START_LEDGER).glob("*.json")
+                    if read_sealed(path)["plan_hash"] == identity]
+    retained = {path: path.read_bytes() for path in removed}
+    prior = [live.registered_root_path(study, record) for record in registrations
+             if record["plan_hash"] in {item["plan_hash"] for item in first_plan["consumed_attempts"]["prior_roots"]}]
+    export = exports["core", 1]
+    index = read_sealed(export / "index.json")
+    try:
+        for path in removed:
+            path.unlink()
+        with pytest.raises(ValueError, match="retained root inventory differs"):
+            export_live_review(first, tmp_path / "refused-export", study_directory=study, prior_roots=prior,
+                scorer=score_trial, pressure_review_selector=pressure_review_selection, receipt_directory=receipts)
+        assert not (tmp_path / "refused-export").exists()
+        with pytest.raises(ValueError, match="retained root inventory differs"):
+            verify_pressure_export_evidence(export, index, receipt_directory=receipts)
+        with pytest.raises(ValueError, match="retained root inventory differs"):
+            write_review_packets(export, index["pressure_review_selection"], tmp_path / "refused-packets",
+                                 study_directory=study, receipt_directory=receipts)
+        assert not (tmp_path / "refused-packets").exists()
+        with pytest.raises(ValueError, match="retained root inventory differs"):
+            build_pilot_decision(gate_exports=decision["gate_exports"], pilot_exports=decision["pilot_exports"],
+                                 receipt_directory=receipts)
+        with pytest.raises(ValueError, match="retained root inventory differs"):
+            live.prior_root_ledger([root for root in roots if root != latest], phase="calibration",
+                source=first_plan["source"], study_directory=study,
+                bundle=load_bundle().tool_set(TOOL_SCHEMA_VERSION_P), receipt_directory=receipts)
+        for root, raw in before.items():
+            assert receipt_bytes(root, study_directory=study) == raw
+            check_receipt(root, receipts, study_directory=study)
+    finally:
+        for path, raw in retained.items():
+            path.write_bytes(raw)
+
+
+def test_abandoned_root_with_committed_journal_starts_refuses_population(successor_inputs, tmp_path):
+    _, study, _, receipts, groups, exports, _ = successor_inputs
+    root, plan = groups["core"][0][-1]
+    assert any(record["kind"] == "attempt_started"
+               for records in live.lane_journals(root, plan).values() for record in records)
+    registry = study / live.STUDY_REGISTRY
+    registration = read_sealed(registry / f"{plan['seal_hash']}.json")
+    marker = registry / live.ABANDONED_DIRECTORY / f"{plan['seal_hash']}.json"
+    marker.parent.mkdir(exist_ok=True)
+    atomic_json(marker, seal({"kind": live.ABANDONED_KIND,
+        **{key: registration[key] for key in ("plan_hash", "root_path", "phase", "study_manifest_hash")},
+        "consumed_attempt_ids": [], "root_journals_checked": True,
+        "reason": "Offline consistency check."}))
+    try:
+        export = exports["gate-pilot", 2]
+        with pytest.raises(ValueError, match="abandoned root has journaled attempt starts"):
+            verify_pressure_export_evidence(export, read_sealed(export / "index.json"), receipt_directory=receipts)
+        with pytest.raises(ValueError, match="abandoned root has journaled attempt starts"):
+            export_live_review(root, tmp_path / "refused-abandoned-export",
+                study_directory=study, scorer=score_trial, pressure_review_selector=pressure_review_selection,
+                receipt_directory=receipts)
+        check_receipt(root, receipts, study_directory=study)
+    finally:
+        marker.unlink()
 
 
 @pytest.mark.parametrize("mutation", ["source_root_plan_hash", "score", "status", "missing_row", "duplicate_row"])

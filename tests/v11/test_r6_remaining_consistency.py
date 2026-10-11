@@ -13,12 +13,13 @@ from swarm_auth_bench.peer_reporting.storage import atomic_json, read_sealed, se
 from swarm_auth_bench.peer_reporting_v11 import live, live_review, phase
 from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
 from swarm_auth_bench.peer_reporting_v11.pilot_decision import build_pilot_decision
-from swarm_auth_bench.peer_reporting_v11.receipts import check_receipt
+from swarm_auth_bench.peer_reporting_v11.receipts import check_receipt, receipt_bytes
 from swarm_auth_bench.peer_reporting_v11.review import (
     build_review_bundle,
     human_endpoints,
     resolve_packet_reviews,
     validate_review_upload,
+    verify_pressure_export_evidence,
     write_review_packets,
 )
 from swarm_auth_bench.peer_reporting_v11.review_plan import pressure_review_selection
@@ -90,6 +91,52 @@ def pressure_roots(tmp_path, wp6_study, wp6_inputs, v2_compatibility):
             prior_roots=prior, **({"wall_clock": clock, "pause_sleep": clock.sleep} if clock else {}))
 
     return study, receipts, rows, fixtures, prepare, run
+
+
+def test_abandoned_unstarted_successor_does_not_own_population(tmp_path, pressure_roots):
+    study, receipts, _, _, prepare, _ = pressure_roots
+    first, first_plan = prepare(0, "initial")
+    commit_receipt(first, receipts, study_directory=study)
+    unused, unused_plan = prepare(1, "unused-successor", prior=[first])
+    commit_receipt(unused, receipts, study_directory=study)
+    before = receipt_bytes(unused, study_directory=study)
+    abandonment = live.abandon_root(study, unused_plan["seal_hash"], root=unused,
+        reason="Unstarted plan replaced in offline consistency check.", receipt_directory=receipts)
+    assert abandonment["root_journals_checked"]
+    latest, latest_plan = prepare(1, "latest", prior=[first])
+    commit_receipt(latest, receipts, study_directory=study)
+    output = tmp_path / "export"
+    live_review.export_live_review(latest, output, study_directory=study, prior_roots=[first],
+        scorer=score_trial, pressure_review_selector=pressure_review_selection, receipt_directory=receipts)
+    index = read_sealed(output / "index.json")
+    assert len(index["rows"]) == 2
+    assert {row["source_root_plan_hash"] for row in index["rows"]} == {
+        first_plan["seal_hash"], latest_plan["seal_hash"]}
+    assert verify_pressure_export_evidence(output, index, receipt_directory=receipts) == []
+    partitions = registered_pressure_partitions(study, phase="calibration",
+        study_manifest_hash=latest_plan["source"]["study_manifest_hash"],
+        source_plan_hash=latest_plan["seal_hash"], receipt_directory=receipts)
+    assert {identity for identity, _ in partitions} == {latest_plan["seal_hash"]}
+    assert receipt_bytes(unused, study_directory=study) == before
+    check_receipt(unused, receipts, study_directory=study)
+
+
+def test_pressure_planning_and_preparation_require_retained_root_registration(pressure_roots):
+    study, receipts, _, _, prepare, _ = pressure_roots
+    first, plan = prepare(0, "initial")
+    commit_receipt(first, receipts, study_directory=study)
+    before = receipt_bytes(first, study_directory=study)
+    registry = study / live.STUDY_REGISTRY
+    (registry / f"{plan['seal_hash']}.json").unlink()
+    (registry / live.FINALIZED_DIRECTORY / f"{plan['seal_hash']}.json").unlink()
+    with pytest.raises(ValueError, match="retained root inventory differs"):
+        live.prior_root_ledger([], phase=plan["phase"], source=plan["source"], study_directory=study,
+            bundle=load_bundle().tool_set(TOOL_SCHEMA_VERSION_P), receipt_directory=receipts)
+    with pytest.raises(ValueError, match="retained root inventory differs"):
+        prepare(1, "later")
+    assert not (study / "roots" / "later").exists()
+    assert receipt_bytes(first, study_directory=study) == before
+    check_receipt(first, receipts, study_directory=study)
 
 
 @pytest.mark.parametrize("state", ["retained_attempt", "settlement_only"])
