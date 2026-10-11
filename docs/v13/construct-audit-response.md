@@ -231,13 +231,21 @@ groups a held root and its successors into one population. Astra's tenth review
 layout. It found one gap: a run root with no registration was not detected. Section 7.4
 now also says that a root abandoned before any start is not part of the population.
 
-## Next (before the live runs)
+R6-fix11 checks every retained run root against the study's registrations. Astra's
+eleventh review ([review-astra-r6-confirm11.md](review-astra-r6-confirm11.md)) found that
+fixed, and one new gap in planning new roots: a root's phase was taken from its plan
+without checking it against the study's assignments. The export and review path already
+refused that mismatch, so the core was exported, packeted and analysed. The results are
+in [results-core.md](results-core.md). R6-fix12 checks each retained root's phase,
+assignments and receipts against the study before planning filters by phase. Astra's
+twelfth review ([review-astra-r6-confirm12.md](review-astra-r6-confirm12.md)) found it
+fixed, with no new finding.
 
-The code has no open blocker or major finding. Before the first model call:
+## Next
 
-1. The guest needs Git and a committed receipts repository, because the receipt check
-   reads a local Git commit. This was not exercised by the offline checks, which run on a
-   machine with Git.
-2. The user authorizes, in turn: the guest snapshot, the 6-call v2 compatibility plan by
-   hash, the push of receipts to the public repository, and the gate and pilot plan by
-   hash. The core plan needs its own authorization after the pilot decision record.
+The code has no open blocker or major finding. Remaining for revision 6:
+
+1. Human review of the 588 packets (126 gate and pilot, 462 core), which any
+   owner-disclosure claim needs.
+2. The long-episode design (v1.4), which needs the user's approval before its spec is
+   written.
