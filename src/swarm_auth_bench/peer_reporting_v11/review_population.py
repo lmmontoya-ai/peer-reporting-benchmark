@@ -8,15 +8,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..peer_reporting.storage import read_sealed, safe_child
 from .live import (
-    check_assignment_binding,
     check_start_claims,
-    checked_pressure_registrations,
+    checked_pressure_roots,
     lane_journals,
-    read_live_plan,
     read_study_manifest,
-    registered_root_path,
     verify_consumed_ledger,
 )
 
@@ -74,59 +70,16 @@ def registered_pressure_population(study_directory: Path, *, phase: str, study_m
     """Bind successor links to registered plans, journals and committed receipts."""
     manifest = read_study_manifest(study_directory)
     _require(manifest["seal_hash"] == study_manifest_hash, "P review population belongs to another study")
-    study_assignments = {row["assignment_id"]: row for row in manifest["assignments"]}
     roots = {}
-    for registration in checked_pressure_registrations(study_directory, receipt_directory=receipt_directory):
-        root = registered_root_path(study_directory, registration)
+    for checked in checked_pressure_roots(study_directory, receipt_directory=receipt_directory):
+        root, registration, plan = checked.directory, checked.registration, checked.plan
         if registration["state"] == "abandoned":
             continue
-        plan = read_live_plan(root)
-        _require(plan["seal_hash"] == registration["plan_hash"] and plan["phase"] == registration["phase"]
-                 and plan["source"]["study_manifest_hash"] == study_manifest_hash
-                 and registration["study_manifest_hash"] == study_manifest_hash,
-                 "P review root plan differs from its study registration")
-        entries, seen = [], set()
-        lane_plans = []
-        for lane in plan["lanes"]:
-            lane_plan = read_sealed(safe_child(root, lane["path"]) / "phase-plan.json")
-            _require(lane_plan["seal_hash"] == lane["plan_hash"],
-                     "P review lane plan differs from its sealed root plan")
-            lane_plans.append(lane_plan)
-            for entry in lane_plan["planned_order"]:
-                identifier = entry["entry_id"]
-                _require(identifier not in seen and identifier in study_assignments,
-                         "P review root assignment missing or duplicated")
-                seen.add(identifier)
-                entries.append(entry)
-        # Historical entries leave fixture-only labels out of their byte format.
-        # Resolve omitted fixed labels from the primary sealed-study fixture.
-        fixtures = {}
-        aliases = {"assignment_id": "entry_id", "effort": "reasoning_effort"}
-        for entry in entries:
-            assignment = study_assignments[entry["entry_id"]]
-            if any(value is not None and aliases.get(key, key) not in entry
-                   for key, value in assignment.items()):
-                identifier = assignment["fixture_id"]
-                if identifier not in fixtures:
-                    stored = read_sealed(safe_child(study_directory, manifest["fixtures"][identifier]["path"]))
-                    fixtures[identifier] = {key: value for key, value in stored.items() if key != "seal_hash"}
-        phases = {study_assignments[entry["entry_id"]]["split"] for entry in entries}
-        _require(len(phases) == 1, "P review root assignments require one sealed-study phase")
-        canonical_phase = phases.pop()
-        assignments = check_assignment_binding(entries, manifest=manifest, source=plan["source"], phase=canonical_phase,
-                                                 fixtures=fixtures)
-        _require(plan["phase"] == registration["phase"] == canonical_phase
-                 and all(lane_plan["phase"] == canonical_phase for lane_plan in lane_plans),
-                 "P review root phase differs from its sealed-study assignments")
-        has_primary_evidence = any((root / "lanes").rglob("journal.jsonl")) or any(
-            (root / "lanes").rglob("attempt.json"))
-        if registration["state"] == "finalized" or has_primary_evidence:
-            from .receipts import check_receipt
-
-            check_receipt(root, receipt_directory, study_directory=study_directory)
-        if canonical_phase != phase:
+        if plan["phase"] != phase:
             continue
-        journals = lane_journals(root, plan) if has_primary_evidence else {}
+        assignments = checked.assignments
+        seen = {assignment["assignment_id"] for assignment in assignments}
+        journals = lane_journals(root, plan) if checked.has_primary_evidence else {}
         if journals:
             check_start_claims(study_directory, plan, root, journals)
         started = {record["data"]["entry_id"] for records in journals.values() for record in records
