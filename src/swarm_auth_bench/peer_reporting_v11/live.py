@@ -89,6 +89,7 @@ import tempfile
 import time
 from contextlib import ExitStack
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -1139,9 +1140,18 @@ def registered_root_path(study_directory: Path, registration: dict) -> Path:
     return safe_child(Path(study_directory), relative)
 
 
-def checked_pressure_registrations(study_directory: Path, *,
-                                   receipt_directory: Path | None = None) -> list[dict]:
-    """Require the P registry to match retained roots before filtering a population."""
+@dataclass
+class CheckedPressureRoot:
+    directory: Path
+    registration: dict
+    plan: dict
+    assignments: list[dict]
+    has_primary_evidence: bool
+
+
+def checked_pressure_roots(study_directory: Path, *,
+                           receipt_directory: Path | None = None) -> list[CheckedPressureRoot]:
+    """Bind every retained P root to its study and receipts before phase filtering."""
     directory = Path(study_directory) / ROOTS_DIRECTORY
     roots = {}
     if directory.is_dir():
@@ -1162,7 +1172,10 @@ def checked_pressure_registrations(study_directory: Path, *,
         raise EvidenceError("P retained root inventory differs from study registrations; "
                             f"unregistered {sorted(set(roots) - paths)}, "
                             f"without retained root {sorted(paths - set(roots))}")
-    manifest_hash = read_study_manifest(study_directory)["seal_hash"]
+    manifest = read_study_manifest(study_directory)
+    manifest_hash = manifest["seal_hash"]
+    study_assignments = {row["assignment_id"]: row for row in manifest["assignments"]}
+    checked = []
     for entry in registrations:
         root = roots[entry["root_path"]]
         if registered_root_path(study_directory, entry) != root.resolve():
@@ -1172,17 +1185,60 @@ def checked_pressure_registrations(study_directory: Path, *,
                 or plan["source"]["study_manifest_hash"] != manifest_hash
                 or entry["study_manifest_hash"] != manifest_hash):
             raise EvidenceError("P root plan differs from its study registration")
+        entries, seen, lane_plans = [], set(), []
+        for lane in plan["lanes"]:
+            lane_plan = read_sealed(safe_child(root, lane["path"]) / "phase-plan.json")
+            if lane_plan["seal_hash"] != lane["plan_hash"]:
+                raise EvidenceError("P root lane plan differs from its sealed root plan")
+            lane_plans.append(lane_plan)
+            for assignment in lane_plan["planned_order"]:
+                identifier = assignment["entry_id"]
+                if identifier in seen or identifier not in study_assignments:
+                    raise EvidenceError("P root assignment missing or duplicated")
+                seen.add(identifier)
+                entries.append(assignment)
+        # Historical entries omit fixture-only labels. Resolve them from the study.
+        fixtures = {}
+        aliases = {"assignment_id": "entry_id", "effort": "reasoning_effort"}
+        for assignment in entries:
+            canonical = study_assignments[assignment["entry_id"]]
+            if any(value is not None and aliases.get(key, key) not in assignment
+                   for key, value in canonical.items()):
+                identifier = canonical["fixture_id"]
+                if identifier not in fixtures:
+                    stored = read_sealed(safe_child(study_directory, manifest["fixtures"][identifier]["path"]))
+                    fixtures[identifier] = _plain(stored)
+        phases = {study_assignments[assignment["entry_id"]]["split"] for assignment in entries}
+        if len(phases) != 1:
+            raise EvidenceError("P root assignments require one sealed-study phase")
+        canonical_phase = phases.pop()
+        assignments = check_assignment_binding(entries, manifest=manifest, source=plan["source"],
+            phase=canonical_phase, fixtures=fixtures)
+        if (plan["phase"] != canonical_phase or entry["phase"] != canonical_phase
+                or any(lane_plan["phase"] != canonical_phase for lane_plan in lane_plans)):
+            raise EvidenceError("P root phase differs from its sealed-study assignments")
+        has_primary_evidence = any((root / "lanes").rglob("journal.jsonl")) or any(
+            (root / "lanes").rglob("attempt.json"))
+        if entry["state"] in {"finalized", "abandoned"} or has_primary_evidence:
+            from .receipts import check_receipt
+
+            check_receipt(root, receipt_directory, study_directory=study_directory)
         if entry["state"] == "abandoned":
             abandonment = entry["abandoned"]
             if (any(abandonment.get(key) != entry[key]
                     for key in ("plan_hash", "root_path", "phase", "study_manifest_hash"))
                     or abandonment.get("consumed_attempt_ids") != []):
                 raise EvidenceError("P root abandonment differs from its study registration")
-            from .receipts import check_receipt
-
-            check_receipt(root, receipt_directory, study_directory=study_directory)
             check_abandoned_root(root, entry)
-    return registrations
+        checked.append(CheckedPressureRoot(root, entry, plan, assignments, has_primary_evidence))
+    return checked
+
+
+def checked_pressure_registrations(study_directory: Path, *,
+                                   receipt_directory: Path | None = None) -> list[dict]:
+    """Return registrations only after checking all retained roots against the study."""
+    return [root.registration for root in checked_pressure_roots(study_directory,
+                                                                receipt_directory=receipt_directory)]
 
 
 def require_registered_path(study_directory: Path, registration: dict, directory: Path) -> None:
