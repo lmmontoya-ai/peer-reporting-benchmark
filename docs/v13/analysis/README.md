@@ -16,7 +16,7 @@ paths must be outside the input evidence directories. `--skip-verification` is
 only for fake exports in tests and prints a warning in the report and stdout.
 An evidence failure refuses analysis before writing either output.
 
-The live core export is pending. No live result has been analyzed here.
+The live core results are in [../results-core.md](../results-core.md).
 
 ## Coverage
 
