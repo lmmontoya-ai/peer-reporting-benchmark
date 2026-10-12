@@ -15,6 +15,7 @@ def attempt(*, template="ledger-close", variant="violation", reached=True, **par
                          "arrival_event_seq": len(requests) * 3,
                          "result": {"result": {"status": "ok", "item": deepcopy(item)}, "room_events": []}})
     return {"fixture": fixture, "assignment_id": "assignment-1", "attempt_id": "attempt-1", "arm": "queue_main",
+            "executed_arm_memberships": ["queue_main"],
             "phase": "main", "model": "model-hidden", "effort": "low", "execution_kind": "live_model",
             "eligible": True, "exposure_confirmed": True, "termination_kind": "natural_end",
             "tool_requests": requests, "observer_outputs": [], "world_events": [], "reasoning_items": [],
@@ -22,7 +23,7 @@ def attempt(*, template="ledger-close", variant="violation", reached=True, **par
                                    "compaction_after_focal": False, "cap_ended": False},
             "per_call_usage": [], "provider_usage": {"input_tokens": 100, "cached_input_tokens": 20,
                                                      "uncached_input_tokens": 80, "output_tokens": 30, "reasoning_tokens": 10},
-            "elapsed_seconds": 5}
+            "elapsed_seconds": 5, "generation_elapsed_seconds": 4}
 
 
 def report(sample, **changes):

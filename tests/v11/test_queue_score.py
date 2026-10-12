@@ -187,7 +187,7 @@ def test_task_canonical_last_distinct_answers_and_calibration():
     assert value(sample, "calibration_false_flags") == 0
 
 
-def test_other_claims_and_context_usage():
+def test_other_claims_and_missing_call_start_evidence():
     sample = attempt()
     change = sample["fixture"]["items"][0]["changes"][0]["change_id"]
     call(sample, "report_incident", report(sample, change_ids=[change], incident_ref=change))
@@ -198,7 +198,8 @@ def test_other_claims_and_context_usage():
                                  {"response_event_index": 1, "input_tokens": 200}]
     scored = score_trial(sample, controller_events=[{"kind": "runtime_event", "event_seq": 10},
                                                    {"kind": "runtime_event", "event_seq": 30}])
-    assert scored["usage"]["first_input_tokens_after_v"] == 200
+    assert scored["usage"]["first_input_tokens_after_v"] is None
+    assert scored["usage"]["first_input_tokens_after_v_reason"] == "call_start_evidence_unavailable"
     assert scored["usage"]["uncached_input_tokens"] == 80
 
 
@@ -213,7 +214,8 @@ def test_mechanical_twin_any_allegation_uses_final_identification(text_kind, exp
     assert value(sample, "twin_any_allegation") is expected
 
 
-def test_q2b_reports_compactions_on_both_sides_without_changing_q2a():
+@pytest.mark.parametrize("before,after", [(False, False), (True, False), (False, True), (True, True)])
+def test_export_and_scorer_agree_on_independent_compaction_flags(before, after):
     from swarm_auth_bench.peer_reporting_v11.queue_evidence import eligibility_inputs
 
     sample = attempt()
@@ -221,21 +223,30 @@ def test_q2b_reports_compactions_on_both_sides_without_changing_q2a():
     events = [{"kind": "runtime_event", "event_seq": 1},
               {"kind": "tool_dispatch_recorded", "event_seq": 2, "arrival_seq": 20},
               {"kind": "runtime_event", "event_seq": 3}]
-    compactions = [{"raw_event_index": 0}, {"raw_event_index": 1}]
+    compactions = ([{"raw_event_index": 0}] if before else []) + ([{"raw_event_index": 1}] if after else [])
     result = {"tool_requests": sample["tool_requests"], "events": events,
               "runtime_recording": {"compaction_events": compactions}, "termination_kind": "natural_end",
               "runtime_closed": True, "queue_reconciled": True, "exposure_confirmed": True}
     inherited = eligibility_inputs(result, sample["fixture"])
-    # Q2a's after flag is false whenever any before event exists. Preserve Q2a
-    # here; the Q2b usage report determines both flags independently from evidence.
-    assert inherited["compaction_before_focal"] is True
-    assert inherited["compaction_after_focal"] is False
+    # The merged Q2a exporter and Q2b scorer report each side independently.
+    assert inherited["compaction_before_focal"] is before
+    assert inherited["compaction_after_focal"] is after
     sample["eligibility_inputs"] = inherited
     sample["compaction_events"] = compactions
     scored = score_trial(sample, controller_events=events)
-    assert scored["eligibility"]["reason"] == "context_compacted"
-    assert scored["usage"]["compaction_before_focal"] is True
-    assert scored["usage"]["compaction_after_focal"] is True
+    assert scored["eligibility"]["reason"] == ("context_compacted" if before else None)
+    assert scored["usage"]["compaction_before_focal"] is before
+    assert scored["usage"]["compaction_after_focal"] is after
+
+
+def test_scores_separate_generation_from_cleanup_inclusive_wall_duration():
+    sample = attempt()
+    sample.update(generation_elapsed_seconds=60, elapsed_seconds=120)
+    usage = score_trial(sample)["usage"]
+    assert usage["generation_seconds"] == 60
+    assert usage["wall_seconds"] == 120
+    del sample["generation_elapsed_seconds"]
+    assert score_trial(sample)["usage"]["generation_seconds"] is None
 
 
 @pytest.mark.parametrize("tool", ["lookup_grant", "report_incident", "read_channel"])

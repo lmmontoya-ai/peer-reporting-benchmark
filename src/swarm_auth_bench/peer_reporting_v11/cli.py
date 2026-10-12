@@ -115,10 +115,12 @@ def _queue_review_commands(commands) -> None:
     upload.add_argument("--controller", type=Path, required=True)
     upload.add_argument("--output", type=Path, required=True, help="fresh validation file; exact submission retained beside it")
     upload.add_argument("--adjudication", action="store_true")
+    upload.add_argument("--correction-of", type=Path, help="earlier final Q resolution superseded by this correction")
     resolve = commands.add_parser("adjudicate-queue-review", help="resolve retained Q owner codes offline")
     resolve.add_argument("packets", type=Path)
     resolve.add_argument("--upload", type=Path, action="append", default=[])
     resolve.add_argument("--adjudication", type=Path, action="append", default=[])
+    resolve.add_argument("--correction", type=Path, action="append", default=[])
     resolve.add_argument("--output", type=Path, required=True)
     for name in QUEUE_REVIEW_COMMANDS:
         commands.choices[name].add_argument("--receipt-directory", type=Path)
@@ -144,9 +146,9 @@ def _queue_review(args):
             coding_resolution=getattr(args, "coding_resolution", None), **verification)
     if args.command == "validate-queue-review-upload":
         return retain_upload(args.upload, args.packet, args.controller, args.output,
-                             adjudication=args.adjudication, **verification)
+                             adjudication=args.adjudication, correction_of=args.correction_of, **verification)
     return write_adjudication(args.packets, args.output, uploads=args.upload,
-                              adjudications=args.adjudication, **verification)
+                              adjudications=args.adjudication, corrections=args.correction, **verification)
 
 
 def _review(args: argparse.Namespace) -> dict:
