@@ -382,7 +382,14 @@ def _validate_lifecycle(state: dict) -> dict[int, str]:
                 raise ValueError("queue opportunity closure differs from lifecycle")
             closed = True
             closing_unexposed = False
-        elif kind != "world_created" and seq is not None:
+        elif kind != "world_created":
+            if (kind == "public_message_stored" and seq is None
+                    and data.get("notice_kind") in ("final_message", "finish_summary")):
+                if not closed:
+                    raise ValueError("queue closure notice outside closure")
+                continue
+            if type(seq) is not int or seq not in arrivals:
+                raise ValueError("queue effect lacks a valid request arrival sequence")
             if closed or not exposed or not pending or seq != pending[0]:
                 raise ValueError("queue effects bypass a held request or its opportunity")
     if required or len(arrivals) != len(state["requests"]):
@@ -521,6 +528,7 @@ def validate_receipts(state: dict) -> None:
         closure = []
         finish_texts = [event["data"]["summary"] for event in state["events"] if event["kind"] == "agent_finished"]
         closure_finish_texts = []
+        final_notices_present = False
         for event in state["events"]:
             if event["kind"] == "public_message_stored" and event["arrival_seq"] is None:
                 data = event["data"]
@@ -530,6 +538,8 @@ def validate_receipts(state: dict) -> None:
                     raise ValueError("queue closure notice precedes opportunity closure")
                 if data["notice_kind"] == "finish_summary":
                     closure_finish_texts.append(data["closure_text"])
+                else:
+                    final_notices_present = True
                 field = "text" if data["notice_kind"] == "final_message" else "summary"
                 message = data["message"]
                 expected = {"event_id": world._id("message", len(replay["messages"]) + len(closure) + 1),
@@ -539,7 +549,13 @@ def validate_receipts(state: dict) -> None:
                 if canonical_json(message) != canonical_json(expected):
                     raise ValueError("queue closure notice text or ordering mismatch")
                 closure.append(message)
-        if closure_finish_texts != (finish_texts if state["queue"]["closure_notices_stored"] else []):
+        closure_stored = state["queue"]["closure_notices_stored"]
+        final_stored = state["queue"].get("final_notices_stored", False)
+        if (type(closure_stored) is not bool or type(final_stored) is not bool
+                or closure and not closure_stored or closure_stored and not state["closed"]
+                or final_stored is not final_notices_present):
+            raise ValueError("queue closure notice flags differ from stored notices")
+        if closure_finish_texts != (finish_texts if closure_stored else []):
             raise ValueError("queue finish notice differs from its stored summary")
         if canonical_json(state["messages"]) != canonical_json(replay["messages"] + closure):
             raise ValueError("queue messages differ from replay")
