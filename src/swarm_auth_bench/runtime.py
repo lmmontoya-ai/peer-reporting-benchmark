@@ -19,8 +19,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
-from .runtime_cleanup import _kill_group as _kill_group
-from .runtime_cleanup import mark_home, process_start
+from .runtime_cleanup import mark_home
 from .world import ToolError
 
 LOCKED_CONFIG = (
@@ -306,36 +305,8 @@ class CodexRuntime:
             limit=16 * 1024 * 1024,
             start_new_session=os.name != "nt",
         )
-        self._bind_process_handle(proc)
-        proc._runtime_start = process_start(proc.pid)
         mark_home(home, process_pid=proc.pid)
         return proc
-
-    def _bind_process_handle(self, proc: asyncio.subprocess.Process) -> None:
-        proc._runtime_pidfd = None
-        if os.name == "nt" or proc.returncode is not None or not hasattr(os, "pidfd_open"):
-            return
-        try:
-            # Acquire the bound handle before any further launch bookkeeping.
-            proc._runtime_pidfd = os.pidfd_open(proc.pid)
-        except OSError:
-            return
-        reaper = asyncio.create_task(self._reap_process_handle(proc))
-        self._background.add(reaper)
-        reaper.add_done_callback(self._background.discard)
-
-    def _close_process_handle(self, proc: asyncio.subprocess.Process) -> None:
-        pidfd = getattr(proc, "_runtime_pidfd", None)
-        if pidfd is not None:
-            proc._runtime_pidfd = None
-            os.close(pidfd)
-
-    async def _reap_process_handle(self, proc: asyncio.subprocess.Process) -> None:
-        try:
-            await proc.wait()
-        finally:
-            if proc.returncode is not None:
-                self._close_process_handle(proc)
 
     async def _stop_process(self, proc: asyncio.subprocess.Process) -> None:
         if proc.returncode is not None:
@@ -360,26 +331,6 @@ class CodexRuntime:
             except ProcessLookupError:
                 pass
             await proc.wait()
-
-    async def _kill_process(self, proc: asyncio.subprocess.Process) -> None:
-        if proc.returncode is not None:
-            self._close_process_handle(proc)
-            return
-        try:
-            if os.name == "nt" and callable(getattr(proc, "kill", None)):
-                proc.kill()
-            elif (os.name != "nt" and getattr(proc, "_runtime_pidfd", None) is not None
-                  and hasattr(signal, "pidfd_send_signal")):
-                signal.pidfd_send_signal(proc._runtime_pidfd, signal.SIGKILL)
-            else:
-                raise RuntimeProtocolError("app-server process has no bound termination handle")
-        except ProcessLookupError:
-            pass
-        try:
-            await proc.wait()
-        finally:
-            if proc.returncode is not None:
-                self._close_process_handle(proc)
 
     async def _send(self, message: dict[str, Any], proc: asyncio.subprocess.Process | None = None) -> None:
         proc = proc or self._proc
@@ -906,19 +857,12 @@ class CodexRuntime:
             session.active = False
 
     async def close(self) -> None:
-        force = self._close_started
+        retry = self._close_started
         self._close_started = True
-        if self._proc is not None:
-            try:
-                if force:
-                    await self._kill_process(self._proc)
-                else:
-                    await self._stop_process(self._proc)
-            finally:
-                if self._proc.returncode is not None:
-                    self._close_process_handle(self._proc)
+        if self._proc is not None and not retry:
+            await self._stop_process(self._proc)
         if self._reader_task:
-            if force:
+            if retry:
                 self._reader_task.cancel()
             await asyncio.gather(self._reader_task, return_exceptions=True)
             self._reader_task = None
@@ -940,8 +884,11 @@ class CodexRuntime:
             self._temporary_home.cleanup()
             self._temporary_home = None
         self._sessions.clear()
-        self._proc = None
         self._home = None
+        # The retry sends no signals: the PID may already belong to a replacement.
+        if self._proc is not None and self._proc.returncode is None:
+            raise asyncio.TimeoutError()
+        self._proc = None
         self._close_started = False
 
     async def __aenter__(self) -> "CodexRuntime":
