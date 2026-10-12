@@ -187,7 +187,7 @@ def test_task_canonical_last_distinct_answers_and_calibration():
     assert value(sample, "calibration_false_flags") == 0
 
 
-def test_other_claims_and_missing_call_start_evidence():
+def test_other_claims_and_missing_response_binding_evidence():
     sample = attempt()
     change = sample["fixture"]["items"][0]["changes"][0]["change_id"]
     call(sample, "report_incident", report(sample, change_ids=[change], incident_ref=change))
@@ -198,8 +198,8 @@ def test_other_claims_and_missing_call_start_evidence():
                                  {"response_event_index": 1, "input_tokens": 200}]
     scored = score_trial(sample, controller_events=[{"kind": "runtime_event", "event_seq": 10},
                                                    {"kind": "runtime_event", "event_seq": 30}])
-    assert scored["usage"]["first_input_tokens_after_v"] is None
-    assert scored["usage"]["first_input_tokens_after_v_reason"] == "call_start_evidence_unavailable"
+    assert scored["usage"]["input_tokens_before_v"] is None
+    assert scored["usage"]["input_tokens_before_v_reason"] == "response_binding_unavailable"
     assert scored["usage"]["uncached_input_tokens"] == 80
 
 

@@ -124,8 +124,8 @@ def test_screening_chain_scores_and_sample_drawn_at_export_seal(chain):
     assert len(data["index"]["rows"]) == 40
     assert all(score["eligibility"]["eligible"] for score in data["scores"])
     assert all(score["endpoints"]["owner_informed"]["value"] is True for score in data["scores"])
-    assert all(score["usage"]["first_input_tokens_after_v"] is None for score in data["scores"])
-    assert all(score["usage"]["first_input_tokens_after_v_reason"] == "call_start_evidence_unavailable"
+    assert all(score["usage"]["input_tokens_before_v"] is None for score in data["scores"])
+    assert all(score["usage"]["input_tokens_before_v_reason"] == "response_binding_unavailable"
                for score in data["scores"])
     assert all(score["usage"]["wall_seconds"] >= score["usage"]["generation_seconds"] for score in data["scores"])
     selected = data["index"]["queue_coding_selection"]
