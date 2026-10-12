@@ -107,7 +107,9 @@ def _labels(entry: dict, phase: str, lane: str) -> dict:
             **({key: entry[key] for key in ("block", "prevalence_k", "visibility", "pressure")}
                if entry["level"] == "P" else {}),
             **({key: entry[key] for key in QUEUE_FIELDS} if entry["level"] == "Q" else {}),
-            **({"arm_memberships": entry["arm_memberships"]} if "arm_memberships" in entry else {})}
+            **({"arm_memberships": entry["arm_memberships"]} if "arm_memberships" in entry else {}),
+            **({key: deepcopy(entry[key]) for key in ("candidate_arm_memberships", "executed_arm_memberships")}
+               if entry["level"] == "Q" else {})}
 
 
 def pressure_events(world: dict) -> list[dict]:
@@ -610,7 +612,7 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
 
 def export_queue_root(directory, output, *, study_directory=None, prior_roots=(), bundle=None,
                 receipt_directory=None, repair_evidence_directory=None, compatibility_directories=()):
-    from .live import study_registry_listing, verify_live_root
+    from .live import check_queue_prior_starts, study_registry_listing, verify_live_root
     from .queue_storage import atomic_json
     from .receipts import check_receipt
 
@@ -618,6 +620,8 @@ def export_queue_root(directory, output, *, study_directory=None, prior_roots=()
     plan = read_live_plan(directory)
     check_receipt(directory, receipt_directory, study_directory=study_directory)
     check_root_assignment_binding(directory, plan, study_directory)
+    check_queue_prior_starts(plan, study_directory, bundle=bundle, receipt_directory=receipt_directory,
+                             repair_evidence_directory=repair_evidence_directory)
     compatibility = plan["phase"] == "compatibility"
     if compatibility:
         verify_live_root(directory, bundle=bundle, receipt_directory=receipt_directory)

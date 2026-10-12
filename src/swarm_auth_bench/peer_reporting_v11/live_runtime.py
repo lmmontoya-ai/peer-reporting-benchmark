@@ -254,6 +254,9 @@ class _Controller:
                              "last_admitted_arrival_seq": len(self.requests), "elapsed_seconds": self.elapsed()}
             self.emit("admission_closed", **self.boundary)
         if stop_generation:
+            if self.queue and not self.hard_stop.is_set():
+                self.emit("queue_generation_stop_observed", termination_kind=kind, reason=reason,
+                          generation_active=bool(self.session and self.session.active))
             self.hard_stop.set()
             self._interrupt()
 
@@ -531,15 +534,14 @@ class _Controller:
             returned = self.usage_callback(deepcopy(observation))
             if inspect.isawaitable(returned):
                 await returned
-        if usable:
-            for field in ("input", "output"):
-                if sum(call[field + "_tokens"] for call in calls) >= self.caps["trial_" + field + "_token_stop"]:
-                    self.emit("queue_token_stop_observed", token_kind=field,
-                              cumulative_tokens=sum(call[field + "_tokens"] for call in calls),
-                              stop_target=self.caps["trial_" + field + "_token_stop"],
-                              generation_active=self.session.active)
-                    await self.stop("per_trial_limit", "trial_" + field + "_token_limit")
-                    break
+        for field in ("input", "output"):
+            known = sum(call[field + "_tokens"] for call in calls
+                        if type(call.get(field + "_tokens")) is int and call[field + "_tokens"] >= 0)
+            if known >= self.caps["trial_" + field + "_token_stop"]:
+                self.emit("queue_token_stop_observed", token_kind=field, cumulative_tokens=known,
+                          stop_target=self.caps["trial_" + field + "_token_stop"],
+                          generation_active=self.session.active)
+                await self.stop("per_trial_limit", "trial_" + field + "_token_limit")
 
     async def _usage(self, raw: dict) -> None:
         params, method = raw["params"], raw["method"]
@@ -998,6 +1000,8 @@ async def run_live_observer(
     except Exception as error:
         await controller.fail(f"runtime failed: {type(error).__name__}: {error}")
 
+    if controller.queue:
+        controller.emit("queue_generation_ended")
     drain_started = clock()
     drain_deadline = asyncio.get_running_loop().time() + caps["drain_grace_seconds"]
 
@@ -1155,9 +1159,11 @@ async def run_live_observer(
     if controller.queue:
         controller.emit("observer_outputs_recorded", outputs=outputs)
     boundary = controller.boundary or {"termination_kind": "infrastructure_incomplete", "reason": "no_boundary"}
+    generation_stop = next((event for event in controller.events if event["kind"] == "queue_generation_stop_observed"
+                            and event["generation_active"]), None)
     termination = "infrastructure_incomplete" if controller.failures or not controller.queue_reconciled \
         else PROVIDER_UNAVAILABLE if overload is not None else PROVIDER_STALLED if stall is not None \
-        else boundary["termination_kind"]
+        else generation_stop["termination_kind"] if generation_stop is not None else boundary["termination_kind"]
     controller.emit("observer_attempt_reconciled", termination_kind=termination,
                     queue_reconciled=controller.queue_reconciled, failures=controller.failures, usage=usage,
                     **({"requests": deepcopy(controller.requests), "runtime_closed": runtime_closed}
