@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import signal
 import subprocess
 import tempfile
@@ -71,19 +70,20 @@ def _kill_group(pid: int) -> None:
 
 
 def sweep_orphan_homes(directory: Path | None = None) -> list[dict[str, Any]]:
-    """Remove only marked homes with proven dead runners and matching child identities.
+    """Report marked homes with proven dead runners for manual cleanup.
 
     Legacy unmarked homes have no reliable owner evidence and are left alone.
-    A reused PID, an unreadable marker, or an unknown process identity is also
-    insufficient evidence to remove a home.
+    A child is reported as live only when its birth identity still matches.
+    This scan never removes a directory or signals a process, even if a path
+    is replaced after its marker has been read.
     """
     root = (directory or Path(tempfile.gettempdir())).resolve()
-    removed = []
+    orphans = []
     try:
         homes = sorted(root.iterdir())
     except OSError as error:
         LOG.warning("Controller orphan sweep could not inspect %s: %s", root, error)
-        return removed
+        return orphans
     for home in homes:
         if not home.name.startswith(HOME_PREFIXES) or home.is_symlink() or not home.is_dir():
             continue
@@ -98,34 +98,60 @@ def sweep_orphan_homes(directory: Path | None = None) -> list[dict[str, Any]]:
             if actual == "unknown" or actual == birth:
                 continue
             child = record.get("process_pid")
+            live_child = None
             if child is not None:
                 child_birth = record.get("process_start")
-                if type(child) is not int or child <= 0 or not isinstance(child_birth, str):
-                    continue
-                current = process_start(child)
-                if current == "unknown" or child_birth == "unknown":
-                    continue
-                if current == child_birth:
-                    _kill_group(child)
-                elif current is not None:
-                    continue
-            target = home.resolve()
-            if target.parent != root:
-                continue
-            shutil.rmtree(target)
-            entry = {"home": str(target), "process_pid": child}
-            removed.append(entry)
-            LOG.warning("Removed orphan controller home %s (app-server PID %s)", target, child)
+                if (type(child) is int and child > 0 and isinstance(child_birth, str)
+                        and child_birth != "unknown" and process_start(child) == child_birth):
+                    live_child = child
+            entry = {"home": str(home), "process_pid": live_child}
+            orphans.append(entry)
+            LOG.warning("Orphan controller home %s (live app-server PID %s); retained for manual cleanup",
+                        home, live_child)
         except (OSError, ValueError, KeyError, TypeError) as error:
             LOG.warning("Controller orphan sweep retained %s: %s", home, error)
-    return removed
+    return orphans
 
 
 async def close_runtime(runtime: Any) -> None:
-    """Reserve half of a fresh fixed budget for a resumable force-close pass."""
+    """Finish bounded cleanup before propagating outer-task cancellation.
+
+    The propagated cancellation carries cleanup_completed so the caller can
+    record cancellation while retaining the resource-cleanup result.
+    """
     deadline = asyncio.get_running_loop().time() + CLEANUP_BUDGET_SECONDS
+    first_pass = asyncio.create_task(runtime.close())
+
+    async def finish() -> None:
+        try:
+            await asyncio.wait_for(first_pass, CLEANUP_BUDGET_SECONDS / 2)
+        except (Exception, asyncio.CancelledError):
+            remaining = max(0.001, deadline - asyncio.get_running_loop().time())
+            await asyncio.wait_for(runtime.close(), remaining)
+
+    cleanup = asyncio.create_task(finish())
+    cancellation = None
     try:
-        await asyncio.wait_for(runtime.close(), CLEANUP_BUDGET_SECONDS / 2)
-    except (Exception, asyncio.CancelledError):
-        remaining = max(0.001, deadline - asyncio.get_running_loop().time())
-        await asyncio.wait_for(runtime.close(), remaining)
+        while True:
+            try:
+                await asyncio.shield(cleanup)
+                break
+            except asyncio.CancelledError as error:
+                if cleanup.cancelled():
+                    if cancellation is not None:
+                        cancellation.cleanup_completed = False
+                        raise cancellation from error
+                    raise
+                cancellation = cancellation or error
+                # Cancelling the cooperative pass starts the resumable retry.
+                # Outer cancellation never cancels the force-close pass.
+                if not first_pass.done():
+                    first_pass.cancel()
+    except Exception as error:
+        if cancellation is not None:
+            cancellation.cleanup_completed = False
+            raise cancellation from error
+        raise
+    if cancellation is not None:
+        cancellation.cleanup_completed = True
+        raise cancellation

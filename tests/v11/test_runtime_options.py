@@ -202,7 +202,9 @@ async def test_per_call_usage_served_model_compaction_and_probe_hashes(tmp_path,
         {"input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 8, "reasoning_tokens": 3},
         {"input_tokens": 140, "cached_input_tokens": 95, "output_tokens": 15, "reasoning_tokens": 6}]
     assert [call["served_model"] for call in recording["model_calls"]] == ["served-model-1", "served-model-2"]
-    assert [event["context_tokens"] for event in recording["compaction_events"]] == [155, 155]
+    assert [event["context_tokens"] for event in recording["compaction_events"]] == [140, 140]
+    assert all(event["context_size_source"] == "last_observed_input_tokens"
+               for event in recording["compaction_events"])
     assert all(event["model_context_window"] == 272000 for event in recording["compaction_events"])
     probe = qualification["manifest_attestation"]["request_recording"]
     assert recording["manifest_probes"] == [probe]
@@ -215,10 +217,11 @@ async def test_per_call_usage_served_model_compaction_and_probe_hashes(tmp_path,
 
 async def test_compactions_recorded_without_per_call_option(tmp_path):
     last = usage(35, 0, 4, 1)
-    result, _, _ = await observe(tmp_path, steps=[("call_usage", {"last": last, "total": last}),
+    result, _, _ = await observe(tmp_path, options=RuntimeOptions(disable_auto_compaction=True),
+                                steps=[("call_usage", {"last": last, "total": last}),
                                                  ("compaction",), ("message", "Complete.")])
     assert "model_calls" not in result["runtime_recording"]
-    assert result["runtime_recording"]["compaction_events"][0]["context_tokens"] == 39
+    assert result["runtime_recording"]["compaction_events"][0]["context_tokens"] == 35
 
 
 async def test_neutral_home_and_probe_environment_frame(tmp_path):
@@ -427,7 +430,7 @@ async def test_both_close_passes_failing_preserve_failure_text_and_root_hold(tmp
 
 
 @pytest.mark.parametrize("prefix", ["swarm-codex-controller-", "work-"])
-def test_sweep_dead_owner_and_matching_process_preserves_live_and_unmarked_homes(tmp_path, monkeypatch, caplog,
+def test_sweep_reports_dead_owner_and_matching_process_preserves_all_homes(tmp_path, monkeypatch, caplog,
                                                                                 prefix):
     dead, alive, unmarked = (tmp_path / (prefix + name) for name in ("dead", "alive", "unmarked"))
     for home in (dead, alive, unmarked):
@@ -439,10 +442,10 @@ def test_sweep_dead_owner_and_matching_process_preserves_live_and_unmarked_homes
     killed = []
     monkeypatch.setattr(runtime_cleanup, "process_start", lambda pid: {101: None, 202: "live", 303: "child"}[pid])
     monkeypatch.setattr(runtime_cleanup, "_kill_group", killed.append)
-    removed = runtime_cleanup.sweep_orphan_homes(tmp_path)
-    assert killed == [303] and removed == [{"home": str(dead.resolve()), "process_pid": 303}]
-    assert not dead.exists() and alive.exists() and unmarked.exists()
-    assert "Removed orphan controller home" in caplog.text
+    orphans = runtime_cleanup.sweep_orphan_homes(tmp_path)
+    assert killed == [] and orphans == [{"home": str(dead.resolve()), "process_pid": 303}]
+    assert dead.exists() and alive.exists() and unmarked.exists()
+    assert "Orphan controller home" in caplog.text and "retained for manual cleanup" in caplog.text
 
 
 @pytest.mark.parametrize("birth", ["unknown", "reused"])
@@ -452,7 +455,8 @@ def test_sweep_retains_unknown_or_reused_child_identity(tmp_path, monkeypatch, b
     (home / runtime_cleanup.OWNER_MARKER).write_bytes(json.dumps({
         "runner_pid": 101, "runner_start": "old", "process_pid": 303, "process_start": "child"}).encode())
     monkeypatch.setattr(runtime_cleanup, "process_start", lambda pid: None if pid == 101 else birth)
-    assert runtime_cleanup.sweep_orphan_homes(tmp_path) == [] and home.exists()
+    assert runtime_cleanup.sweep_orphan_homes(tmp_path) == [{"home": str(home), "process_pid": None}]
+    assert home.exists()
 
 
 def test_owner_marker_pins_real_runner_birth(tmp_path):

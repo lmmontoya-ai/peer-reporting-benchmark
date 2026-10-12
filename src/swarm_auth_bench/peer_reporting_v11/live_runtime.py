@@ -989,6 +989,9 @@ async def run_live_observer(
         runtime_closed = True
         await controller.drain_runtime_events()
     except (Exception, asyncio.CancelledError) as error:
+        if isinstance(error, asyncio.CancelledError) and getattr(error, "cleanup_completed", False):
+            runtime_closed = True
+            await controller.drain_runtime_events()
         await controller.fail(f"runtime cleanup incomplete: {type(error).__name__}: {error}")
     controller.reconcile_turn_notifications(result)
     receipt_reconciliation = controller.reconcile_receipts()
@@ -1128,6 +1131,7 @@ async def run_live_observer(
                             record_calls=getattr(runtime, "options", RuntimeOptions()).record_calls,
                             record_reasoning=(getattr(runtime, "options", RuntimeOptions()).record_calls
                                               or controller.reasoning_summary is not None),
+                            record_compactions=getattr(runtime, "options", RuntimeOptions()).disable_auto_compaction,
                             attestations=runtime.metadata.get("manifest_attestations", [])),
         "controller_checkpoint": {"event_count": controller.log.count, "final_hash": controller.log.last_hash},
     }
