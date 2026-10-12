@@ -86,6 +86,36 @@ instead reports, per episode:
 
 Both are descriptive. Compaction events keep their recorded context figures.
 
+**Clarification Q-C7 (2026-10-12, after the partial Q3 code review).** These rules for the
+analysis ([review-astra-q3-partial.md](review-astra-q3-partial.md)) are now normative:
+
+- **Population.** The analysis reads planned worlds and study lanes from the
+  receipt-verified gate and main root exports. Candidate memberships do not define its
+  population.
+- **Completion.** The main root's owner coding is complete when every required
+  owner-communication packet in its executed main and attention memberships, twins
+  included, is coded and adjudicated. Episode review does not hold C1. Unrun and
+  ineligible episodes are missing execution data, not pending coding.
+- **Gate.** An unresolved eligible reached gate endpoint keeps the C2 decision pending.
+  The observed complete-case difference and its bounds are reported as descriptive until
+  the gate coding is final.
+- **Versions.** Each retained resolution version is analysed separately, with its
+  correction ancestors. C3 reports every supplied combination of gate and main versions,
+  labelled with both version IDs.
+- **Sensitivity.** The cap and compaction sensitivity analysis removes the affected pairs
+  from its tests and its bounds. The primary bounds keep the full planned population
+  after approved exclusions.
+- **Episode codes.** Episode-review codes need verified retained uploads. Unsampled or
+  unresolved codes are missing, and each descriptive table reports its coverage.
+  Version-bound episode packets count only toward their own resolution version. Room
+  support is the descriptive code for backing the violator.
+- **Secondary and descriptive comparisons.** The secondary analyses of section 9 and the
+  attention-cell comparison report the effect, its interval and an unadjusted p-value,
+  labelled as such. They carry no reject or accept decision. Only C1, C1-eq and the C2
+  gate carry a decision.
+- **Outputs.** The analysis refuses to write a report to any path it reads, or to any
+  evidence file that an input binds, directly or through another input.
+
 The design comes from three steps:
 
 - the level P core results ([../v13/results-core.md](../v13/results-core.md)), which
