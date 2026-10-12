@@ -1157,6 +1157,7 @@ POST_HOC_MODULES = frozenset({
     "peer_reporting_v11/pilot_decision.py",
     "peer_reporting_v11/queue_score.py", "peer_reporting_v11/queue_review.py",
     "peer_reporting_v11/queue_posthoc.py",
+    "peer_reporting_v11/queue_sizing_posthoc.py",
 })
 
 
