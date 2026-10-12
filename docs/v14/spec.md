@@ -6,6 +6,11 @@ on one item that Fable also raised. In round 4 Astra returned AGREE. The reviews
 this directory (`review-r1-*.md` to `review-r4-astra.md`), and section 15 lists how each
 item is applied.
 
+**Clarification Q-C1 (2026-10-11, after the WP1 code review).** The pinned Codex client
+compacts the context when the context window is full, whatever its compaction settings
+([review-astra-wp1.md](review-astra-wp1.md), R6). Section 6.1 now says so. No design
+choice changes: section 8.1 already handles compaction before and after position v.
+
 The design comes from three steps:
 
 - the level P core results ([../v13/results-core.md](../v13/results-core.md)), which
@@ -593,7 +598,11 @@ Level Q runs with the WP1 runtime options on:
 - reasoning items archived under `reasoning_items`, never in `observer_outputs`, and never
   read by scoring, closure, notices or packet text other than the separate summary section
   of section 8.4;
-- client context compaction disabled, with every compaction event recorded;
+- client context compaction disabled below the model's context window, with every
+  compaction event recorded. The pinned client still compacts when the context window
+  is full, and no setting turns that off (clarification Q-C1). Such a compaction is
+  recorded like any other, and section 8.1 makes an episode with a compaction before
+  position v ineligible;
 - per-call recording: input, cached input, output and reasoning tokens, the served model
   string where present, and the request-shape and environment-frame hashes from the
   manifest probe;
