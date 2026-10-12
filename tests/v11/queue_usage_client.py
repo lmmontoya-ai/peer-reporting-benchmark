@@ -19,7 +19,10 @@ def main():
         send({"method": method, "params": {**scope, **params}})
 
     def completed(number, tokens):
-        notify("rawResponse/completed", responseId="response-" + str(number), usage=None if tokens is None else {
+        if case == "absent":
+            return
+        notify("rawResponse/completed", responseId="response-" + str(number), model="offline-served-model",
+               usage=None if tokens is None or case == "missing_usage" else {
             "inputTokens": tokens, "cachedInputTokens": 0, "outputTokens": 10,
             "reasoningOutputTokens": 0, "totalTokens": tokens + 10}, usageMetadata=None)
 
@@ -28,9 +31,7 @@ def main():
         call_id = "call-" + str(position)
         item = {"type": "function_call", "id": "fc-" + str(position), "call_id": call_id,
                 "name": tool, "arguments": json.dumps(arguments)}
-        if position != 2 or case != "missing_binding":
-            notify("rawResponseItem/completed", item=item,
-                   **({"threadId": "foreign-thread"} if position == 2 and case == "foreign_item" else {}))
+        notify("rawResponseItem/completed", item=item)
         send({"id": 100 + position, "method": "item/tool/call",
               "params": {**scope, "callId": call_id, "tool": tool, "arguments": arguments}})
 
@@ -56,17 +57,21 @@ def main():
                 # This response requested v and continues generating after delivery.
                 notify("item/completed", item={"id": "continued", "type": "agentMessage",
                                                "phase": "commentary", "text": "The focal record arrived."})
-                if case == "failed_stream":
-                    notify("error", error={"message": "Offline stream ended.", "codexErrorInfo": "other"}, willRetry=True)
-                else:
-                    completed(3, None if case == "missing_usage" else 123)
-                # A later response has different usage and cannot replace the binding.
+                # A silent retry emits neither the focal response's completion nor an error.
+                if case != "silent_retry":
+                    completed(3, 123)
                 completed(4, 987)
+                if case == "absent":
+                    # A context estimate without a completion is not per-call usage.
+                    notify("thread/tokenUsage/updated", tokenUsage={"last": {"inputTokens": 987,
+                           "cachedInputTokens": 0, "outputTokens": 10, "reasoningOutputTokens": 0,
+                           "totalTokens": 997}, "modelContextWindow": 100000})
                 notify("item/completed", item={"id": "closure", "type": "agentMessage",
                                                "phase": "final_answer", "text": "Queue processing completed."})
                 notify("turn/completed", turn={"id": scope["turnId"], "status": "completed", "items": [], "error": None})
             else:
-                completed(position + 1, 50 + position)
+                tokens = 1051 if position == 1 and case == "present" else 50 + position
+                completed(position + 1, None if position == 1 and case == "partial_usage" else tokens)
                 position += 1
                 request()
         elif method == "turn/interrupt":
