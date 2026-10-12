@@ -26,6 +26,7 @@ from ..runtime import (
     RuntimeProtocolError,
     TurnResult,
 )
+from ..runtime_cleanup import close_runtime
 from .catalog import ReviewedPeerRuntime, reviewed_catalog
 from .config import MODELS, validate_caps
 from .schemas import TOOL_DESCRIPTORS, SchemaError, validate_input
@@ -672,7 +673,7 @@ async def run_live_observer(
         await asyncio.gather(controller.worker, return_exceptions=True)
     try:
         controller.transport_closing = True
-        await asyncio.wait_for(runtime.close(), remaining())
+        await close_runtime(runtime)
         runtime_closed = True
         await controller.drain_runtime_events()
     except (Exception, asyncio.CancelledError) as error:

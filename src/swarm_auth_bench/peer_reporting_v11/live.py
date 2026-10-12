@@ -331,6 +331,11 @@ async def manifest_preflight(runtime: Any, requested_model: str, caps: dict, *, 
         "manifest_attestation": deepcopy(attestation),
         "probe": "unauthenticated_loopback_fake_provider", "inference": False,
     }
+    if "runtime_options" in runtime.metadata:
+        result["runtime_options"] = deepcopy(runtime.metadata["runtime_options"])
+        summary = result["runtime_options"]["reasoning_summary"]
+        if summary is not None:
+            result["reasoning_summary"] = summary
     live_runtime.validate_preflight(requested_model, caps, result, runtime, reasoning_effort=reasoning_effort,
                                     bundle=bundle)
     return result
@@ -2878,6 +2883,10 @@ async def run_live_phase(
                       authorization_hash=authorization_hash, accepted_attempts=frozenset(accepted),
                       claim_start=claim_start, wall_clock=wall_clock, pause_sleep=pause_sleep or sleep,
                       provider_pause=pauses)
+        # Keep operational cleanup outside the sealed root and attempt journals.
+        from ..runtime_cleanup import sweep_orphan_homes
+
+        sweep_orphan_homes()
         specs = [LaneSpec(lane["lane_id"], safe_child(directory, lane["path"]), lane["plan_hash"],
                           binary_check(lane["model"], lane["reasoning_effort"])) for lane in plan["lanes"]]
 

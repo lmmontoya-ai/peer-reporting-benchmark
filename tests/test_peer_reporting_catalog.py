@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,7 +49,7 @@ async def test_probe_and_authenticated_launch_use_same_exact_catalog(monkeypatch
 
     async def capture(*command, **kwargs):
         calls.append((command, kwargs))
-        return object()
+        return SimpleNamespace(pid=os.getpid())
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
     runtime = catalog.ReviewedPeerRuntime(model=model)

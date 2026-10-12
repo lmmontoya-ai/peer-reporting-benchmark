@@ -55,9 +55,12 @@ from ..runtime import (
     NATIVE_ITEM_TYPES,
     SUPPORTED_CODEX_VERSION,
     CodexSession,
+    RuntimeOptions,
     RuntimeProtocolError,
     TurnResult,
 )
+from ..runtime_cleanup import CLEANUP_BUDGET_SECONDS, close_runtime
+from ..runtime_recording import attempt_recording
 from .bundle import ProtocolBundle, tools_for_levels
 from .closure import closure_outputs, record_delivery
 from .lanes import PROVIDER_STALLED, PROVIDER_UNAVAILABLE, validate_effort, validate_world_mode
@@ -96,10 +99,23 @@ def validate_preflight(requested_model: str, caps: dict, qualification: dict, ru
                 "tool_manifest_hash": bundle.tool_manifest_hash, "tool_descriptors_hash": bundle.tool_descriptors_hash,
                 "wire_tool_specs_hash": bundle.wire_tool_specs_hash, "tool_schema_version": bundle.schema_version,
                 "catalog_sha256": catalog["catalog_sha256"], "codex_version": SUPPORTED_CODEX_VERSION}
+    if isinstance(qualification, dict) and "runtime_options" in qualification:
+        options = RuntimeOptions(**qualification["runtime_options"])
+        expected["runtime_options"] = qualification["runtime_options"]
+        if options.reasoning_summary is not None:
+            expected["reasoning_summary"] = options.reasoning_summary
+    if (isinstance(qualification, dict) and qualification.get("reasoning_summary") is not None
+            and "reasoning_summary" not in expected):
+        raise ValueError("preflight reasoning summary lacks pinned runtime options")
     if type(qualification) is not dict or any(qualification.get(key) != value for key, value in expected.items()):
         raise ValueError("peer runtime preflight does not match model, effort, tools, catalog, or client")
     if runtime is not None:
         metadata = runtime.metadata
+        if metadata.get("runtime_options") != qualification.get("runtime_options"):
+            raise ValueError("runtime options differ from preflight")
+        summary = getattr(runtime, "options", RuntimeOptions()).reasoning_summary
+        if qualification.get("reasoning_summary") != summary:
+            raise ValueError("runtime reasoning summary differs from preflight")
         supplied_catalog = metadata.get("peer_catalog_override")
         if (runtime.model != requested_model or runtime.reasoning_effort != reasoning_effort
                 or metadata.get("requested_model") != requested_model
@@ -114,7 +130,8 @@ def validate_preflight(requested_model: str, caps: dict, qualification: dict, ru
             raise ValueError("peer attempt requires a runtime without existing sessions")
         attestations = metadata.get("manifest_attestations", [])
         if any(proof.get("model") != requested_model or proof.get("verified") is not True
-               or proof.get("tools") != bundle.attested_tools for proof in attestations):
+               or proof.get("tools") != bundle.attested_tools
+               or proof.get("reasoning_summary") != summary for proof in attestations):
             raise ValueError("cached manifest attestation differs from the exact peer tools and model")
     return expected
 
@@ -137,6 +154,9 @@ class V11PeerRuntime(PeerCodexRuntime):
 
     async def _call(self, method: str, params: dict[str, Any], timeout: float = 30) -> dict[str, Any]:
         controller = self._peer_controllers.get(params.get("threadId")) if method == "turn/start" else None
+        if controller is not None and (params.get("summary") != self.options.reasoning_summary
+                                       or params.get("summary") != controller.reasoning_summary):
+            raise RuntimeProtocolError("peer turn reasoning summary differs from its binding")
         if controller is not None and (params.get("effort") != self.reasoning_effort
                                        or params.get("effort") != controller.reasoning_effort
                                        or params.get("input") != [{"type": "text", "text": controller.fixture["packet"]}]):
@@ -158,6 +178,7 @@ class _Controller:
         self.fixture = deepcopy(fixture)
         self.attempt_id, self.caps, self.runtime = attempt_id, deepcopy(caps), runtime
         self.reasoning_effort, self.world_mode, self.bundle = reasoning_effort, world_mode, bundle
+        self.reasoning_summary = getattr(runtime, "options", RuntimeOptions()).reasoning_summary
         self.tool_names = frozenset(bundle.tool_names)
         self.clock, self.started = clock, started
         self.deadline = started + caps["max_trial_wall_seconds"]
@@ -641,7 +662,16 @@ class _Controller:
                 delivered.setdefault(item["id"], []).append(item)
 
         def repeated(item: object) -> bool:
-            return type(item) is dict and type(item.get("id")) is str and item in delivered.get(item["id"], [])
+            if type(item) is not dict or type(item.get("id")) is not str:
+                return False
+            if (item.get("type") == "reasoning" and (getattr(self, "reasoning_summary", None) is not None
+                    or getattr(getattr(self, "runtime", None), "options", RuntimeOptions()).record_calls)):
+                # Summary views and standalone reasoning completions have
+                # different content/summary shapes. Both are primary records;
+                # reasoning never supplies an observer or delivery receipt.
+                copies = delivered.get(item["id"], [])
+                return bool(copies) and all(copy.get("type") == "reasoning" for copy in copies)
+            return item in delivered.get(item["id"], [])
 
         for index, event in enumerate(self.raw_events):
             raw = event.get("raw") or {}
@@ -895,7 +925,7 @@ async def run_live_observer(
                                 packet_hash=content_hash(fixture["packet"]))
                 # These transport guards cannot shorten the declared controller window.
                 transport_budget = {"max_wall_seconds": caps["max_trial_wall_seconds"]
-                                    + caps["drain_grace_seconds"] + 60,
+                                    + caps["drain_grace_seconds"] + max(60, CLEANUP_BUDGET_SECONDS),
                                     "max_tool_calls": 2**31, "max_tokens": 2**63 - 1}
                 turn_task = asyncio.create_task(runtime.run_turn(session, fixture["packet"], transport_budget))
                 controller.emit("initial_packet_send_requested", thread_id=session.thread_id)
@@ -955,7 +985,7 @@ async def run_live_observer(
         await asyncio.gather(controller.worker, return_exceptions=True)
     try:
         controller.transport_closing = True
-        await asyncio.wait_for(runtime.close(), remaining())
+        await close_runtime(runtime)
         runtime_closed = True
         await controller.drain_runtime_events()
     except (Exception, asyncio.CancelledError) as error:
@@ -1092,5 +1122,12 @@ async def run_live_observer(
                                     if request["tool"] == "send_message" and type(request["arguments"]) is dict
                                     and request["arguments"].get("request_reply") is True]},
         "observer_outputs": outputs, "events": controller.events, "raw_events": controller.raw_events,
+        **attempt_recording(controller.raw_events,
+                            thread_id=controller.session.thread_id if controller.session else None,
+                            turn_id=controller.session.turn_id if controller.session else None,
+                            record_calls=getattr(runtime, "options", RuntimeOptions()).record_calls,
+                            record_reasoning=(getattr(runtime, "options", RuntimeOptions()).record_calls
+                                              or controller.reasoning_summary is not None),
+                            attestations=runtime.metadata.get("manifest_attestations", [])),
         "controller_checkpoint": {"event_count": controller.log.count, "final_hash": controller.log.last_hash},
     }

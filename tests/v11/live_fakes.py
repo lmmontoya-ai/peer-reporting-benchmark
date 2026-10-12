@@ -439,13 +439,16 @@ def pilot_overload_steps(model: str = "gpt-6-sol", effort: str = "xhigh") -> lis
 class FakeTransport(V11PeerRuntime):
     """Only process launch, the version and probe subprocesses, and the JSON-RPC wire are replaced."""
 
-    def __init__(self, model, effort, script, home, *, observe=None):
+    def __init__(self, model, effort, script, home, *, observe=None, options=None):
         super().__init__(model=model, reasoning_effort=effort, codex_executable="not-executed",
-                         auth_file=home / "absent-auth.json")
+                         auth_file=home / "absent-auth.json", **({"options": options} if options is not None else {}))
         self.script, self.fake_home, self.observe = script, home, observe or (lambda *_: None)
         self.probe_calls = 0
         self.methods = []
         self.turn_efforts = []
+        self.requests = []
+        self.probe_requests = []
+        self.completed_items = []
         self.thread_id, self.turn_id = f"thread-{model}-{effort}", f"turn-{model}-{effort}"
         self.waiters = {}
         self.interrupt = None
@@ -456,11 +459,22 @@ class FakeTransport(V11PeerRuntime):
     async def _probe_manifest(self, specs):
         self.probe_calls += 1
         self.observe("probe", self)
-        return {"model": self.model, "tools": sorted(f"function:{spec['name']}" for spec in specs), "verified": True}
+        request = {"model": self.model, "tools": specs, "instructions": "Manifest instructions.",
+                   "reasoning": {"effort": "low"}, "store": False, "include": ["reasoning.encrypted_content"],
+                   "truncation": "disabled", "parallel_tool_calls": True, "text": {"verbosity": "low"},
+                   "input": [{"type": "message", "role": "user", "content": [{"type": "input_text",
+                              "text": f"<environment_context>\n<cwd>{self.fake_home.parent / (self.options.manifest_prefix + 'probe')}</cwd>\n</environment_context>"}]}]}
+        if self.options.reasoning_summary is not None:
+            request["reasoning"]["summary"] = self.options.reasoning_summary
+        self.probe_requests.append(request)
+        return self._attest_manifest(request, specs)
 
     async def start(self):
         self.runtime_version = "codex-cli 0.158.0"
         self._home = self.fake_home
+        if self.options.home_prefix != "swarm-codex-controller-":
+            self._home = self.fake_home / (self.options.home_prefix + "session")
+            self._home.mkdir(exist_ok=True)
 
     async def _send(self, message, proc=None):
         if "method" in message and "id" in message:
@@ -475,6 +489,7 @@ class FakeTransport(V11PeerRuntime):
 
     def _respond(self, method, params):
         self.methods.append(method)
+        self.requests.append({"method": method, "params": deepcopy(params)})
         if method == "thread/start":
             self.observe("thread/start", self)
             return {"thread": {"id": self.thread_id}}
@@ -546,6 +561,18 @@ class FakeTransport(V11PeerRuntime):
             elif step[0] == "usage":
                 await self._push("thread/tokenUsage/updated", {**scope, "tokenUsage": {"total": {
                     "totalTokens": step[1], "inputTokens": 0, "outputTokens": 0}}})
+            elif step[0] == "call_usage":
+                await self._push("thread/tokenUsage/updated", {**scope, "tokenUsage": step[1]})
+            elif step[0] == "response":
+                await self._push("rawResponse/completed", {**scope, **step[1]})
+            elif step[0] == "compaction":
+                item = {"id": f"compaction-{number}", "type": "contextCompaction"}
+                await self._push("item/started", {**scope, "item": item})
+                await self._push("item/completed", {**scope, "item": item})
+            elif step[0] == "reasoning":
+                item = {"id": f"reasoning-{number}", "type": "reasoning", "summary": step[1], "content": []}
+                await self._push("item/completed", {**scope, "item": item})
+                self.completed_items.append({**item, **(step[2] if len(step) > 2 else {})})
             elif step[0] == "message":
                 self.last_agent_item = {"id": "agent-item-1", "type": "agentMessage", "text": step[1]}
                 await self._push("item/completed", {**scope, "item": dict(self.last_agent_item)})
@@ -591,7 +618,9 @@ class FakeTransport(V11PeerRuntime):
             turn = {"id": self.turn_id, "status": end[1], **({"error": end[2]} if end[2] is not None else {})}
         if turn["status"] == "completed" and getattr(self, "last_agent_item", None) is not None:
             # The guest app-server repeats the final agentMessage in a completed turn (itemsView "summary").
-            turn = {**turn, "itemsView": "summary", "items": [dict(self.last_agent_item)]}
+            turn = {**turn, "itemsView": "summary", "items": [*self.completed_items, dict(self.last_agent_item)]}
+        if self.completed_items and "items" not in turn:
+            turn["items"] = list(self.completed_items)
         await self._push("turn/completed", {"threadId": self.thread_id, "turn": turn})
 
     async def close(self):

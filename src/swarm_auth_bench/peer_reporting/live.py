@@ -327,7 +327,8 @@ def implementation_hashes() -> dict[str, str]:
     package = Path(__file__).parent
     root = package.parent
     paths = (sorted(package.glob("*.py")) + [package / "protocol.json"] + sorted((package / "data").glob("*.json"))
-             + [root / name for name in ("runtime.py", "model_catalog.py", "isolation.py", "events.py",
+             + [root / name for name in ("runtime.py", "runtime_cleanup.py", "runtime_recording.py",
+                                         "model_catalog.py", "isolation.py", "events.py",
                                          "long_events.py")]
              + sorted((root / "data").glob("*.json")))
     return {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1396,6 +1397,9 @@ async def _run_phase(directory: Path, plan: dict, files: dict[str, dict], *, res
             changes = sorted(name for name in set(sealed_sources) | set(current_sources)
                              if sealed_sources.get(name) != current_sources.get(name))
             run = _PhaseRun(state, hooks, inputs=inputs, evaluate=evaluate, binary_check=binary_check)
+            from ..runtime_cleanup import sweep_orphan_homes
+
+            sweep_orphan_homes()
             run.reconcile()
             state.verify_attempts()
             state.apply_admission_amendment(admission_amendment)
