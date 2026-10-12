@@ -8,7 +8,6 @@ import sys
 import tempfile
 from copy import deepcopy
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -42,7 +41,24 @@ from .live_fakes import (
     run_phase,
 )
 from .pressure_fakes import labels, pressure_fixture
+from .runtime_recording_bytes import default_recording_bytes
 from .test_live_runtime_v11 import fixture
+
+# Generated from the original runtime and fake transport at 0630195, under
+# CPython 3.11.15 and 3.12.12, with runtime_recording_bytes.py. Both captures fix
+# clocks, inline thread completions and the thread-request cwd. Python 3.12
+# interleaves tool item notifications before tool_requested, changing the bytes
+# and controller checkpoint hash; compare only within the same Python minor.
+# To regenerate, create a separate checkout of 0630195 outside this repository:
+#   git worktree add --detach <baseline-checkout> 0630195
+#   uv run --offline --extra dev python tests/v11/runtime_recording_bytes.py --checkout <baseline-checkout>
+# For 3.11, set UV_PROJECT_ENVIRONMENT=.venv311 and add
+#   --python C:\Users\luism\miniconda3\python.exe
+# to uv run. Remove the scratch checkout with git worktree remove afterwards.
+PRE_WP1_RECORDING_SHA256 = {
+    (3, 11): "e6b2d15f591d03eb4926ff12ed8694eddf9c07b51eeeba2c1f55bbc54d30caee",
+    (3, 12): "2ddcf3ad83341083c2fa24db497fd4cd40cabe568bc9e8855050032f08875c7c",
+}
 
 
 async def observe(tmp_path, *, options=RuntimeOptions(), steps=None, sample=None, runtime_class=FakeTransport,
@@ -273,58 +289,13 @@ async def test_default_requests_preflight_and_attempt_have_no_added_option_field
 
 
 async def test_default_recording_bytes_match_pre_wp1_across_all_levels(tmp_path, monkeypatch):
-    from swarm_auth_bench import events, long_events
-    from swarm_auth_bench import runtime as core
-    from swarm_auth_bench.peer_reporting import world as p1_world
-    from swarm_auth_bench.peer_reporting_v11 import world
-
-    from .pressure_fakes import social_fixture
-    from .review_helpers import fixture as real_fixture
-
-    async def inline_thread(function, *args, **kwargs):
-        return function(*args, **kwargs)
-
-    # This byte guard controls transport timing. Separate tests exercise the
-    # real thread-backed writes, races, drain deadlines and cleanup retries.
-    monkeypatch.setattr(asyncio, "to_thread", inline_thread)
-    fixed_time = SimpleNamespace(monotonic=lambda: 0.0, time=lambda: 1234.0)
-    for module in (core, long_events, events, p1_world, world):
-        monkeypatch.setattr(module, "time", fixed_time)
-
-    class FixedDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(2026, 1, 1, tzinfo=tz)
-
-    monkeypatch.setattr(long_events, "datetime", FixedDateTime)
-    monkeypatch.setattr(events, "datetime", FixedDateTime)
-    recordings = {}
-    for level in ("L0", "L1", "L2", "L3", "L4", "S", "P"):
-        sample = (pressure_fixture(pressure="neutral") if level == "P" else social_fixture() if level == "S"
-                  else real_fixture(level))
-        home = tmp_path / level / "home"
-        home.mkdir(parents=True)
-        bundle = load_bundle().tool_set("peer-reporting-v11-tools-v2") if level == "P" else load_bundle()
-        script = [("tool", "read_channel", {"after_event_id": None, "limit": 128}),
-                  ("usage", 100), ("message", "Task complete.")]
-        transport = FakeTransport("gpt-6-sol", "low", script, home)
-        caps = lane_caps(caps_record(), "smoke", 1)
-        proof = await live.manifest_preflight(transport, transport.model, caps, reasoning_effort="low",
-                                             bundle=bundle, version_reader=fake_version)
-        result = await run_live_observer(sample, "Exact instructions.", directory=home.parent / "attempt",
-                                         attempt_id="fixed-attempt", requested_model=transport.model,
-                                         reasoning_effort="low", world_mode="normal", bundle=bundle, caps=caps,
-                                         qualification=proof, runtime=transport, clock=lambda: 0.0)
-        assert not result["infrastructure_failures"]
-        recordings[level] = {"preflight": proof, "result": result,
-                             "thread_request": transport._thread_params(bundle.wire_tool_specs(),
-                                                                         Path("swarm-codex-controller-fixed"),
-                                                                         "Exact instructions."),
-                             "turn_request": transport._turn_params("fixed-thread", sample["packet"])}
-    encoded = (json.dumps(recordings, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    # Independently generated with the original runtime and fake transport from
-    # commit 0630195, fixing clocks, thread completions and thread-request cwd.
-    assert hashlib.sha256(encoded).hexdigest() == "e6b2d15f591d03eb4926ff12ed8694eddf9c07b51eeeba2c1f55bbc54d30caee"
+    python_minor = sys.version_info[:2]
+    baseline = PRE_WP1_RECORDING_SHA256.get(python_minor)
+    if baseline is None:
+        pytest.skip(f"No pre-WP1 recording baseline for Python {python_minor[0]}.{python_minor[1]}; "
+                    "baselines were generated only for Python 3.11 and 3.12")
+    encoded = await default_recording_bytes(tmp_path, monkeypatch)
+    assert hashlib.sha256(encoded).hexdigest() == baseline
 
 
 async def test_full_drain_still_has_its_own_cleanup_budget(tmp_path, monkeypatch):
