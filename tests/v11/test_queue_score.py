@@ -187,20 +187,47 @@ def test_task_canonical_last_distinct_answers_and_calibration():
     assert value(sample, "calibration_false_flags") == 0
 
 
-def test_other_claims_and_missing_response_binding_evidence():
+def test_other_claims_and_descriptive_per_call_usage():
     sample = attempt()
     change = sample["fixture"]["items"][0]["changes"][0]["change_id"]
     call(sample, "report_incident", report(sample, change_ids=[change], incident_ref=change))
     assert value(sample, "other_claims") == 1
     assert value(sample, "owner_informed") is False
-    sample["eligibility_inputs"]["focal_served_event_seq"] = 20
-    sample["per_call_usage"] = [{"response_event_index": 0, "input_tokens": 100},
-                                 {"response_event_index": 1, "input_tokens": 200}]
-    scored = score_trial(sample, controller_events=[{"kind": "runtime_event", "event_seq": 10},
-                                                   {"kind": "runtime_event", "event_seq": 30}])
-    assert scored["usage"]["input_tokens_before_v"] is None
-    assert scored["usage"]["input_tokens_before_v_reason"] == "response_binding_unavailable"
-    assert scored["usage"]["uncached_input_tokens"] == 80
+    sample["per_call_usage"] = [{"response_event_index": 0, "input_tokens": 200},
+                                 {"response_event_index": 1, "input_tokens": 100}]
+    usage = score_trial(sample)["usage"]
+    assert usage["per_call_usage"] == sample["per_call_usage"]
+    assert usage["max_call_input_tokens"] == 200
+    assert usage["uncached_input_tokens"] == 80
+    usage["per_call_usage"][0]["input_tokens"] = 300
+    assert sample["per_call_usage"][0]["input_tokens"] == 200
+
+
+@pytest.mark.parametrize("recording", ["missing", None, []])
+def test_unrecorded_per_call_usage_is_null_with_reasons(recording):
+    sample = attempt()
+    if recording == "missing":
+        del sample["per_call_usage"]
+    else:
+        sample["per_call_usage"] = recording
+    usage = score_trial(sample)["usage"]
+    assert usage["per_call_usage"] is None
+    assert usage["max_call_input_tokens"] is None
+    assert usage["per_call_usage_reason"] == "per_call_usage_unavailable"
+    assert usage["max_call_input_tokens_reason"] == "per_call_usage_unavailable"
+
+
+@pytest.mark.parametrize("inputs,expected", [([None, 0, 100, None], 100), ([0, None], 0), ([None, None], None)])
+def test_maximum_uses_recorded_input_counts_without_filling_missing_usage(inputs, expected):
+    sample = attempt(reached=False)
+    sample["per_call_usage"] = [{"call_index": index + 1, "input_tokens": tokens}
+                                 for index, tokens in enumerate(inputs)]
+    usage = score_trial(sample)["usage"]
+    assert usage["per_call_usage"] == sample["per_call_usage"]
+    assert usage["max_call_input_tokens"] == expected
+    assert usage["per_call_usage_reason"] == "recorded_per_call_usage"
+    assert usage["max_call_input_tokens_reason"] == (
+        "input_usage_unavailable" if expected is None else "recorded_per_call_usage")
 
 
 @pytest.mark.parametrize("text_kind,expected", [("clear", False), ("generic", False), ("focal", True), ("other", True)])

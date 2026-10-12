@@ -1,4 +1,4 @@
-"""Context binding and duration checks through offline production runtime paths."""
+"""Descriptive usage and duration checks through offline production runtime paths."""
 
 import asyncio
 import json
@@ -33,21 +33,21 @@ class WireTransport(FakeTransport):
         self._home = self.fake_home
         fixture = fixture_sample(queue_length=4, block=0)
         self._proc = await asyncio.create_subprocess_exec(sys.executable,
-            str(Path(__file__).with_name("queue_context_client.py")), json.dumps(fixture), self.script,
+            str(Path(__file__).with_name("queue_usage_client.py")), json.dumps(fixture), self.script,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         self._reader_task = asyncio.create_task(self._reader())
         await self._call("initialize", self._initialize_params())
         await self._send({"method": "initialized", "params": {}})
 
 
-@pytest.mark.parametrize("case,expected,reason", [
-    ("continued_response", 123, "focal_request_response"),
-    ("missing_binding", None, "response_binding_unavailable"),
-    ("foreign_item", None, "response_binding_unavailable"),
-    ("missing_usage", None, "input_usage_unavailable"),
-    ("failed_stream", None, "response_binding_unavailable"),
+@pytest.mark.parametrize("case,expected_inputs", [
+    ("present", [50, 1051, 123, 987]),
+    ("absent", []),
+    ("silent_retry", [50, 51, 987]),
+    ("missing_usage", [None, None, None, None]),
+    ("partial_usage", [50, None, 123, 987]),
 ])
-async def test_context_binds_the_response_requesting_v_through_the_production_wire(tmp_path, case, expected, reason):
+async def test_descriptive_usage_comes_from_completion_order_through_the_production_wire(tmp_path, case, expected_inputs):
     caps = lane_caps(caps_record(), "smoke", 1)
     caps.update(max_trial_wall_seconds=10, drain_grace_seconds=2)
     result, fixture, _ = await observe(tmp_path, case, caps=caps, runtime_class=WireTransport)
@@ -57,18 +57,28 @@ async def test_context_binds_the_response_requesting_v_through_the_production_wi
               "observer_outputs": result["observer_outputs"], "termination_kind": result["termination_kind"],
               "elapsed_seconds": result["elapsed_seconds"], **fields}
     usage = score_trial(sample, controller_events=result["events"])["usage"]
-    assert usage["input_tokens_before_v"] == expected
-    assert usage["input_tokens_before_v_reason"] == reason
-    assert usage["per_call_usage"][-1]["input_tokens"] == 987
+    calls = result["runtime_recording"]["model_calls"]
+    completions = [event for event in result["raw_events"]
+                   if (event.get("raw") or {}).get("method") == "rawResponse/completed"]
+    assert [call["input_tokens"] for call in calls] == expected_inputs
+    assert [call["response_id"] for call in calls] == [event["raw"]["params"]["responseId"] for event in completions]
+    assert usage["per_call_usage"] == (calls or None)
+    inputs = [tokens for tokens in expected_inputs if tokens is not None]
+    assert usage["max_call_input_tokens"] == max(inputs, default=None)
+    reason = "recorded_per_call_usage" if calls else "per_call_usage_unavailable"
+    assert usage["per_call_usage_reason"] == reason
+    assert usage["max_call_input_tokens_reason"] == (reason if inputs or not calls else "input_usage_unavailable")
     assert usage["generation_seconds"] == sample["generation_elapsed_seconds"]
     assert usage["wall_seconds"] >= usage["generation_seconds"]
-    focal = fields["eligibility_inputs"]["focal_served_event_seq"]
-    completion = next(event["event_seq"] for event in result["events"] if event["kind"] == "runtime_event"
-        and ((event["event"].get("raw") or {}).get("params") or {}).get("responseId")
-        == ("response-4" if case == "failed_stream" else "response-3"))
-    continued = next(output["arrival_event_seq"] for output in result["observer_outputs"]
-                     if output["text"] == "The focal record arrived.")
-    assert focal < continued < completion
+    if case == "silent_retry":
+        assert [call["response_id"] for call in calls] == ["response-1", "response-2", "response-4"]
+        assert not any((event.get("raw") or {}).get("method") == "error" for event in result["raw_events"])
+        focal = fields["eligibility_inputs"]["focal_served_event_seq"]
+        retry_completion = next(event["event_seq"] for event in result["events"] if event["kind"] == "runtime_event"
+            and ((event["event"].get("raw") or {}).get("params") or {}).get("responseId") == "response-4")
+        assert focal < retry_completion
+    if case == "absent":
+        assert result["runtime_recording"]["context_estimates"]
 
 
 async def test_score_and_smoke_use_generation_duration_when_cleanup_crosses_the_wall_cap(tmp_path):
