@@ -16,6 +16,21 @@ measured on the exact text the runtime sends to the client, and `report_incident
 level P's three-sentence description ([review-astra-q1.md](review-astra-q1.md)). Sections
 4.3 and 4.4 now say so.
 
+**Clarification Q-C3 (2026-10-12, after the Q2a code review).** These implementation
+choices were accepted in review ([review-astra-q2a.md](review-astra-q2a.md)) and are now
+normative:
+
+- Level Q studies are sealed separately from the archived study of earlier levels.
+- In the order key of section 7.2, `world` is `[template_id, block]` and `lane` is the
+  full model ID together with the effort.
+- The study enumerates attention-cell candidates for all four screening lanes. The sizing
+  record (section 11) selects luna-low; candidate memberships and executed memberships
+  are recorded separately.
+- A standard attention episode that is also a main neutral episode is one assignment with
+  both arm memberships.
+- A token or wall stop that interrupts generation makes the episode cap-ended, even
+  after `agent_finish`.
+
 The design comes from three steps:
 
 - the level P core results ([../v13/results-core.md](../v13/results-core.md)), which
