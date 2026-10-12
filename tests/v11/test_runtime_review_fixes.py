@@ -127,30 +127,248 @@ async def test_retry_after_process_exit_does_not_signal_reused_pid_and_clears_re
     assert runtime._peer_dispatches == set() and all(task.cancelled() for task in dispatches)
 
 
-@pytest.mark.parametrize("state", ["reaped", "reused"])
-async def test_force_close_rechecks_process_after_thread_dispatch(monkeypatch, state):
-    signals = []
-    proc = SimpleNamespace(pid=90101, returncode=None, _runtime_start="original")
+@pytest.mark.parametrize("platform", ["posix", "nt"])
+async def test_force_close_exit_and_pid_reuse_after_last_observation_never_signals_replacement(monkeypatch,
+                                                                                           platform):
+    signals, attempts, closed = [], [], []
+    owners = {90101: "original"}
+
+    class Process:
+        pid, _runtime_start, _runtime_pidfd = 90101, "original", 42 if platform == "posix" else None
+        code = None
+
+        @property
+        def returncode(self):
+            observed = self.code
+            if observed is None:
+                # Exit and reuse after the runtime's last observation, before signalling.
+                self.code = 0
+                owners[self.pid] = "replacement"
+            return observed
+
+        def kill(self):
+            attempts.append("process-handle")
+            assert owners[self.pid] == "replacement"
+            raise ProcessLookupError()
+
+        async def wait(self):
+            return self.code
+
+    def send(pidfd, sig):
+        attempts.append((pidfd, sig))
+        assert owners[90101] == "replacement" and pidfd == 42
+        # The retained pidfd still refers to the exited original process.
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(core, "os", SimpleNamespace(name=platform, close=closed.append,
+                                                   kill=lambda pid, sig: signals.append((pid, sig)),
+                                                   killpg=lambda pid, sig: signals.append((pid, sig))))
+    monkeypatch.setattr(core, "signal", SimpleNamespace(SIGKILL=9, pidfd_send_signal=send))
+    monkeypatch.setattr(core, "_kill_group", signals.append)
+    monkeypatch.setattr(core, "process_start", lambda pid: pytest.fail("force-close read a PID identity"))
+    runtime = core.CodexRuntime(codex_executable="not-executed")
+    runtime._proc, runtime._close_started = Process(), True
+    await runtime.close()
+    assert signals == [] and runtime._proc is None
+    assert attempts == ([(42, 9)] if platform == "posix" else ["process-handle"])
+    assert closed == ([42] if platform == "posix" else [])
+
+
+@pytest.mark.parametrize("platform", ["posix", "nt"])
+async def test_force_close_live_process_uses_only_its_bound_handle(monkeypatch, platform):
+    attempts, closed, pid_signals = [], [], []
+    proc = SimpleNamespace(pid=90101, returncode=None, _runtime_pidfd=42 if platform == "posix" else None)
+
+    def kill():
+        attempts.append("process-handle")
+        proc.returncode = -9
+
+    def send(pidfd, sig):
+        attempts.append((pidfd, sig))
+        proc.returncode = -sig
 
     async def wait():
-        proc.returncode = 0
+        assert proc.returncode is not None
+        return proc.returncode
 
-    proc.wait = wait
-
-    async def dispatched(function):
-        if state == "reaped":
-            proc.returncode = 0
-        else:
-            monkeypatch.setattr(core, "process_start", lambda pid: "replacement")
-        function()
-
-    monkeypatch.setattr(asyncio, "to_thread", dispatched)
-    monkeypatch.setattr(core, "process_start", lambda pid: "original")
-    monkeypatch.setattr(core, "_kill_group", signals.append)
+    proc.kill, proc.wait = kill, wait
+    monkeypatch.setattr(core, "os", SimpleNamespace(name=platform, close=closed.append,
+                                                   kill=lambda pid, sig: pid_signals.append((pid, sig)),
+                                                   killpg=lambda pid, sig: pid_signals.append((pid, sig))))
+    monkeypatch.setattr(core, "signal", SimpleNamespace(SIGKILL=9, pidfd_send_signal=send))
+    monkeypatch.setattr(core, "_kill_group", pid_signals.append)
     runtime = core.CodexRuntime(codex_executable="not-executed")
     runtime._proc, runtime._close_started = proc, True
     await runtime.close()
-    assert signals == [] and runtime._proc is None
+    assert proc.returncode == -9 and runtime._proc is None and pid_signals == []
+    assert attempts == ([(42, 9)] if platform == "posix" else ["process-handle"])
+    assert closed == ([42] if platform == "posix" else [])
+
+
+async def test_launch_retains_pidfd_before_identity_lookup_and_closes_it_when_reaped(tmp_path, monkeypatch):
+    order, closed = [], []
+    exited = asyncio.Event()
+    proc = SimpleNamespace(pid=90101, returncode=None)
+
+    async def wait():
+        await exited.wait()
+        return proc.returncode
+
+    async def launch(*args, **kwargs):
+        order.append("launch")
+        return proc
+
+    def open_pidfd(pid):
+        assert pid == proc.pid
+        order.append("pidfd")
+        return 42
+
+    def identity(pid):
+        order.append("identity")
+        assert proc._runtime_pidfd == 42
+        return "original"
+
+    proc.wait = wait
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    monkeypatch.setattr(core, "os", SimpleNamespace(name="posix", environ={}, pidfd_open=open_pidfd,
+                                                   close=closed.append))
+    monkeypatch.setattr(core, "mark_home", lambda *args, **kwargs: None)
+    monkeypatch.setattr(core, "process_start", identity)
+    runtime = core.CodexRuntime(codex_executable="not-executed")
+    assert await runtime._launch(home=tmp_path) is proc
+    reapers = list(runtime._background)
+    await asyncio.sleep(0)
+    assert order == ["launch", "pidfd", "identity"] and closed == []
+    proc.returncode = 0
+    exited.set()
+    await asyncio.gather(*reapers)
+    assert closed == [42] and proc._runtime_pidfd is None
+    await runtime.close()
+    assert closed == [42] and runtime._background == set()
+
+
+async def test_cancelled_first_close_retains_pidfd_for_force_close(monkeypatch):
+    attempts, closed = [], []
+    started, exited = asyncio.Event(), asyncio.Event()
+    proc = SimpleNamespace(pid=90101, returncode=None)
+
+    async def wait():
+        await exited.wait()
+        return proc.returncode
+
+    async def stop(_proc):
+        started.set()
+        await asyncio.Event().wait()
+
+    def send(pidfd, sig):
+        attempts.append((pidfd, sig))
+        proc.returncode = -sig
+        exited.set()
+
+    proc.wait = wait
+    monkeypatch.setattr(core, "os", SimpleNamespace(name="posix", pidfd_open=lambda pid: 42,
+                                                   close=closed.append))
+    monkeypatch.setattr(core, "signal", SimpleNamespace(SIGKILL=9, pidfd_send_signal=send))
+    runtime = core.CodexRuntime(codex_executable="not-executed")
+    runtime._bind_process_handle(proc)
+    runtime._proc, runtime._stop_process = proc, stop
+    first = asyncio.create_task(runtime.close())
+    await started.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert proc._runtime_pidfd == 42 and closed == [] and attempts == []
+    await runtime.close()
+    assert attempts == [(42, 9)] and closed == [42]
+    assert runtime._proc is None and runtime._background == set()
+
+
+@pytest.mark.parametrize("missing", ["pidfd_open", "unsupported", "pidfd_send_signal"])
+async def test_unavailable_pidfd_records_incomplete_cleanup_without_signalling(tmp_path, monkeypatch, missing):
+    signals, closed = [], []
+    proc = SimpleNamespace(pid=90101, returncode=None)
+
+    async def wait():
+        await asyncio.Event().wait()
+
+    async def launch(*args, **kwargs):
+        return proc
+
+    def open_pidfd(pid):
+        if missing == "unsupported":
+            raise OSError("pidfds unavailable")
+        return 42
+
+    proc.wait = wait
+    platform = SimpleNamespace(name="posix", environ={}, close=closed.append,
+                               kill=lambda pid, sig: signals.append((pid, sig)),
+                               killpg=lambda pid, sig: signals.append((pid, sig)))
+    if missing != "pidfd_open":
+        platform.pidfd_open = open_pidfd
+    monkeypatch.setattr(core, "os", platform)
+    monkeypatch.setattr(core, "mark_home", lambda *args, **kwargs: None)
+    monkeypatch.setattr(core, "process_start", lambda pid: "original")
+    monkeypatch.setattr(core, "_kill_group", signals.append)
+    monkeypatch.setattr(core, "signal", SimpleNamespace(SIGKILL=9))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+
+    class UnboundClose(FakeTransport):
+        async def close(self):
+            if self._proc is None:
+                self._proc = await self._launch(home=self._home)
+                self._close_started = True
+            await core.CodexRuntime.close(self)
+
+    result, runtime, _ = await observe(tmp_path, runtime_class=UnboundClose)
+    assert not result["runtime_closed"] and result["termination_kind"] == "infrastructure_incomplete"
+    assert "runtime cleanup incomplete: RuntimeProtocolError: app-server process has no bound termination handle" in (
+        result["infrastructure_failures"])
+    assert signals == [] and proc.returncode is None and runtime._proc is proc
+    # Release the synthetic process and retained handle after checking the failed cleanup.
+    reapers = list(runtime._background)
+    proc.returncode = 0
+    for task in reapers:
+        task.cancel()
+    await asyncio.gather(*reapers, return_exceptions=True)
+    await core.CodexRuntime.close(runtime)
+    assert closed == ([42] if missing == "pidfd_send_signal" else [])
+
+
+async def test_force_close_real_local_process_releases_bound_handle(tmp_path, monkeypatch):
+    runtime = core.CodexRuntime(codex_executable="not-executed")
+    monkeypatch.setattr(runtime, "_command", lambda overrides=(): [sys.executable, "-c",
+                                                                 "import time; time.sleep(60)"])
+    proc = await runtime._launch(home=tmp_path)
+    runtime._proc, runtime._close_started = proc, True
+    attempts = []
+    if os.name == "nt":
+        original = proc.kill
+
+        def kill():
+            attempts.append("process-handle")
+            original()
+
+        monkeypatch.setattr(proc, "kill", kill)
+    else:
+        original = core.signal.pidfd_send_signal
+        pidfd = proc._runtime_pidfd
+
+        def send(fd, sig):
+            attempts.append((fd, sig))
+            original(fd, sig)
+
+        monkeypatch.setattr(core.signal, "pidfd_send_signal", send)
+    monkeypatch.setattr(core, "_kill_group", lambda pid: pytest.fail("force-close signalled a PID"))
+    try:
+        await asyncio.wait_for(runtime.close(), 5)
+        assert proc.returncode is not None and runtime._proc is None
+        assert attempts == (["process-handle"] if os.name == "nt" else [(pidfd, core.signal.SIGKILL)])
+        assert getattr(proc, "_runtime_pidfd", None) is None
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        await runtime.close()
 
 
 @pytest.mark.parametrize("cancel_pass", [1, 2])
@@ -334,3 +552,42 @@ def test_quoted_and_serialized_credentials_are_redacted_before_hashing(text, loc
     assert "consistency-token" not in json.dumps(recording)
     assert "[redacted]" in json.dumps(recording)
     assert recording == probe_record(capture(text.replace("consistency-token", "different-token")))
+
+
+@pytest.mark.parametrize("key", ["password", "token", "key", "secret"])
+@pytest.mark.parametrize("delimiter", [",", ";", "}", "]"])
+@pytest.mark.parametrize("location", ["instructions", "environment"])
+def test_bare_credential_delimiters_are_fully_redacted_before_hashing(key, delimiter, location):
+    def capture(prefix, suffix):
+        text = key + "=" + prefix + delimiter + suffix + " retained-text"
+        if location == "instructions":
+            return {"instructions": text}
+        return {"input": [{"role": "user", "content": [{"type": "input_text",
+            "text": "<environment_context>\n" + text + "\n</environment_context>"}]}]}
+
+    recording = probe_record(capture("consistency-prefix", "consistency-suffix"))
+    assert "consistency-" not in json.dumps(recording)
+    assert key + "=[redacted] retained-text" in json.dumps(recording)
+    assert recording == probe_record(capture("different-prefix", "different-suffix"))
+
+
+@pytest.mark.parametrize("location", ["instructions", "environment"])
+def test_adjacent_serialized_quoted_values_keep_structure_after_redaction(location):
+    def capture(value):
+        text = '{"password": "' + value + '", "retained": ["value"]}'
+        if location == "instructions":
+            return {"instructions": text}
+        return {"input": [{"content": [{"text": "<environment_context>\n" + text
+                                      + "\n</environment_context>"}]}]}
+
+    recording = probe_record(capture("consistency-prefix,consistency-suffix"))
+    text = (recording["request_shape"]["instructions"] if location == "instructions" else
+            recording["environment_frame"][0]["content"][0]["text"].splitlines()[1])
+    assert json.loads(text) == {"password": "[redacted]", "retained": ["value"]}
+    assert recording == probe_record(capture("different-prefix;different-suffix"))
+
+
+@pytest.mark.parametrize("text", ["Authorization: Basic Y29uc2lzdGVuY3k6dmFsdWU=",
+                                 '\"Authorization\": \"Basic Y29uc2lzdGVuY3k6dmFsdWU=\"'])
+def test_authorization_scheme_value_is_redacted(text):
+    assert "Y29uc2lzdGVuY3k6dmFsdWU=" not in json.dumps(probe_record({"instructions": text}))

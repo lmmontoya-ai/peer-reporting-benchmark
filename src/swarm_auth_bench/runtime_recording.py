@@ -8,10 +8,13 @@ import re
 from copy import deepcopy
 from typing import Any
 
-CREDENTIAL_KEY = r"(?:api[_-]?key|(?:access|refresh)[_-]?token|password|(?:client[_-]?)?secret|authorization)"
-CREDENTIAL_ASSIGNMENT = re.compile(
+CREDENTIAL_KEY = r"(?:api[_-]?key|(?:access|refresh)[_-]?token|password|(?:client[_-]?)?secret|authorization|token|key)"
+QUOTED_CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?i)([\"']?" + CREDENTIAL_KEY + r"[\"']?\s*[=:]\s*)"
-    r"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s\"'<>;,}\]]+)"
+    r"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')"
+)
+BARE_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?i)([\"']?" + CREDENTIAL_KEY + r"[\"']?\s*[=:]\s*)(?![\"'])[^\s]+"
 )
 
 
@@ -29,14 +32,15 @@ def _redact(value: Any) -> Any:
         return [_redact(child) for child in value]
     if isinstance(value, str):
         value = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[redacted]", value)
-        value = re.sub(r"(?i)\bBearer\s+[^\s\"'<>]+", "Bearer [redacted]", value)
+        value = re.sub(r"(?i)\b(Bearer|Basic)\s+[^\s\"'<>]+", r"\1 [redacted]", value)
 
         def replace(match: re.Match) -> str:
             captured = match[2]
             quote = captured[0] if captured[0] in "\"'" else ""
             return match[1] + quote + "[redacted]" + quote
 
-        return CREDENTIAL_ASSIGNMENT.sub(replace, value)
+        value = QUOTED_CREDENTIAL_ASSIGNMENT.sub(replace, value)
+        return BARE_CREDENTIAL_ASSIGNMENT.sub(r"\1[redacted]", value)
     return value
 
 
