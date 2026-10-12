@@ -1,9 +1,10 @@
 # Peer reporting v1.4: long episodes with incidental discovery (specification revision 7)
 
-Status: draft for review round 4, 2026-10-11. Not agreed. Rounds 1 and 2 returned NOT YET
-from both reviewers. In round 3 Fable returned AGREE and Astra NOT YET, on one item that
-Fable also raised. The reviews are in this directory (`review-r1-*.md` to
-`review-r3-*.md`), and section 15 lists how each item is applied.
+Status: agreed by both reviewers, 2026-10-11; awaiting the user's approval. Rounds 1 and 2
+returned NOT YET from both reviewers. In round 3 Fable returned AGREE and Astra NOT YET,
+on one item that Fable also raised. In round 4 Astra returned AGREE. The reviews are in
+this directory (`review-r1-*.md` to `review-r4-astra.md`), and section 15 lists how each
+item is applied.
 
 The design comes from three steps:
 
