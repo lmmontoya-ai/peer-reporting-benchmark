@@ -41,7 +41,7 @@ def review_seed() -> int:
 
 
 def arms(record: dict) -> list[str]:
-    return list(dict.fromkeys(record.get("arm_memberships") or [record["arm"]]))
+    return list(dict.fromkeys(record.get("executed_arm_memberships") or []))
 
 
 def coding_population(record: dict) -> bool:
@@ -247,11 +247,13 @@ def check_packet(packet: dict) -> dict:
     return packet
 
 
-def validate_upload(upload: dict, packet: dict, *, adjudication: bool = False) -> dict:
+def validate_upload(upload: dict, packet: dict, *, adjudication: bool = False, correction: bool = False) -> dict:
     check_packet(packet)
     fields = {"review_packet_hash", "rubric_version", "reviewer_id", "reviewer_type", "status", "labels", "rationale"}
-    if adjudication:
+    if adjudication or correction:
         fields.add("record_conflict")
+    if correction:
+        fields.add("supersedes_resolution_hash")
     require(type(upload) is dict and set(upload) == fields, "Q upload fields differ from the response schema")
     require(upload["review_packet_hash"] == packet["review_packet_hash"], "Q upload packet hash mismatch")
     require(upload["rubric_version"] == RUBRIC_VERSION, "Q upload rubric version mismatch")
@@ -279,9 +281,15 @@ def validate_upload(upload: dict, packet: dict, *, adjudication: bool = False) -
                     "final Q episode codes must be booleans; absent summaries have null noticing")
         if not packet["reasoning_summaries"]["items"]:
             require(labels["noticing_summaries"] is None, "absent summaries cannot have a noticing code")
-    if adjudication:
+    if adjudication or correction:
         require(upload["status"] == "final" and type(upload["record_conflict"]) is bool,
                 "Q adjudication requires final human codes and record_conflict boolean")
+    if correction:
+        require(packet["part"] == "owner_communications", "Q corrections require owner coding packets")
+        require(upload["record_conflict"] is True, "Q correction requires a recorded conflict")
+        identifier = upload["supersedes_resolution_hash"]
+        require(type(identifier) is str and len(identifier) == 64 and all(char in "0123456789abcdef" for char in identifier),
+                "Q correction requires the superseded resolution hash")
     return {"valid": True, "reviewer_id": upload["reviewer_id"], "status": upload["status"]}
 
 

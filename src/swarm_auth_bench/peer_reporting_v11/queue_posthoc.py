@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -268,18 +269,37 @@ def validate_review_upload(upload, packet, *, controller, receipt_directory=None
     return {**validate_upload(upload, packet), "bindings_verified": True, "live_model_calls": 0}
 
 
-def retain_upload(upload_path, packet_path, controller_path, output, *, adjudication=False, **verification):
+def _superseded_resolution(upload, path, directory, **verification):
+    # Check the target before following its history. An altered reference back
+    # to the current version must fail without recursively following itself.
+    previous = read_sealed(Path(path))
+    require(previous["packet_directory"] == str(Path(directory).resolve()), "Q correction belongs to another packet set")
+    require(previous["seal_hash"] == upload["supersedes_resolution_hash"], "Q correction supersession hash mismatch")
+    return verify_resolution(path, **verification)
+
+
+def retain_upload(upload_path, packet_path, controller_path, output, *, adjudication=False,
+                  correction_of=None, **verification):
     import hashlib
 
     upload_path, output = Path(upload_path), Path(output)
     packet, upload = read_sealed(Path(packet_path)), read_json(upload_path)
-    validate_review_upload(upload, packet, controller=controller_path, **verification) if not adjudication else None
-    if adjudication:
+    require(not adjudication or correction_of is None, "Q correction and adjudication modes are distinct")
+    if not adjudication and correction_of is None:
+        validate_review_upload(upload, packet, controller=controller_path, **verification)
+    else:
         context = verify_packets(Path(controller_path).parent.parent, **verification)
         require(context["bundles"][packet["review_packet_id"]]["packet"] == plain(packet), "Q adjudication packet mismatch")
         require(read_sealed(Path(controller_path)) == context["bundles"][packet["review_packet_id"]]["controller"],
                 "Q adjudication controller mismatch")
-    validate_upload(upload, packet, adjudication=adjudication)
+    validate_upload(upload, packet, adjudication=adjudication, correction=correction_of is not None)
+    if correction_of is not None:
+        previous = _superseded_resolution(upload, correction_of, Path(controller_path).parent.parent, **verification)
+        name = packet["review_packet_id"]
+        require(previous["resolutions"][name]["status"] == "final", "Q correction requires a final earlier resolution")
+        resolve_reviews(packet, previous["resolutions"][name]["initial_reviews"],
+                        second_review=context["bundles"][name]["row"]["second_review"],
+                        adjudication={key: value for key, value in upload.items() if key != "supersedes_resolution_hash"})
     submission = output.with_name(output.stem + "-submission.json")
     require(not output.exists() and not submission.exists(), "Q retained review output already exists")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -295,19 +315,22 @@ def retain_upload(upload_path, packet_path, controller_path, output, *, adjudica
     else:
         with primary.open("xb") as stream:
             stream.write(submission.read_bytes())
-    record = _upload_record(upload, packet, Path(controller_path).parent.parent, submission, adjudication)
+    record = _upload_record(upload, packet, Path(controller_path).parent.parent, submission, adjudication, correction_of)
     atomic_json(output, record)
     return {"output": str(output), "valid": True, "reviewer_id": upload["reviewer_id"], "live_model_calls": 0}
 
 
-def _upload_record(upload, packet, packet_directory, submission, adjudication):
+def _upload_record(upload, packet, packet_directory, submission, adjudication, correction_of=None):
     import hashlib
 
-    return seal({"kind": "peer_reporting_v14_queue_retained_review", "packet_directory": str(Path(packet_directory).resolve()),
+    return seal({"kind": "peer_reporting_v14_queue_correction" if correction_of is not None else
+                    "peer_reporting_v14_queue_retained_review", "packet_directory": str(Path(packet_directory).resolve()),
                  "review_packet_id": packet["review_packet_id"], "review_packet_hash": packet["review_packet_hash"],
                  "submission_path": str(Path(submission).resolve()), "submission_sha256": hashlib.sha256(
                      Path(submission).read_bytes()).hexdigest(), "adjudication": adjudication,
-                 "validation": validate_upload(upload, packet, adjudication=adjudication)})
+                 **({"correction_of": str(Path(correction_of).resolve()),
+                     "supersedes_resolution_hash": upload["supersedes_resolution_hash"]} if correction_of is not None else {}),
+                 "validation": validate_upload(upload, packet, adjudication=adjudication, correction=correction_of is not None)})
 
 
 def _checked_upload(path, context):
@@ -320,39 +343,58 @@ def _checked_upload(path, context):
     require(submission == Path(path).resolve().with_name(Path(path).stem + "-submission.json"),
             "Q retained submission path differs from its validation record")
     primary = context["directory"] / "submissions" / (record["submission_sha256"] + ".json")
-    require(primary.read_bytes() == submission.read_bytes(), "Q review differs from retained primary submission")
+    require(primary.is_file() and submission.is_file() and primary.read_bytes() == submission.read_bytes(),
+            "Q review differs from retained primary submission")
     upload = read_json(submission)
-    require(record["adjudication"] == ("record_conflict" in upload), "Q retained adjudication type mismatch")
-    require(record == _upload_record(upload, packet, context["directory"], submission, record["adjudication"]),
+    correction_of = record.get("correction_of")
+    require(record["adjudication"] == ("record_conflict" in upload and correction_of is None),
+            "Q retained adjudication type mismatch")
+    require(record == _upload_record(upload, packet, context["directory"], submission, record["adjudication"], correction_of),
             "Q review validation differs from retained submission")
-    return name, upload, record["adjudication"]
+    return name, upload, record["adjudication"], correction_of
 
 
-def _resolution_record(directory, upload_paths, adjudication_paths, **verification):
+def _submission_inventory(directory, upload_paths, adjudication_paths, correction_paths):
+    entries = [{"path": str(Path(path).resolve()), "role": role,
+                "submission_sha256": read_sealed(Path(path))["submission_sha256"]}
+               for role, paths in (("upload", upload_paths), ("adjudication", adjudication_paths),
+                                   ("correction", correction_paths)) for path in paths]
+    require(len({row["path"] for row in entries}) == len(entries), "duplicate Q retained review paths")
+    hashes = [row["submission_sha256"] for row in entries]
+    require(len(set(hashes)) == len(hashes), "Q resolution must include every retained submission exactly once")
+    return seal({"kind": "peer_reporting_v14_queue_submission_inventory",
+                 "packet_directory": str(Path(directory).resolve()), "submissions": entries})
+
+
+def _resolution_record(directory, upload_paths, adjudication_paths, correction_paths=(), *, inventory=None, **verification):
     context = verify_packets(directory, **verification)
     require(context["index"]["part"] == "owner_communications", "Q adjudicated endpoints require owner coding packets")
     context["directory"] = Path(directory).resolve()
     uploads, adjudications = {}, {}
-    paths = [*upload_paths, *adjudication_paths]
-    require(len({str(Path(path).resolve()) for path in paths}) == len(paths), "duplicate Q retained review paths")
-    primary_submissions = set(path.stem for path in (context["directory"] / "submissions").glob("*.json"))
-    submitted_hashes = [read_sealed(Path(path))["submission_sha256"] for path in paths]
-    require(set(submitted_hashes) == primary_submissions and len(set(submitted_hashes)) == len(submitted_hashes),
-            "Q resolution must include every retained submission exactly once")
+    expected_inventory = _submission_inventory(directory, upload_paths, adjudication_paths, correction_paths)
+    if inventory is None:
+        primary_submissions = {path.stem for path in (context["directory"] / "submissions").glob("*.json")}
+        require({row["submission_sha256"] for row in expected_inventory["submissions"]} == primary_submissions,
+                "Q resolution must include every retained submission exactly once")
+        inventory = expected_inventory
+    else:
+        check_seal(inventory)
+        primary_inventory = context["directory"] / "resolution-inventories" / (inventory["seal_hash"] + ".json")
+        require(primary_inventory.is_file() and read_sealed(primary_inventory) == inventory == expected_inventory,
+                "Q resolution submission inventory differs from its retained version")
     for path in upload_paths:
-        name, upload, adjudication = _checked_upload(path, context)
-        require(not adjudication, "initial Q upload is an adjudication")
+        name, upload, adjudication, correction_of = _checked_upload(path, context)
+        require(not adjudication and correction_of is None, "initial Q upload is an adjudication or correction")
         uploads.setdefault(name, []).append(upload)
     for path in adjudication_paths:
-        name, upload, adjudication = _checked_upload(path, context)
-        require(adjudication and name not in adjudications, "invalid or duplicate Q adjudication")
+        name, upload, adjudication, correction_of = _checked_upload(path, context)
+        require(adjudication and correction_of is None and name not in adjudications, "invalid or duplicate Q adjudication")
         adjudications[name] = upload
     by_assignment, resolutions, agreement_by_arm = {}, {}, {}
     for name, bundle in context["bundles"].items():
         resolution = resolve_reviews(bundle["packet"], uploads.get(name, []), second_review=bundle["row"]["second_review"],
                                      adjudication=adjudications.get(name))
         resolutions[name] = resolution
-        by_assignment[bundle["row"]["assignment_id"]] = (bundle["packet"], resolution)
         initial = resolution["initial_reviews"]
         if bundle["row"]["second_review"] and len(initial) >= 2 and "owner_informed" in next(
                 iter(bundle["packet"]["label_template"].values()), {}):
@@ -360,6 +402,19 @@ def _resolution_record(directory, upload_paths, adjudication_paths, **verificati
             for arm in bundle["row"]["arms"]:
                 if bundle["row"]["assignment_id"] in context["index"]["selection"]["second_review_by_arm"][arm]:
                     agreement_by_arm.setdefault(arm, []).append(pair)
+    for path in correction_paths:
+        name, upload, adjudication, correction_of = _checked_upload(path, context)
+        require(not adjudication and correction_of is not None, "invalid Q correction")
+        previous = _superseded_resolution(upload, correction_of, context["directory"], **verification)
+        require(previous["resolutions"][name]["status"] == "final"
+                and previous["resolutions"][name] == resolutions[name], "Q correction does not supersede the current episode resolution")
+        bundle = context["bundles"][name]
+        corrected = resolve_reviews(bundle["packet"], uploads.get(name, []), second_review=bundle["row"]["second_review"],
+            adjudication={key: value for key, value in upload.items() if key != "supersedes_resolution_hash"})
+        corrected["corrections"] = [*resolutions[name].get("corrections", []), deepcopy(upload)]
+        resolutions[name] = corrected
+    for name, bundle in context["bundles"].items():
+        by_assignment[bundle["row"]["assignment_id"]] = (bundle["packet"], resolutions[name])
     endpoints = {score["assignment_id"]: adjudicated_endpoints(score, *by_assignment.get(score["assignment_id"], (None, None)))
                  for score in context["data"]["scores"]}
     mechanical = {score["assignment_id"]: {name: score["endpoints"][name] for name in (
@@ -381,6 +436,8 @@ def _resolution_record(directory, upload_paths, adjudication_paths, **verificati
                  "source_export_hash": context["index"]["source_export_hash"],
                  "uploads": [str(Path(path).resolve()) for path in upload_paths],
                  "adjudications": [str(Path(path).resolve()) for path in adjudication_paths],
+                 "corrections": [str(Path(path).resolve()) for path in correction_paths],
+                 "submission_inventory": inventory, "resolution_version": inventory["seal_hash"],
                  "resolutions": resolutions, "endpoints": endpoints, "agreement": agreement(pooled_pairs),
                  "mechanical_endpoints": mechanical, "owner_informed_comparisons": comparisons,
                  "mechanical_adjudicated_agreement": {**agreement(mechanical_pairs),
@@ -389,17 +446,28 @@ def _resolution_record(directory, upload_paths, adjudication_paths, **verificati
                  "live_model_calls": 0})
 
 
-def write_adjudication(directory, output, *, uploads=(), adjudications=(), **verification):
-    record = _resolution_record(directory, uploads, adjudications, **verification)
+def write_adjudication(directory, output, *, uploads=(), adjudications=(), corrections=(), **verification):
+    record = _resolution_record(directory, uploads, adjudications, corrections, **verification)
     output = Path(output)
     require(not output.exists(), "Q adjudication output already exists")
     output.parent.mkdir(parents=True, exist_ok=True)
+    inventory = record["submission_inventory"]
+    retained = Path(directory) / "resolution-inventories"
+    retained.mkdir(exist_ok=True)
+    primary = retained / (inventory["seal_hash"] + ".json")
+    if primary.exists():
+        require(read_sealed(primary) == inventory, "Q retained submission inventory mismatch")
+    else:
+        with primary.open("xb") as stream:
+            stream.write(json.dumps(inventory, indent=2, sort_keys=True, ensure_ascii=True).encode("ascii") + b"\n")
     atomic_json(output, record)
-    return {"output": str(output), "seal_hash": record["seal_hash"], "agreement": record["agreement"], "live_model_calls": 0}
+    return {"output": str(output), "seal_hash": record["seal_hash"], "resolution_version": record["resolution_version"],
+            "agreement": record["agreement"], "live_model_calls": 0}
 
 
 def verify_resolution(path, **verification):
     record = read_sealed(Path(path))
-    expected = _resolution_record(record["packet_directory"], record["uploads"], record["adjudications"], **verification)
+    expected = _resolution_record(record["packet_directory"], record["uploads"], record["adjudications"], record["corrections"],
+                                  inventory=record["submission_inventory"], **verification)
     require(record == expected, "Q adjudication differs from retained submissions or primary evidence")
     return expected

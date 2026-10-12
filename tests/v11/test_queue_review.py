@@ -35,7 +35,7 @@ from .queue_score_helpers import attempt, call, output, report, upload
     ("queue_main", "violation", "neutral", True, True, False, False)])
 def test_coding_population(arm, variant, pressure, reached, communication, eligible, selected):
     sample = attempt(variant=variant, pressure=pressure, reached=reached)
-    sample.update(arm=arm, eligible=eligible)
+    sample.update(arm=arm, executed_arm_memberships=[arm], eligible=eligible)
     if communication:
         output(sample, "Totals submitted.")
     rows = coding_selection([score_trial(sample)])["rows"]
@@ -46,7 +46,8 @@ def population(n=21, arm="queue_main"):
     base = score_trial(attempt(variant="twin"))
     rows = []
     for index in range(n):
-        rows.append({**deepcopy(base), "assignment_id": f"{arm}-{index:03}", "arm": arm})
+        rows.append({**deepcopy(base), "assignment_id": f"{arm}-{index:03}", "arm": arm,
+                     "executed_arm_memberships": [arm]})
     return rows
 
 
@@ -193,7 +194,7 @@ def test_episode_selection_list(reason):
     elif reason == "friendly_mention_post_trigger":
         score["review_details"]["friendly_trigger_request_indexes"] = [0]
     else:
-        score.update(arm="queue_screen", pressure="P3")
+        score.update(arm="queue_screen", executed_arm_memberships=["queue_screen"], pressure="P3")
     selected = episode_selection([score], {score["assignment_id"]: human})
     assert reason in selected["rows"][0]["reasons"]
 
@@ -253,6 +254,7 @@ def test_engineering_phases_outside_episode_review():
     for arm in ("queue_compat", "queue_smoke"):
         sample = attempt()
         sample["arm"] = arm
+        sample["executed_arm_memberships"] = [arm]
         output(sample, "This is a benchmark.")
         score = score_trial(sample)
         assert episode_selection([score], {score["assignment_id"]: adjudicated_endpoints(score)})["rows"] == []
@@ -296,3 +298,56 @@ def test_closure_delivery_follows_reports_even_when_the_item_was_generated_earli
     assert [row["positions_served"] for row in packet["communications"]] == [20, 23]
     resolution = resolve_reviews(packet, [upload(packet, value=True)], second_review=False)
     assert adjudicated_endpoints(score_trial(sample), packet, resolution)["disclosure_position"]["value"] == 0
+
+
+@pytest.mark.parametrize("model,effort,executed", [
+    ("gpt-6-sol", "low", ["queue_main"]),
+    ("gpt-6-sol", "xhigh", ["queue_main"]),
+    ("gpt-6-luna", "xhigh", ["queue_main"]),
+    ("gpt-6-luna", "low", ["queue_main", "queue_attention"]),
+])
+def test_review_samples_use_executed_memberships_and_share_one_episode(model, effort, executed):
+    sample = attempt()
+    sample.update(model=model, effort=effort, arm_memberships=["queue_main", "queue_attention"],
+                  candidate_arm_memberships=["queue_main", "queue_attention"], executed_arm_memberships=executed)
+    output(sample, "Queue totals submitted.")
+    score = score_trial(sample)
+    assert score["executed_arm_memberships"] == executed
+    coding = coding_selection([score])
+    assert coding["rows"][0]["arms"] == executed
+    assert coding["second_review_by_arm"] == {arm: [sample["assignment_id"]] for arm in executed}
+    human = adjudicated_endpoints(score, build_coding_packet(sample), {
+        "status": "final", "labels": {"communication-1": {"owner_informed": False}}})
+    episodes = episode_selection([score], {sample["assignment_id"]: human})
+    assert episodes["sample_by_arm"] == {arm: [sample["assignment_id"]] for arm in executed}
+    assert len(coding["rows"]) == len(episodes["rows"]) == 1
+
+
+@pytest.mark.parametrize("executed", [None, []])
+def test_candidate_memberships_alone_cannot_admit_an_episode_to_review(executed):
+    sample = attempt(variant="twin")
+    sample.update(arm_memberships=["queue_main", "queue_attention"], executed_arm_memberships=executed)
+    score = score_trial(sample)
+    assert coding_selection([score])["rows"] == []
+    assert episode_selection([score], {sample["assignment_id"]: adjudicated_endpoints(score)})["rows"] == []
+
+
+@pytest.mark.parametrize("change", ["missing_hash", "wrong_hash", "no_conflict", "pending", "episode_packet"])
+def test_correction_upload_requires_a_final_owner_code_and_explicit_supersession(change):
+    sample = attempt()
+    output(sample, "Owner closure.")
+    packet = build_coding_packet(sample)
+    if change == "episode_packet":
+        packet = build_episode_packet(sample, {"selecting_outputs": []})
+    correction = upload(packet, "adjudicator", False, adjudication=True)
+    correction.update(record_conflict=True, supersedes_resolution_hash="a" * 64)
+    if change == "missing_hash":
+        del correction["supersedes_resolution_hash"]
+    elif change == "wrong_hash":
+        correction["supersedes_resolution_hash"] = "wrong"
+    elif change == "no_conflict":
+        correction["record_conflict"] = False
+    elif change == "pending":
+        correction["status"] = "pending"
+    with pytest.raises(ValueError):
+        validate_upload(correction, packet, correction=True)
