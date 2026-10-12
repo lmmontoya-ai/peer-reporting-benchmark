@@ -37,7 +37,7 @@ from ..peer_reporting.config import read_json
 from . import PROTOCOL_ID, TOOL_SCHEMA_VERSION
 from .lanes import PHASES
 
-LIVE_COMMANDS = ("compatibility", "calibration", "smoke", "collection")
+LIVE_COMMANDS = ("compatibility", "calibration", "smoke", "collection", "screening")
 
 
 def _scorer(enabled: bool):
@@ -151,11 +151,11 @@ def _parser() -> argparse.ArgumentParser:
                         help="new raw caps JSON; approval is retained in <output-stem>-approval.json")
     build = commands.add_parser("build", help="seal a live phase plan offline; no model call")
     build.add_argument("root", type=Path, help="fresh output directory; a behavioral root must be STUDY/roots/<name>")
-    build.add_argument("--phase", choices=PHASES, required=True)
+    build.add_argument("--phase", choices=(*PHASES, "screening"), required=True)
     build.add_argument("--caps", type=Path, required=True)
     build.add_argument("--revision", required=True)
-    from .schemas import TOOL_SCHEMA_VERSION_P
-    build.add_argument("--tool-schema-version", choices=(TOOL_SCHEMA_VERSION, TOOL_SCHEMA_VERSION_P),
+    from .schemas import TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q
+    build.add_argument("--tool-schema-version", choices=(TOOL_SCHEMA_VERSION, TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q),
                        help="compatibility only: select v1 (default) or the level P v2 probe")
     _study(build, "sealed v1.1 study directory (calibration, smoke, collection); the root is registered there")
     build.add_argument("--compatibility", type=Path, action="append", default=[])
@@ -212,6 +212,7 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("build-study", "verify-study"):
         study = commands.add_parser(name, help="build or verify the sealed study offline; no model call")
         study.add_argument("directory", type=Path)
+        study.add_argument("--level", choices=("earlier", "Q"), default="earlier")
         study.add_argument("--caps", type=Path, required=True, help="frozen v1.1 caps record")
     replay = commands.add_parser("replay", help="authored offline replay through the v1.1 world; no model call")
     source = replay.add_mutually_exclusive_group(required=True)
@@ -259,12 +260,28 @@ def _parser() -> argparse.ArgumentParser:
     receipt.add_argument("root", type=Path)
     receipt.add_argument("--receipt-directory", type=Path, required=True)
     receipt.add_argument("--study", type=Path)
+    budget = commands.add_parser("queue-budget-check", help="offline pinned-client tool output byte check")
+    budget.add_argument("--client", default="codex")
+    smoke_check = commands.add_parser("queue-smoke-check", help="check the five level Q smoke requirements")
+    smoke_check.add_argument("root", type=Path)
+    smoke_check.add_argument("--study", type=Path, required=True)
+    smoke_check.add_argument("--compatibility", type=Path, action="append", default=[])
+    smoke_check.add_argument("--receipt-directory", type=Path, required=True)
     return parser
 
 
 def _run(args: argparse.Namespace) -> dict:
     from .bundle import load_bundle
 
+    if args.command == "queue-budget-check":
+        from .queue_budget import check_budget
+
+        return asyncio.run(check_budget(args.client))
+    if args.command == "queue-smoke-check":
+        from .queue_checks import check_smoke_root
+
+        return check_smoke_root(args.root, study_directory=args.study,
+                                compatibility_directories=args.compatibility, receipt_directory=args.receipt_directory)
     if args.command == "root-receipt":
         from .receipts import write_receipt
 
@@ -310,6 +327,12 @@ def _run(args: argparse.Namespace) -> dict:
         from .config import load_protocol
         from .incidents import load_all_templates
 
+        if args.level == "Q":
+            from .queue_protocol import load_protocol
+            from .queue_templates import TEMPLATES
+
+            def load_all_templates():
+                return TEMPLATES
         action = build_study if args.command == "build-study" else verify_study
         return action(args.directory, protocol=load_protocol(), templates=load_all_templates(),
                       caps_record=read_json(args.caps))
@@ -440,6 +463,10 @@ def _run(args: argparse.Namespace) -> dict:
     from .live import read_live_plan, reviewed_runtime_factory, run_live_phase
 
     plan = read_live_plan(args.root)
+    if plan["tool_schema_version"] == "peer-reporting-v11-tools-v3":
+        from .live import queue_runtime_factory
+
+        reviewed_runtime_factory = queue_runtime_factory
     if plan["phase"] != args.command:
         raise ValueError(f"{args.root} is a sealed {plan['phase']} root, not {args.command}")
     return asyncio.run(run_live_phase(
@@ -464,6 +491,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in LIVE_COMMANDS:
         return 0 if result.get("status") == "complete" and result.get("status_counts", {}).get(
             "archived") == result.get("maximum_live_calls") else 2
+    if args.command in ("queue-budget-check", "queue-smoke-check"):
+        return 0 if result["passed"] else 2
     if args.command == "verify-study":
         return 0 if result["valid"] else 2
     return 0

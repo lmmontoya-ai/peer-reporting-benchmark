@@ -64,6 +64,8 @@ from ..runtime_recording import attempt_recording
 from .bundle import ProtocolBundle, tools_for_levels
 from .closure import closure_outputs, record_delivery
 from .lanes import PROVIDER_STALLED, PROVIDER_UNAVAILABLE, validate_effort, validate_world_mode
+from .queue_protocol import QUEUE_OPTIONS, QUEUE_OPTIONS_RECORD, result_body
+from .schemas import TOOL_SCHEMA_VERSION_Q
 
 ADAPTER_VERSION = "peer-reporting-v11-live-runtime-v1"
 PREFLIGHT_KIND = "peer_v11_runtime_preflight"
@@ -94,6 +96,8 @@ def validate_preflight(requested_model: str, caps: dict, qualification: dict, ru
         raise ValueError("peer observer requires an exact approved model ID")
     validate_effort(reasoning_effort)
     validate_caps(caps)
+    if bundle.schema_version == TOOL_SCHEMA_VERSION_Q and qualification.get("runtime_options") != QUEUE_OPTIONS_RECORD:
+        raise ValueError("level Q requires the pinned queue runtime options")
     _, catalog = reviewed_catalog(requested_model)
     expected = {"kind": PREFLIGHT_KIND, "requested_model": requested_model, "reasoning_effort": reasoning_effort,
                 "tool_manifest_hash": bundle.tool_manifest_hash, "tool_descriptors_hash": bundle.tool_descriptors_hash,
@@ -176,6 +180,7 @@ class _Controller:
                  event_sink: Callable[[dict], Any] | None, usage_callback: Callable[[dict], Any] | None,
                  *, reasoning_effort: str, world_mode: str, bundle: ProtocolBundle) -> None:
         self.fixture = deepcopy(fixture)
+        self.queue = bundle.schema_version == TOOL_SCHEMA_VERSION_Q
         self.attempt_id, self.caps, self.runtime = attempt_id, deepcopy(caps), runtime
         self.reasoning_effort, self.world_mode, self.bundle = reasoning_effort, world_mode, bundle
         self.reasoning_summary = getattr(runtime, "options", RuntimeOptions()).reasoning_summary
@@ -218,6 +223,10 @@ class _Controller:
         self.transport_closing = False
         self.emit("observer_admitted", requested_model=runtime.model, reasoning_effort=reasoning_effort,
                   world_mode=world_mode, deadline_elapsed_seconds=caps["max_trial_wall_seconds"])
+
+    def error_result(self, code):
+        body = {"status": "error", "error": code}
+        return {"result": body, "room_events": []} if self.queue else body
 
     def elapsed(self) -> float:
         return self.clock() - self.started
@@ -289,7 +298,7 @@ class _Controller:
                     request = payload
                     result = await asyncio.to_thread(self.world.dispatch, request["tool"], request["arguments"])
                     request["world_arrival_seq"] = len(self.world.requests)
-                    if result["status"] != "deferred":
+                    if result_body(result)["status"] != "deferred":
                         request["result"] = deepcopy(result)
                         request["storage_elapsed_seconds"] = self.elapsed()
                         if not completion.done():
@@ -313,10 +322,10 @@ class _Controller:
             except Exception as error:
                 await self.fail(f"controller storage failed: {type(error).__name__}: {error}")
                 if completion is not None and not completion.done():
-                    completion.set_result(({"status": "error", "error": "closed"}, False))
+                    completion.set_result((self.error_result("closed"), False))
                 for future in self.futures.values():
                     if not future.done():
-                        future.set_result(({"status": "error", "error": "closed"}, False))
+                        future.set_result((self.error_result("closed"), False))
                 return
             finally:
                 self.operations.task_done()
@@ -347,7 +356,7 @@ class _Controller:
                             and name in self.tool_names)
             if not attributable or (record["admitted"] and not session.active):
                 record["protocol_rejected"] = True
-                result = {"status": "error", "error": "schema_error"}
+                result = self.error_result("schema_error")
                 record["result"] = result
                 self.failures.append("unattributable or undeclared dynamic tool request")
                 self._boundary("infrastructure_incomplete", "dynamic_request_attribution", stop_generation=True)
@@ -358,13 +367,13 @@ class _Controller:
                 if (previous["tool"] != name or previous["arguments"] != record["arguments"]):
                     self.failures.append("conflicting duplicate transport call ID")
                     self._boundary("infrastructure_incomplete", "conflicting_call_id", stop_generation=True)
-                    result = {"status": "error", "error": "idempotency_conflict"}
+                    result = self.error_result("idempotency_conflict")
                     record["result"] = result
                     return record, result, False
             if not record["admitted"]:
                 if previous is None:
                     self.calls[call_id] = record  # a later reuse of this call ID is checked against it
-                result = {"status": "error", "error": "closed"}
+                result = self.error_result("closed")
                 record["result"] = result
                 if sequence >= self.caps["max_tool_requests_per_trial"]:
                     self._boundary("per_trial_limit", "tool_request_limit", stop_generation=True)
@@ -396,7 +405,8 @@ class _Controller:
 
     def response_sent(self, record: dict) -> None:
         record["response_sent"] = True
-        self.emit("tool_response_sent", arrival_seq=record["arrival_seq"], call_id=record["call_id"])
+        self.emit("tool_response_sent", arrival_seq=record["arrival_seq"], call_id=record["call_id"],
+                  **({"request": deepcopy(record)} if self.queue else {}))
         for raw in list(self.pending_receipts):
             if self._tool_receipt(raw):
                 self.pending_receipts.remove(raw)
@@ -433,8 +443,8 @@ class _Controller:
                    "raw": deepcopy(raw)}
         self.receipts.append(receipt)
         self.emit("tool_result_delivery_confirmed", receipt=receipt)
-        if request["tool"] == "report_incident" and request["result"].get("status") == "stored":
-            self.emit("report_receipt_delivery_confirmed", report_id=request["result"]["report_id"],
+        if request["tool"] == "report_incident" and result_body(request["result"]).get("status") == "stored":
+            self.emit("report_receipt_delivery_confirmed", report_id=result_body(request["result"])["report_id"],
                       call_id=call_id, arrival_seq=request["arrival_seq"])
         return True
 
@@ -486,8 +496,56 @@ class _Controller:
         self.emit("tool_receipts_reconciled", **summary)
         return summary
 
+    async def queue_usage(self, raw: dict) -> None:
+        """Use deduplicated per-call provider counts, including cached input and reasoning output."""
+        identity = content_hash([self.attempt_id, raw["method"], raw["params"]])
+        if identity in self.usage_seen:
+            return
+        self.usage_seen.add(identity)
+        if raw["method"] == "rawResponse/completed":
+            params = raw["params"]
+            response_id = params.get("responseId") or (params.get("response") or {}).get("id")
+            previous = self.response_usage.get(response_id)
+            usage = params.get("usage")
+            if response_id in self.response_usage and previous != usage:
+                await self.fail("conflicting response usage notification")
+                return
+            self.response_usage[response_id] = deepcopy(usage)
+        recording = attempt_recording(self.raw_events, thread_id=self.session.thread_id,
+                                      turn_id=self.session.turn_id, record_calls=True, record_reasoning=False,
+                                      attestations=[])["runtime_recording"]
+        calls = recording["model_calls"]
+        if not calls:
+            return  # A context estimate is not a completed provider call.
+        usable = all(type(call.get(key)) is int and call[key] >= 0 for call in calls
+                     for key in ("input_tokens", "output_tokens"))
+        value = sum(call["input_tokens"] + call["output_tokens"] for call in calls) if usable else None
+        if value is None:
+            self.usage_missing = True
+        else:
+            self.observed_tokens = value
+        observation = {"notification_id": identity, "cumulative_tokens": value,
+                       "source": "queue_per_call", "attempt_id": self.attempt_id}
+        self.emit("usage_observed" if usable else "usage_unavailable", **observation)
+        if self.usage_callback is not None:
+            returned = self.usage_callback(deepcopy(observation))
+            if inspect.isawaitable(returned):
+                await returned
+        if usable:
+            for field in ("input", "output"):
+                if sum(call[field + "_tokens"] for call in calls) >= self.caps["trial_" + field + "_token_stop"]:
+                    self.emit("queue_token_stop_observed", token_kind=field,
+                              cumulative_tokens=sum(call[field + "_tokens"] for call in calls),
+                              stop_target=self.caps["trial_" + field + "_token_stop"],
+                              generation_active=self.session.active)
+                    await self.stop("per_trial_limit", "trial_" + field + "_token_limit")
+                    break
+
     async def _usage(self, raw: dict) -> None:
         params, method = raw["params"], raw["method"]
+        if self.queue:
+            await self.queue_usage(raw)
+            return
         identity = content_hash([self.attempt_id, method, params])
         if identity in self.usage_seen:
             return
@@ -864,7 +922,8 @@ async def run_live_observer(
     bundle = tools_for_levels(bundle, [(fixture.get("parameters") or {}).get("level")])
     validate_world_mode(world_mode)
     validate_preflight(requested_model, caps, qualification, runtime, reasoning_effort=reasoning_effort, bundle=bundle)
-    runtime = runtime or V11PeerRuntime(model=requested_model, reasoning_effort=reasoning_effort)
+    runtime = runtime or V11PeerRuntime(model=requested_model, reasoning_effort=reasoning_effort,
+                                       **({"options": QUEUE_OPTIONS} if bundle.schema_version == TOOL_SCHEMA_VERSION_Q else {}))
     validate_preflight(requested_model, caps, qualification, runtime, reasoning_effort=reasoning_effort, bundle=bundle)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -1032,7 +1091,7 @@ async def run_live_observer(
                         "elapsed_seconds": controller.elapsed(), "arrival_event_seq": len(controller.events),
                         "delivery_evidence": "turn_result_text_unattributed_to_item"})
     for request in state["requests"]:
-        if request["name"] == "agent_finish" and request["result"] == {"status": "closed"}:
+        if request["name"] == "agent_finish" and result_body(request["result"]) == {"status": "closed"}:
             arrival = next(record for record in controller.requests
                            if record["world_arrival_seq"] == request["arrival_seq"])
             outputs.append({"output_id": f"finish-{request['arrival_seq']}", "source_kind": "finish_summary",
@@ -1041,12 +1100,12 @@ async def run_live_observer(
                             "elapsed_seconds": arrival["arrival_elapsed_seconds"],
                             "arrival_event_seq": arrival["arrival_event_seq"]})
     outputs.sort(key=lambda output: output["arrival_event_seq"])
-    record_delivery(outputs, pressure=(fixture.get("parameters") or {}).get("level") == "P")
+    record_delivery(outputs, pressure=(fixture.get("parameters") or {}).get("level") in ("P", "Q"))
     for output in outputs:
         output.setdefault("delivery_evidence", "durably_stored_finish_request"
                           if output["source_kind"] == "finish_summary" else "completed_assistant_item"
                           if output.get("complete") else "visible_assistant_delta")
-    if (fixture.get("parameters") or {}).get("level") == "P" and fixture["parameters"]["visibility"] == "visible":
+    if (fixture.get("parameters") or {}).get("level") in ("P", "Q") and fixture["parameters"]["visibility"] == "visible":
         try:
             controller.world.store_closure_notices(
                 [output["text"] for output in closure_outputs(outputs) if output["source_kind"] == "final_response"],
@@ -1063,8 +1122,12 @@ async def run_live_observer(
                 state = controller.world.snapshot()
     reply_ids = {reservation["reply_event_id"] for reservation in state["reply_reservations"]}
     acknowledged_replies = sorted({message["event_id"] for receipt in controller.receipts
-                                   if receipt["tool"] == "read_channel" and receipt["result"].get("status") == "ok"
-                                   for message in receipt["result"]["messages"] if message["event_id"] in reply_ids})
+                                   if receipt["tool"] == "read_channel" and result_body(receipt["result"]).get("status") == "ok"
+                                   for message in result_body(receipt["result"])["messages"] if message["event_id"] in reply_ids})
+    if controller.queue:
+        acknowledged_replies = sorted({message["event_id"] for receipt in controller.receipts
+            for message in receipt["result"].get("room_events", []) + result_body(receipt["result"]).get("messages", [])
+            if message["event_id"] in reply_ids})
     if deferred:
         # A3 conditions 1 to 4, from all reconciled events. Missing receipts alone are allowed by spec 10.
         final = controller.provider_overload(result, requested_model, observer_outputs=outputs)
@@ -1089,12 +1152,16 @@ async def run_live_observer(
              and not outputs and not controller.requests else None)
     if stall is not None:
         controller.emit("provider_stall_observed", **stall)
+    if controller.queue:
+        controller.emit("observer_outputs_recorded", outputs=outputs)
     boundary = controller.boundary or {"termination_kind": "infrastructure_incomplete", "reason": "no_boundary"}
     termination = "infrastructure_incomplete" if controller.failures or not controller.queue_reconciled \
         else PROVIDER_UNAVAILABLE if overload is not None else PROVIDER_STALLED if stall is not None \
         else boundary["termination_kind"]
     controller.emit("observer_attempt_reconciled", termination_kind=termination,
-                    queue_reconciled=controller.queue_reconciled, failures=controller.failures, usage=usage)
+                    queue_reconciled=controller.queue_reconciled, failures=controller.failures, usage=usage,
+                    **({"requests": deepcopy(controller.requests), "runtime_closed": runtime_closed}
+                       if controller.queue else {}))
     controller.log.close()
     return {
         "adapter_version": ADAPTER_VERSION, "execution_kind": "live_model", "attempt_id": attempt_id,

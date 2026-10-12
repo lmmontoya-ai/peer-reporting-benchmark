@@ -348,7 +348,11 @@ class _PhaseState:
                     raise EvidenceError(f"{entry['attempt_id']}: the sealed provider pause names another attempt")
                 sealed_pauses[entry["attempt_id"]] = pause
             try:
-                if attempt.get("world_checkpoint") is not None:
+                if entry["level"] == "Q":
+                    from .queue_evidence import verify_result
+
+                    verify_result(payload, attempt_dir, self.bundle)
+                if attempt.get("world_checkpoint") is not None and entry["level"] != "Q":
                     self.bundle.audit_state(attempt_dir / "world", attempt["world_checkpoint"])
                 controller = attempt.get("controller_checkpoint")
                 if isinstance(controller, dict) and "event_count" in controller:

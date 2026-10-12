@@ -79,11 +79,13 @@ from .live import (
     verify_consumed_ledger,
 )
 from .phase import _PhaseState
+from .queue_protocol import QUEUE_FIELDS, result_body
 from .review_population import (
     check_pressure_arm_roots,
     check_pressure_export_population,
     registered_pressure_population,
 )
+from .schemas import TOOL_SCHEMA_VERSION_Q
 
 ADAPTER_VERSION = "peer-reporting-v11-live-review-v1"
 EXPORT_KIND = "peer_reporting_v11_live_review_export"
@@ -103,7 +105,9 @@ def _labels(entry: dict, phase: str, lane: str) -> dict:
             **({key: entry[key] for key in ("difficulty", "block", "prevalence_k", "post_condition")}
                if entry["level"] == "S" else {}),
             **({key: entry[key] for key in ("block", "prevalence_k", "visibility", "pressure")}
-               if entry["level"] == "P" else {})}
+               if entry["level"] == "P" else {}),
+            **({key: entry[key] for key in QUEUE_FIELDS} if entry["level"] == "Q" else {}),
+            **({"arm_memberships": entry["arm_memberships"]} if "arm_memberships" in entry else {})}
 
 
 def pressure_events(world: dict) -> list[dict]:
@@ -139,13 +143,17 @@ def report_attempts(tool_requests: list[dict]) -> list[dict]:
              "duplicate_of_arrival_seq": request.get("duplicate_of_arrival_seq"),
              "arguments": deepcopy(request.get("arguments")),
              "admitted": request.get("admitted"), "result": deepcopy(request.get("result")),
-             "stored": (request.get("result") or {}).get("status") == "stored"}
+             "stored": result_body(request.get("result") or {}).get("status") == "stored"}
             for request in tool_requests if request.get("tool") == "report_incident"]
 
 
 def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Path, *, phase: str, lane: str,
                       bundle: ProtocolBundle) -> dict:
     result = payload["observer_result"]
+    if entry["level"] == "Q":
+        from .queue_evidence import verify_result
+
+        verified_world = verify_result(payload, attempt_dir, bundle)
     settlement = payload["orchestrator"]["usage_settlement"]
     base = {
         "adapter_version": ADAPTER_VERSION, "execution_kind": "live_model",
@@ -170,7 +178,7 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
              and result["reasoning_effort"] == entry["reasoning_effort"]
              and result["world_mode"] == entry["world_mode"],
              "live result differs from the sealed assignment inputs")
-    world = bundle.audit_state(attempt_dir / "world", result["world_checkpoint"])
+    world = verified_world if entry["level"] == "Q" else bundle.audit_state(attempt_dir / "world", result["world_checkpoint"])
     _require(world == result["world_state"] and world["trial_id"] == payload["attempt_id"],
              "archived world differs from durable assignment evidence")
     checkpoint = result["controller_checkpoint"]
@@ -197,7 +205,9 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
                  and item["id"] == receipt["item_id"] and item["type"] == "userMessage"
                  and item.get("status", "completed") == "completed"
                  and _text_item(item) == fixture["packet"], "initial packet receipt mismatch")
-    check = evaluate_transport(result, fixture=fixture, entry=entry, preflight=payload["preflight"], bundle=bundle,
+    from .live import evaluator
+
+    check = (evaluator(phase) if entry["level"] == "Q" else evaluate_transport)(result, fixture=fixture, entry=entry, preflight=payload["preflight"], bundle=bundle,
                                orchestrator_failures=payload["orchestrator"]["evidence_failures"],
                                observer_error=payload["observer_error"], usage_settlement=settlement["status"],
                                stop_reasons=payload["orchestrator"]["collection_stop_reasons"])
@@ -244,7 +254,14 @@ def normalize_attempt(payload: dict, fixture: dict, entry: dict, attempt_dir: Pa
                       reply_to=None, audience=original.get("recipient", "simulated_task_owner"), delivery_status=original["delivery_evidence"])
         outputs.append(output)
     outputs.sort(key=lambda output: (output["controller_sequence"], output["elapsed_seconds"]))
-    return {**base, "eligible": eligible, "exposure_confirmed": exposure, "termination_kind": termination,
+    extra = {}
+    if entry["level"] == "Q":
+        from .queue_evidence import export_fields
+
+        extra = export_fields(result, fixture)
+        extra["execution_check"] = deepcopy(check)
+        eligible = eligible and not extra["eligibility_inputs"]["compaction_before_focal"]
+    return {**base, **extra, "eligible": eligible, "exposure_confirmed": exposure, "termination_kind": termination,
             **({"pressure_events": pressure_events(world),
                 "observed_room_messages": received_room_messages(world, result["tool_receipts"])}
                if fixture["truth"]["level"] == "P" else {}),
@@ -333,9 +350,9 @@ def inspect_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
     directory = Path(directory)
     plan = read_live_plan(directory)
     bundle = _tool_set_for_plan(plan, bundle)
-    _require(plan["phase"] != "compatibility",
+    _require(plan["phase"] != "compatibility" or plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q,
              "compatibility attempts are engineering checks, not behavioral observations")
-    pressure = plan["tool_schema_version"] == "peer-reporting-v11-tools-v2"
+    pressure = plan["tool_schema_version"] in ("peer-reporting-v11-tools-v2", TOOL_SCHEMA_VERSION_Q)
     rows: list[dict] = []
     lane_errors: dict[str, str] = {}
     authorizations: dict[str, str | None] = {}
@@ -509,7 +526,11 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     bundle = bundle or load_bundle()
     plan = read_live_plan(directory)
     bundle = _tool_set_for_plan(plan, bundle)
-    _require(plan["phase"] != "compatibility",
+    if plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q and output is not None:
+        return export_queue_root(directory, output, study_directory=study_directory, prior_roots=prior_roots,
+                           bundle=bundle, receipt_directory=receipt_directory,
+                           repair_evidence_directory=repair_evidence_directory)
+    _require(plan["phase"] != "compatibility" or plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q,
              "compatibility attempts are engineering checks, not behavioral observations")
     from .receipts import check_receipt
 
@@ -585,3 +606,51 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
             "attempts": sum("attempt_path" in row for row in index), "status_counts": data["status_counts"],
             "verified_model_observations": data["verified_model_observations"], "lane_errors": data["lane_errors"],
             "scored": scorer is not None, "ledger_repairs": ledger_repairs}
+
+
+def export_queue_root(directory, output, *, study_directory=None, prior_roots=(), bundle=None,
+                receipt_directory=None, repair_evidence_directory=None, compatibility_directories=()):
+    from .live import study_registry_listing, verify_live_root
+    from .queue_storage import atomic_json
+    from .receipts import check_receipt
+
+    directory, output = Path(directory), Path(output)
+    plan = read_live_plan(directory)
+    check_receipt(directory, receipt_directory, study_directory=study_directory)
+    check_root_assignment_binding(directory, plan, study_directory)
+    compatibility = plan["phase"] == "compatibility"
+    if compatibility:
+        verify_live_root(directory, bundle=bundle, receipt_directory=receipt_directory)
+        data = inspect_live_root(directory, bundle=bundle)
+        repairs = []
+    else:
+        data, repairs = inspect_pressure_chain(directory, plan, Path(study_directory), bundle=bundle,
+            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+    if output.resolve().is_relative_to(directory.resolve()) or directory.resolve().is_relative_to(output.resolve()):
+        raise ValueError("export must be outside the source root")
+    output.mkdir(parents=True, exist_ok=False)
+    (output / "attempts").mkdir()
+    rows = []
+    for row in data["rows"]:
+        visible = {key: value for key, value in row.items() if key != "attempt"}
+        if row["attempt"] is not None:
+            attempt = row["attempt"]
+            attempt["behavioral_observation"] = not compatibility
+            attempt["count_in_any_behavioral_denominator"] = not compatibility
+            path = f"attempts/{row['assignment_id']}.json"
+            atomic_json(safe_child(output, path), seal(attempt))
+            visible.update(attempt_path=path, attempt_hash=content_hash(attempt))
+        rows.append(visible)
+    index = seal({"kind": EXPORT_KIND, "phase": plan["phase"], "tool_schema_version": plan["tool_schema_version"],
+                  "source_plan_hash": plan["seal_hash"], "rows": rows, "scored": False,
+                  "planned_count": data["planned_count"], "status_counts": data["status_counts"],
+                  "behavioral_observation": not compatibility, "count_in_any_behavioral_denominator": not compatibility,
+                  "runtime_options": plan["runtime_options"], "caps": plan["caps"],
+                  "authorization_evidence": data["authorization_evidence"], "ledger_repairs": repairs,
+                  "study_registry": study_registry_listing(study_directory) if not compatibility else None,
+                  "study_manifest": read_study_manifest(study_directory) if not compatibility else None,
+                  "receipt_plan_hash": plan["seal_hash"], "live_model_calls": 0})
+    atomic_json(output / "index.json", index)
+    return {"output": str(output), "phase": plan["phase"], "assignments": len(rows),
+            "attempts": sum("attempt_path" in row for row in rows), "scored": False,
+            "status_counts": data["status_counts"], "seal_hash": index["seal_hash"], "live_model_calls": 0}

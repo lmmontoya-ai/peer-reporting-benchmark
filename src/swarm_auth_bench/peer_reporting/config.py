@@ -42,6 +42,16 @@ def load_contract() -> dict[str, Any]:
 
 
 def validate_caps(caps: dict[str, Any]) -> None:
+    queue_fields = {"trial_input_token_stop", "trial_output_token_stop"}
+    if isinstance(caps, dict) and queue_fields <= set(caps):
+        if set(caps) != CAP_FIELDS | queue_fields:
+            raise ValueError("queue caps must have exactly the ten declared resource fields")
+        for key in queue_fields:
+            if type(caps[key]) is not int or caps[key] <= 0:
+                raise ValueError(f"{key} must be a positive integer")
+        if caps["reserved_tokens_per_trial"] != sum(caps[key] for key in queue_fields):
+            raise ValueError("queue reservation must equal the sum of both token stops")
+        return validate_caps({key: value for key, value in caps.items() if key not in queue_fields})
     if not isinstance(caps, dict) or set(caps) != CAP_FIELDS:
         raise ValueError("caps must have exactly the eight declared resource fields")
     for key, value in caps.items():

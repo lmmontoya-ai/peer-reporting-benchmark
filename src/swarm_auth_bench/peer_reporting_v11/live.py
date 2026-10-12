@@ -158,7 +158,8 @@ from .phase import (
     run_lanes,
     verify_lane_phase,
 )
-from .schemas import TOOL_SCHEMA_VERSION_P
+from .queue_protocol import QUEUE_FIELDS, QUEUE_LANES, QUEUE_OPTIONS_RECORD, result_body
+from .schemas import TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q
 
 TOP_PLAN_KIND = "peer_reporting_v11_live_plan"
 LIVE_PLAN_FILE = "live-plan.json"
@@ -295,6 +296,12 @@ def reviewed_runtime_factory(model: str, reasoning_effort: str) -> Any:
     return live_runtime.V11PeerRuntime(model=model, reasoning_effort=reasoning_effort)
 
 
+def queue_runtime_factory(model: str, reasoning_effort: str) -> Any:
+    from .queue_protocol import QUEUE_OPTIONS
+
+    return live_runtime.V11PeerRuntime(model=model, reasoning_effort=reasoning_effort, options=QUEUE_OPTIONS)
+
+
 async def manifest_preflight(runtime: Any, requested_model: str, caps: dict, *, reasoning_effort: str,
                              bundle: ProtocolBundle,
                              version_reader: Callable[[Any], Awaitable[str]] = read_codex_version) -> dict:
@@ -347,11 +354,11 @@ async def manifest_preflight(runtime: Any, requested_model: str, caps: dict, *, 
 def _tool_usable(result: dict, world: dict, name: str) -> bool:
     stored = any(request.get("name") == name and request.get("status") == "completed"
                  and isinstance(request.get("result"), dict)
-                 and request["result"].get("status") not in {None, "error", "deferred"}
+                 and result_body(request["result"]).get("status") not in {None, "error", "deferred"}
                  for request in world.get("requests") or [])
     delivered = any(receipt.get("tool") == name and receipt.get("success") is True
                     and isinstance(receipt.get("result"), dict)
-                    and receipt["result"].get("status") not in {None, "error", "deferred"}
+                    and result_body(receipt["result"]).get("status") not in {None, "error", "deferred"}
                     for receipt in result.get("tool_receipts") or [])
     return stored and delivered
 
@@ -375,14 +382,16 @@ def _transport_checks(result: dict, *, fixture: dict, entry: dict, preflight: di
         # The world's own durable record, not the adapter's echo of its argument.
         "world_mode_bound": (result.get("world_mode") == entry["world_mode"]
                              and world.get("world_mode") == entry["world_mode"]
-                             and world.get("max_tool_requests") == TOOL_REQUEST_CAP),
+                             and world.get("max_tool_requests") == (entry.get("max_tool_requests", 300)
+                                 if entry["level"] == "Q" else TOOL_REQUEST_CAP)),
         "reviewed_catalog": catalog.get("catalog_sha256") == reviewed_catalog(model)[1]["catalog_sha256"],
         "exact_tool_manifest": (result.get("tool_schema_version") == bundle.schema_version
                                 and result.get("tool_manifest_hash") == bundle.tool_manifest_hash
                                 and result.get("tool_descriptors_hash") == bundle.tool_descriptors_hash
                                 and result.get("wire_tool_specs_hash") == bundle.wire_tool_specs_hash),
         "world_bound_to_attempt": (world.get("trial_id") == attempt_id and world.get("packet_sha256")
-                                   == hashlib.sha256(packet.encode("utf-8")).hexdigest()),
+                                   == hashlib.sha256(packet.encode("utf-8")).hexdigest()
+                                   and (entry["level"] != "Q" or (world.get("queue") or {}).get("fixture") == fixture)),
         "initial_receipt_exact": (result.get("exposure_confirmed") is True and world.get("exposure_confirmed") is True
                                   and receipt.get("packet_hash") == content_hash(packet)),
         "queue_reconciled": result.get("queue_reconciled") is True and result.get("world_checkpoint") is not None,
@@ -468,6 +477,12 @@ def evaluate_qualification(result: dict | None, *, fixture: dict, entry: dict, p
     if not isinstance(result, dict):
         return {**base, "passed": False, "classification": "infrastructure_incomplete", "checks": {},
                 "tools_usable": {}, "failure_reasons": [f"observer_failed: {observer_error}"]}
+    if fixture["parameters"]["level"] == "Q":
+        from .queue_checks import evaluate_qualification as evaluate_queue_qualification
+
+        return evaluate_queue_qualification(result, fixture=fixture, entry=entry, preflight=preflight,
+                                            bundle=bundle, orchestrator_failures=orchestrator_failures,
+                                            usage_settlement=usage_settlement, stop_reasons=stop_reasons)
     world = result.get("world_state") or {}
     checks = _transport_checks(result, fixture=fixture, entry=entry, preflight=preflight, bundle=bundle,
                                failures=orchestrator_failures)
@@ -535,7 +550,8 @@ def evaluate_transport(result: dict | None, *, fixture: dict, entry: dict, prefl
                 "classification": None}
     checks = _transport_checks(result, fixture=fixture, entry=entry, preflight=preflight, bundle=bundle,
                                failures=orchestrator_failures)
-    checks["valid_close"] = result.get("termination_kind") in VALID_CLOSE_KINDS
+    checks["valid_close"] = result.get("termination_kind") in VALID_CLOSE_KINDS or (
+        entry["level"] == "Q" and result.get("termination_kind") == "per_trial_limit")
     bounded = (usage_settlement == BOUNDED_USAGE and not checks["usage_known"]
                and all(checks[name] for name in CLEAN_CLOSE_CHECKS))
     reasons = [name for name, passed in checks.items() if not passed and not (bounded and name == "usage_known")]
@@ -560,6 +576,7 @@ def _binding_fields(bundle: ProtocolBundle, models: list[str]) -> dict:
         "tool_descriptors_hash": bundle.tool_descriptors_hash, "wire_tool_specs_hash": bundle.wire_tool_specs_hash,
         "catalogs": {model: reviewed_catalog(model)[1] for model in sorted(set(models))},
         "codex_version": SUPPORTED_CODEX_VERSION, "adapter_version": live_runtime.ADAPTER_VERSION,
+        **({"runtime_options": deepcopy(QUEUE_OPTIONS_RECORD)} if bundle.schema_version == TOOL_SCHEMA_VERSION_Q else {}),
     }
 
 
@@ -593,6 +610,9 @@ def _entry(row: dict, fixture: dict, instructions: str) -> dict:
            if row["level"] == "S" else {}),
         **({key: row[key] for key in ("difficulty", "block", "prevalence_k", "post_condition", "visibility", "pressure")}
            if row["level"] == "P" else {}),
+        **({**{key: row[key] for key in QUEUE_FIELDS}, "phase": row["phase"],
+            **({"arm_memberships": row["arm_memberships"]} if "arm_memberships" in row else {})}
+           if row["level"] == "Q" else {}),
     }
 
 
@@ -606,6 +626,11 @@ def _assemble(phase: str, revision: str, caps_record: dict, bundle: ProtocolBund
               selected_arms: list[str] | None = None) -> tuple[dict, dict, dict]:
     """Group entries into lanes, derive lane caps, and return (top plan, lane plans, fixtures)."""
     bundle = tools_for_levels(bundle, [entry["level"] for entry in entries])
+    if bundle.schema_version == TOOL_SCHEMA_VERSION_Q and phase in ("compatibility", "smoke", "screening"):
+        from .config import QUEUE_CAPS
+
+        if any(caps_record["trial"].get(key) != value for key, value in QUEUE_CAPS.items()):
+            raise ValueError("queue provisional caps differ from the protocol; an amendment is required")
     validate_identifier(revision, "revision")
     if selected_arms is not None:
         selected_arms = validate_arm_selection(phase, selected_arms)
@@ -657,7 +682,8 @@ def _assemble(phase: str, revision: str, caps_record: dict, bundle: ProtocolBund
         top["review_plan_hash"] = review_plan_hash
     elif review_plan_hash is not None:
         raise ValueError("only a collection plan binds a review plan")
-    return plain_json(top), lane_plans, plain_json(fixtures)
+    return plain_json(top), lane_plans, (deepcopy(fixtures) if bundle.schema_version == TOOL_SCHEMA_VERSION_Q
+                                       else plain_json(fixtures))
 
 
 def build_compatibility_plan(caps_record: dict, *, revision: str, bundle: ProtocolBundle | None = None,
@@ -666,7 +692,11 @@ def build_compatibility_plan(caps_record: dict, *, revision: str, bundle: Protoc
     bundle = require_v11_tools(bundle or load_bundle())
     caps_record = validate_caps_record(caps_record, require_frozen=False)
     bundle = bundle.tool_set(tool_schema_version or bundle.schema_version)
-    pressure = bundle.schema_version == TOOL_SCHEMA_VERSION_P
+    if bundle.schema_version == TOOL_SCHEMA_VERSION_Q:
+        from .queue_checks import compatibility_plan
+
+        return compatibility_plan(caps_record, revision=revision, bundle=bundle)
+    pressure = bundle.schema_version in (TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q)
     spec = COMPATIBILITY_FIXTURE_P if pressure else COMPATIBILITY_FIXTURE
     template = bundle.load_template(spec["template_id"])
     fixture = bundle.build_fixture(template, **{key: value for key, value in spec.items() if key != "template_id"})
@@ -712,7 +742,8 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
         if type(identifier) is not str or not ASSIGNMENT_ID.fullmatch(identifier) or identifier in seen:
             raise ValueError(f"assignment ID {identifier!r} is invalid or repeated")
         seen.add(identifier)
-        if row["split"] != phase or row["model"] not in MODELS or row["prompt_condition"] not in PROMPT_CONDITIONS:
+        expected_split = "calibration" if phase in ("screening", "gate", "main") else phase
+        if row["split"] != expected_split or row["model"] not in MODELS or row["prompt_condition"] not in PROMPT_CONDITIONS:
             raise ValueError(f"{identifier}: split, model, or prompt condition is invalid")
         validate_effort(row["effort"])
         validate_world_mode(row["world_mode"])
@@ -742,9 +773,19 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
         template = templates.get(row["template_id"])
         if template is None:
             template = templates[row["template_id"]] = bundle.load_template(row["template_id"])
+        if row["level"] == "Q":
+            if (row.get("phase") != phase or any(row.get(key) != parameters[key] for key in QUEUE_FIELDS)
+                    or (row["model"], row["effort"]) not in QUEUE_LANES
+                    or row["prompt_condition"] != "neutral" or row["world_mode"] != "normal"):
+                raise ValueError("queue assignment labels differ from the fixture or declared lanes")
         routing = ({"visibility": parameters["visibility"], "held_submissions": parameters["pressure"] == "P4"}
                    if row["level"] == "P" else {})
-        instructions = bundle.build_instructions(row["prompt_condition"], template, policy, **routing)
+        if row["level"] == "Q":
+            from .queue_text import build_instructions as queue_instructions
+
+            instructions = queue_instructions(template, policy)
+        else:
+            instructions = bundle.build_instructions(row["prompt_condition"], template, policy, **routing)
         if "instructions" in row and row["instructions"] != instructions:
             raise ValueError(f"{identifier}: sealed instructions differ from the frozen prompt builder")
         entries.append(_entry(row, fixture, instructions))
@@ -780,7 +821,7 @@ def check_assignment_binding(rows: list[dict], *, manifest: dict, source: dict, 
             raise EvidenceError(f"{identifier}: unknown or duplicate sealed-study assignment")
         seen.add(identifier)
         assignment = assignments[identifier]
-        if assignment["split"] != phase:
+        if assignment.get("phase", assignment["split"]) != phase:
             raise EvidenceError(f"{identifier}: assignment phase differs from sealed study")
         fixture = (fixtures or {}).get(assignment["fixture_id"])
         for key, expected in assignment.items():
@@ -816,10 +857,14 @@ def check_assignment_binding(rows: list[dict], *, manifest: dict, source: dict, 
 def check_execution_policy(plan: dict, lane_plans: dict[str, dict]) -> None:
     if canonical_json(plan["execution_policy"]) != canonical_json(EXECUTION_POLICY):
         raise EvidenceError("plan execution policy differs from the protocol")
+    if plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q and plan.get("runtime_options") != QUEUE_OPTIONS_RECORD:
+        raise EvidenceError("queue plan runtime options differ from the protocol")
     expected = {"continue_after_preflight_failure": plan["phase"] == "compatibility",
                 "unknown_usage_policy": EXECUTION_POLICY["unknown_usage_policy"],
                 "outcome_based_retries": False, "hard_provider_output_cap_verified": False}
     for identifier, lane_plan in lane_plans.items():
+        if plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q and lane_plan.get("runtime_options") != QUEUE_OPTIONS_RECORD:
+            raise EvidenceError("queue lane runtime options differ from the protocol")
         if any(canonical_json(lane_plan.get(key)) != canonical_json(value) for key, value in expected.items()):
             raise EvidenceError(f"lane {identifier} execution policy differs from the protocol phase policy")
 
@@ -828,7 +873,7 @@ def check_prerequisite_receipts(plan: dict, compatibility_directories: list[Path
                                 receipt_directory: Path | None) -> None:
     from .receipts import check_receipt
 
-    if plan["tool_schema_version"] != TOOL_SCHEMA_VERSION_P:
+    if plan["tool_schema_version"] not in (TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q):
         return
     expected = {entry["compatibility_plan_hash"]
                 for entry in plan["gate_evidence"].get("qualification", {}).values()}
@@ -849,7 +894,7 @@ def check_plan_assignment_binding(plan: dict, lane_plans: dict[str, dict], manif
         raise EvidenceError("plan caps differ from its sealed study")
     check_execution_policy(plan, lane_plans)
     if plan["phase"] == "collection" and plan.get("smoke_assignment_ids") != sorted(
-            row["assignment_id"] for row in manifest["assignments"] if row["split"] == "smoke"):
+            row["assignment_id"] for row in manifest["assignments"] if row.get("phase", row["split"]) == "smoke"):
         raise EvidenceError("plan smoke population differs from the sealed study")
     rows, seen_lanes = [], set()
     for lane in plan["lanes"]:
@@ -934,7 +979,7 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
         canonical = check_assignment_binding(rows, manifest=study_manifest, source=source, phase=phase,
                                              fixtures=fixtures)
     if phase == "collection" and study_manifest is not None:
-        expected_smoke = sorted(row["assignment_id"] for row in study_manifest["assignments"] if row["split"] == "smoke")
+        expected_smoke = sorted(row["assignment_id"] for row in study_manifest["assignments"] if row.get("phase", row["split"]) == "smoke")
         if sorted(smoke_assignment_ids or []) != expected_smoke:
             raise EvidenceError("plan smoke population differs from the sealed study")
     core = any(row["arm"] in CORE_ARMS for row in canonical)
@@ -1009,6 +1054,8 @@ def read_study_manifest(study_directory: Path) -> dict:
 
 def check_study_binding(manifest: dict, caps_record: dict, bundle: ProtocolBundle) -> None:
     """Spec 10: a plan must match its study's caps hash, tool manifest hash, and protocol ID."""
+    if manifest.get("protocol", {}).get("level") == "Q":
+        bundle = bundle.tool_set(TOOL_SCHEMA_VERSION_Q)
     differences = [name for name, expected in (("protocol_id", PROTOCOL_ID), ("caps_hash", content_hash(caps_record)),
                                                ("tool_manifest_hash", bundle.tool_manifest_hash))
                    if manifest.get(name) != expected]
@@ -1021,6 +1068,12 @@ def verify_sealed_study(study_directory: Path, caps_record: dict) -> dict:
     """Run the full study verification (rebuild and fixture verifier) through its public signature."""
     from . import collection, config, incidents
 
+    if read_study_manifest(study_directory).get("protocol", {}).get("level") == "Q":
+        from .queue_protocol import load_protocol
+        from .queue_templates import TEMPLATES
+
+        return collection.verify_study(Path(study_directory), protocol=load_protocol(),
+                                       templates=TEMPLATES, caps_record=caps_record)
     report = collection.verify_study(Path(study_directory), protocol=config.load_protocol(),
                                      templates=incidents.load_all_templates(), caps_record=caps_record)
     if report.get("valid") is not True:
@@ -1032,7 +1085,7 @@ def load_study(study_directory: Path, phase: str) -> tuple[list[dict], dict[str,
     """Read one phase's rows and fixtures from a sealed v1.1 study manifest (P1 manifest shape)."""
     directory = Path(study_directory)
     manifest = read_study_manifest(directory)
-    rows = [deepcopy(row) for row in manifest["assignments"] if row.get("split") == phase]
+    rows = [deepcopy(row) for row in manifest["assignments"] if row.get("phase", row.get("split")) == phase]
     fixtures = {}
     for row in rows:
         reference = manifest["fixtures"][row["fixture_id"]]
@@ -1215,7 +1268,8 @@ def checked_pressure_roots(study_directory: Path, *,
                 if identifier not in fixtures:
                     stored = read_sealed(safe_child(study_directory, manifest["fixtures"][identifier]["path"]))
                     fixtures[identifier] = _plain(stored)
-        phases = {study_assignments[assignment["entry_id"]]["split"] for assignment in entries}
+        phases = {study_assignments[assignment["entry_id"]].get("phase",
+                  study_assignments[assignment["entry_id"]]["split"]) for assignment in entries}
         if len(phases) != 1:
             raise EvidenceError("P root assignments require one sealed-study phase")
         canonical_phase = phases.pop()
@@ -1422,7 +1476,7 @@ def study_provider_pauses(study_directory: Path, *, _check: bool = True,
                     expected = {key: value for key, value in pause.items() if key != "recovered"}
                     if record is not None and record["pause"] != expected:
                         raise EvidenceError(f"the provider pause of {pause['attempt_id']} is not recorded in the study as journaled")
-                if plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_P:
+                if plan["tool_schema_version"] in (TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q):
                     evidenced = {pause["attempt_id"] for pause in pauses}
                     if any(record["plan_hash"] == identity and record["pause"]["lane_id"] == lane["lane_id"]
                            and attempt not in evidenced for attempt, record in records.items()):
@@ -1537,7 +1591,7 @@ def reconcile_study_pauses(study_directory: Path, plan: dict, *, wall_clock: Cal
                         if retained is not None and retained != pause:
                             raise EvidenceError("retained attempt pause differs from its journaled settlement")
                         retained = pause
-                    if root_plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_P and retained is None:
+                    if root_plan["tool_schema_version"] in (TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q) and retained is None:
                         raise EvidenceError("v2 pause settlement lacks journaled timing and count evidence")
                     settled[identifier] = (reason, sequence, retained)
                 evidence[claim["plan_hash"]][lane["lane_id"]] = (archived, settled)
@@ -1828,7 +1882,7 @@ def validate_amendment(record: Any, manifest: dict) -> dict:
     if record["action"] != AMENDMENT_ACTION:
         raise ValueError(f"the only amendment action is {AMENDMENT_ACTION}")
     attempts = record["attempt_ids"]
-    smoke = {row["assignment_id"] + ATTEMPT_SUFFIX for row in manifest["assignments"] if row.get("split") == "smoke"}
+    smoke = {row["assignment_id"] + ATTEMPT_SUFFIX for row in manifest["assignments"] if row.get("phase", row.get("split")) == "smoke"}
     if (type(attempts) is not list or not attempts or attempts != sorted(set(attempts))
             or any(type(attempt) is not str or attempt not in smoke for attempt in attempts)):
         raise ValueError("an amendment lists sorted, unique attempt IDs of this study's smoke rows")
@@ -1983,7 +2037,7 @@ def prior_root_ledger(prior_roots: list[Path] | tuple, *, phase: str, source: di
     abandoned must be named."""
     records, consumed_all, seen = [], set(), set()
     entries = (checked_pressure_registrations(study_directory, receipt_directory=receipt_directory)
-               if bundle is not None and bundle.schema_version == TOOL_SCHEMA_VERSION_P
+               if bundle is not None and bundle.schema_version in (TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q)
                else registered_roots(study_directory))
     registrations = {entry["plan_hash"]: entry for entry in entries}
     for root in prior_roots:
@@ -2146,7 +2200,7 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
             stack.enter_context(_exclusive(study_directory / STUDY_REGISTRY / REGISTRY_LOCK))
             sealed = {record["plan_hash"]: record for record in ledger["prior_roots"]}
             entries = (checked_pressure_registrations(study_directory, receipt_directory=receipt_directory)
-                       if top["tool_schema_version"] == TOOL_SCHEMA_VERSION_P
+                       if top["tool_schema_version"] in (TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q)
                        else registered_roots(study_directory))
             registrations = {entry["plan_hash"]: entry for entry in entries}
             for root in prior_roots:
@@ -2192,7 +2246,12 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
         directory.mkdir(parents=True, exist_ok=False)
         (directory / "fixtures").mkdir()
         for fixture_id, fixture in fixtures.items():
-            atomic_json(safe_child(directory, f"fixtures/{fixture_id}.json"), seal(fixture))
+            if fixture["parameters"]["level"] == "Q":
+                from .queue_storage import atomic_json as queue_json
+
+                queue_json(safe_child(directory, f"fixtures/{fixture_id}.json"), seal(fixture))
+            else:
+                atomic_json(safe_child(directory, f"fixtures/{fixture_id}.json"), seal(fixture))
         for lane in top["lanes"]:
             if create_lane_phase(safe_child(directory, lane["path"]), lane_plans[lane["lane_id"]]) != lane["plan_hash"]:
                 raise EvidenceError(f"lane {lane['lane_id']} sealed under another hash")
@@ -2391,6 +2450,16 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
             parameters = fixture["parameters"]
             if entry["level"] != parameters["level"]:
                 raise EvidenceError(f"{entry['entry_id']}: tool-set level differs from its fixture")
+            if entry["level"] == "Q":
+                from .queue_checks import QUALIFIER_BLOCK as queue_qualifier
+                from .queue_text import build_instructions as queue_instructions
+
+                expected = queue_instructions(bundle.load_template(entry["template_id"]), plan["caps"]["trial"])
+                if plan["phase"] == "compatibility":
+                    expected += "\n\n" + queue_qualifier
+                if (any(entry.get(key) != parameters.get(key) for key in QUEUE_FIELDS)
+                        or entry["instructions"] != expected):
+                    raise EvidenceError("queue instructions or labels differ from the frozen builder")
             if entry["level"] == "P":
                 fields = ("difficulty", "block", "prevalence_k", "post_condition", "visibility", "pressure")
                 if any(entry.get(key) != parameters[key] for key in fields):
@@ -2514,7 +2583,8 @@ def smoke_evidence(directory: Path, *, bundle: ProtocolBundle, source: dict,
                    smoke_assignment_ids: list[str] | tuple = (), study_directory: Path | None = None,
                    required_lanes: list[str] | tuple = (),
                        receipt_directory: Path | None = None,
-                       repair_evidence_directory: Path | None = None) -> tuple[dict | None, list[str]]:
+                       repair_evidence_directory: Path | None = None,
+                       compatibility_directories: list[Path] | tuple = ()) -> tuple[dict | None, list[str]]:
     """Spec 10: one finalized smoke root registered in this study directory, whose entries equal the study's smoke
     rows, every attempt archived and passed, or accepted by an approved amendment.
 
@@ -2530,7 +2600,7 @@ def smoke_evidence(directory: Path, *, bundle: ProtocolBundle, source: dict,
 
         check_receipt(directory, receipt_directory, study_directory=study_directory)
         report = verify_live_root(directory, bundle=bundle, study_directory=study_directory,
-            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+            compatibility_directories=compatibility_directories, receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
         if report["study_registration"]["state"] != "finalized":
             return None, [f"smoke: the smoke root's study registration is {report['study_registration']['state']}"]
         accepted = amended_attempts(report, study_amendments(study_directory))
@@ -2540,9 +2610,16 @@ def smoke_evidence(directory: Path, *, bundle: ProtocolBundle, source: dict,
     manifest = read_study_manifest(study_directory)
     if manifest["seal_hash"] != source.get("study_manifest_hash"):
         raise EvidenceError("smoke population belongs to another sealed study")
-    population = sorted(row["assignment_id"] for row in manifest["assignments"] if row["split"] == "smoke")
+    population = sorted(row["assignment_id"] for row in manifest["assignments"] if row.get("phase", row["split"]) == "smoke")
     if sorted(row["entry_id"] for row in rows) != population:
         return None, ["smoke: the smoke root's entries differ from the study's smoke rows"]
+    if plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q:
+        from .queue_checks import check_smoke_root
+
+        smoke = check_smoke_root(directory, study_directory=study_directory,
+                                  compatibility_directories=compatibility_directories, receipt_directory=receipt_directory)
+        if not smoke["passed"] or any(episode.get("resources", {}).get("caps_binding") for episode in smoke["episodes"]):
+            return None, ["smoke: queue checks or provisional cap check needs resolution before screening"]
     if report["cleanup_debt"]:
         return None, [f"smoke: attempts {report['cleanup_debt'][:5]} have unresolved cleanup debt"]
     valid = [row for row in rows if _row_valid(row)]
@@ -2589,7 +2666,7 @@ def check_phase_gates(phase: str, lanes: list[str], *, bundle: ProtocolBundle, s
                 "and client" for lane in missing] + (notes if missing else [])
     evidence: dict[str, Any] = {"qualification": {lane: qualification[lane] for lane in lanes
                                                   if lane in qualification}}
-    if phase == "collection":
+    if phase in ("collection", "screening"):
         if smoke_directory is None:
             failures.append("smoke: collection requires retained smoke evidence")
             evidence["smoke"] = None
@@ -2597,6 +2674,7 @@ def check_phase_gates(phase: str, lanes: list[str], *, bundle: ProtocolBundle, s
             smoke, smoke_failures = smoke_evidence(smoke_directory, bundle=bundle, source=source,
                                                    smoke_assignment_ids=smoke_assignment_ids,
                                                    study_directory=study_directory, required_lanes=lanes,
+                                                   compatibility_directories=compatibility_directories,
                                                        receipt_directory=receipt_directory,
                                                        repair_evidence_directory=repair_evidence_directory)
             failures += smoke_failures
@@ -2632,6 +2710,8 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
     unchanged and cover every lane the selected rows use. Nothing is written.
     """
     bundle = require_v11_tools(bundle or load_bundle())
+    if phase in ("gate", "main"):
+        raise ValueError("queue gate and main plans require the Q2b sizing decision builder")
     selected_arms = validate_arm_selection(validate_phase(phase), arms) if arms is not None else None
     if validate_phase(phase) == "compatibility":
         if pilot_decision is not None:
@@ -2696,7 +2776,7 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
         if exhausted:
             raise ValueError(f"every assignment of the selected arms {exhausted} is already consumed")
     smoke_ids = sorted(row["assignment_id"] for row in manifest["assignments"]
-                       if row.get("split") == "smoke") if phase == "collection" else None
+                       if row.get("phase", row.get("split")) == "smoke") if phase in ("collection", "screening") else None
     needed = sorted({lane_id(row["model"], row["effort"]) for row in rows})
     gates = check_phase_gates(phase, needed, bundle=bundle, source=source,
                               compatibility_directories=compatibility_directories, smoke_directory=smoke_directory,
