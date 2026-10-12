@@ -358,6 +358,7 @@ async def test_cancelled_close_kills_process_cancels_tasks_removes_home_and_clea
     home = runtime._home
     proc = await asyncio.create_subprocess_exec(sys.executable, "-c", "import time; time.sleep(60)",
                                                 start_new_session=os.name != "nt")
+    runtime._bind_process_handle(proc)
     runtime._proc = proc
     runtime._reader_task = asyncio.create_task(asyncio.Event().wait())
     background = asyncio.create_task(asyncio.Event().wait())
