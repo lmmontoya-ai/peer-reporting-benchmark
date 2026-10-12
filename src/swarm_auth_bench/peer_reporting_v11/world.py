@@ -56,6 +56,13 @@ def _error(code: str) -> dict[str, str]:
 
 def _validate_response(name: str, response: dict[str, Any],
                        schema_version: str = TOOL_SCHEMA_VERSION) -> dict[str, Any]:
+    if schema_version == "peer-reporting-v11-tools-v3":
+        from .queue_schema import validate_output as validate_queue_output
+
+        if "result" not in response:
+            response = {"result": response, "room_events": []}
+        validate_queue_output(name, response)
+        return response
     if name in OUTPUT_SCHEMAS:
         validate_output(name, response, schema_version=schema_version)
     else:
@@ -98,6 +105,11 @@ def _audit_number(value: int | float | None, context: str) -> None:
 
 
 def _audit_state_structure(state: Any) -> None:
+    if type(state) is dict and state.get("level") == "Q":
+        from .queue_world import validate_receipts
+
+        validate_receipts(state)
+        return
     nullable_integer = (int, type(None))
     nullable_text = (str, type(None))
     number = (int, float)
@@ -483,6 +495,13 @@ class V11World:
     ``dispatch`` results may be delivered to the observer.
     """
 
+    def __new__(cls, fixture, *args, **kwargs):
+        if cls is V11World and (fixture.get("parameters") or {}).get("level") == "Q":
+            from .queue_world import QueueWorld
+
+            return object.__new__(QueueWorld)
+        return object.__new__(cls)
+
     def __init__(self, fixture: dict[str, Any], directory: Path, trial_id: str = "offline-trial",
                  max_tool_requests: int = 32, world_mode: str = "normal") -> None:
         validate_schema(trial_id, ID)
@@ -580,7 +599,9 @@ class V11World:
 
     def _atomic_write(self, state: dict[str, Any]) -> None:
         """The only storage operation, also the failure-injection seam for tests."""
-        encoded = canonical_json({"state": state, "state_hash": content_hash(state)}) + "\n"
+        envelope = {"state": state, "state_hash": content_hash(state)}
+        encoded = (json.dumps(envelope, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+                   if state.get("level") == "Q" else canonical_json(envelope)) + "\n"
         descriptor, filename = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=self.directory)
         temporary = Path(filename)
         try:

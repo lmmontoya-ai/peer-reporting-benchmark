@@ -103,7 +103,7 @@ def test_every_allowed_combination_builds_and_verifies(template_id, cell):
     block, variant, k, visibility, pressure = cell
     f = fixture(template_id, block=block, variant=variant, prevalence_k=k, visibility=visibility, pressure=pressure)
     assert verify_fixture(f, load_template(template_id)) == []
-    assert f["provenance"]["specification_revision"] == 6
+    assert f["provenance"]["specification_revision"] == SPECIFICATION_REVISION
     assert all(f["parameters"][key] is None for key in
                ("difficulty", "post_condition", "near_miss_type", "compound_type"))
     lookup, registry = record(f, "principal_approval_lookup"), record(f, "principal_registry_export")

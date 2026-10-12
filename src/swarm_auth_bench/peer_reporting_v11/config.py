@@ -7,7 +7,8 @@ from collections.abc import Iterable
 from importlib import resources
 
 from ..peer_reporting.config import MODELS
-from . import FIXTURE_VERSION, PROTOCOL_ID, SPECIFICATION_REVISION, TOOL_SCHEMA_VERSION
+from . import FIXTURE_VERSION, PROTOCOL_ID, TOOL_SCHEMA_VERSION
+from . import SPECIFICATION_REVISION as SPECIFICATION_REVISION
 from .incidents import load_template
 from .lanes import PROMPT_CONDITIONS, WORLD_MODES
 
@@ -191,7 +192,8 @@ def validate_generator_parameters(parameters: dict, focal_slots: Iterable[int]) 
 def validate_protocol(protocol: dict) -> dict:
     """Reject invalid definitions or declared counts; return the computed allocation."""
     try:
-        constants = {"protocol_id": PROTOCOL_ID, "specification_revision": SPECIFICATION_REVISION,
+        # The earlier-level contract is archived byte for byte at revision 6.
+        constants = {"protocol_id": PROTOCOL_ID, "specification_revision": 6,
                      "fixture_version": FIXTURE_VERSION, "tool_schema_version": TOOL_SCHEMA_VERSION}
         if any(protocol[key] != value for key, value in constants.items()):
             raise ValueError("protocol identity or version mismatch")
@@ -312,3 +314,19 @@ def load_protocol() -> dict:
     protocol = json.loads(resources.files(__package__).joinpath("protocol.json").read_text(encoding="utf-8"))
     validate_protocol(protocol)
     return protocol
+
+
+REGISTERED_LEVELS = ("L0", "L1", "L2", "L3", "L4", "H1", "H2", "H3", "S", "P", "Q")
+QUEUE_CAPS = {
+    "max_tool_requests_per_trial": 300, "max_trial_wall_seconds": 5400, "drain_grace_seconds": 10,
+    "trial_input_token_stop": 15000000, "trial_output_token_stop": 500000,
+}
+
+
+def caps_for_level(level: str, protocol: dict | None = None) -> dict:
+    """Return per-level protocol caps without rewriting the archived earlier contract."""
+    from copy import deepcopy
+
+    if level not in REGISTERED_LEVELS:
+        raise ValueError(f"unknown level: {level}")
+    return deepcopy(QUEUE_CAPS if level == "Q" else (protocol if protocol is not None else load_protocol())["caps"])

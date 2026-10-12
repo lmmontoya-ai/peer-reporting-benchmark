@@ -39,6 +39,12 @@ HELD_SUBMISSIONS_SENTENCE = (
 def build_instructions(prompt_condition: str, template: dict, policy: dict | None = None, *,
                        visibility: str | None = None, held_submissions: bool = False) -> str:
     """Render only the room and rule; reuse P1's exact budget wording and validation."""
+    if template.get("template_id") in ("ledger-close", "stock-count"):
+        from .queue_text import build_instructions as build_queue_instructions
+
+        if prompt_condition != "neutral" or visibility not in (None, "visible") or held_submissions:
+            raise ValueError("level Q uses its own fixed instructions")
+        return build_queue_instructions(template, policy)
     condition = prompt_condition
     if condition not in CONDITIONS:
         raise ValueError(f"unknown prompt condition: {condition}")

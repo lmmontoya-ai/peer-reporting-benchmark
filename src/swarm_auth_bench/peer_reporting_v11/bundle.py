@@ -14,11 +14,13 @@ from typing import Any, Callable
 
 from ..events import content_hash
 from . import TOOL_SCHEMA_VERSION
-from .schemas import TOOL_SCHEMA_VERSION_P
+from .schemas import TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q
 
 TOOL_NAMES = ("read_channel", "send_message", "read_record", "report_incident", "submit_task", "agent_finish")
 MAX_OPERATION_IDS = 32
 READ_CHANNEL_MAX_LIMIT = 128
+QUEUE_TOOL_NAMES = ("next_item", "read_item", "submit_item", "lookup_grant", "read_channel",
+                    "send_message", "report_incident", "agent_finish")
 
 
 @dataclass(frozen=True, eq=False)
@@ -40,11 +42,23 @@ class ProtocolBundle:
 
     def tool_set(self, version: str) -> ProtocolBundle:
         """Select archived descriptors, schemas, hashes and wire tools by version."""
-        if version not in {TOOL_SCHEMA_VERSION, TOOL_SCHEMA_VERSION_P}:
+        if version not in {TOOL_SCHEMA_VERSION, TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q}:
             raise ValueError(f"unknown tool schema version: {version}")
         if version == self.schema_version:
             return require_v11_tools(self)
         from . import schemas
+
+        if version == TOOL_SCHEMA_VERSION_Q:
+            from . import queue_schema, queue_templates, queue_world
+
+            return require_v11_tools(replace(
+                self, schema_version=version, input_schemas=deepcopy(queue_schema.INPUT_SCHEMAS_Q),
+                output_schemas=deepcopy(queue_schema.OUTPUT_SCHEMAS_Q),
+                tool_descriptors=deepcopy(queue_schema.TOOL_DESCRIPTORS_Q), validate_input=queue_schema.validate_input,
+                world_factory=queue_world.QueueWorld, load_template=queue_templates.load_template,
+            ))
+        if self.schema_version == TOOL_SCHEMA_VERSION_Q:
+            return load_bundle().tool_set(version)
 
         return require_v11_tools(replace(
             self, schema_version=version, input_schemas=deepcopy(schemas.INPUT_SCHEMAS),
@@ -100,6 +114,13 @@ class ProtocolBundle:
 def require_v11_tools(bundle: ProtocolBundle) -> ProtocolBundle:
     """Refuse any tool set except the six v1.1 tools of spec section 7."""
     failures = []
+    if bundle.schema_version == TOOL_SCHEMA_VERSION_Q:
+        from .queue_schema import INPUT_SCHEMAS_Q, OUTPUT_SCHEMAS_Q, TOOL_DESCRIPTORS_Q
+
+        if (bundle.tool_names != QUEUE_TOOL_NAMES or bundle.input_schemas != INPUT_SCHEMAS_Q
+                or bundle.output_schemas != OUTPUT_SCHEMAS_Q or bundle.tool_descriptors != TOOL_DESCRIPTORS_Q):
+            raise ValueError("v1.1 tool manifest binding failed: queue tools differ from v3")
+        return bundle
     if bundle.schema_version not in {TOOL_SCHEMA_VERSION, TOOL_SCHEMA_VERSION_P}:
         failures.append(f"unknown tool schema version {bundle.schema_version!r}")
     names = bundle.tool_names
@@ -128,6 +149,10 @@ def require_v11_tools(bundle: ProtocolBundle) -> ProtocolBundle:
 def tools_for_levels(bundle: ProtocolBundle, levels: Any) -> ProtocolBundle:
     """P-A1: select v2 for an all-P root and refuse a mixed root."""
     levels = set(levels)
+    if "Q" in levels:
+        if levels != {"Q"}:
+            raise ValueError("a live root may not mix level Q with other levels")
+        return bundle.tool_set(TOOL_SCHEMA_VERSION_Q)
     if "P" in levels and levels != {"P"}:
         raise ValueError("a live root may not mix level P with other levels")
     return bundle.tool_set(TOOL_SCHEMA_VERSION_P if levels == {"P"} else TOOL_SCHEMA_VERSION)
