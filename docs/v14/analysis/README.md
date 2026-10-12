@@ -98,11 +98,10 @@ limits from section 12. No equivalence claim is made at the world level. A Firth
 rank, convergence or profile failure is explicit, never replaced with an
 ordinary logistic or Wald result.
 
-## Interpretation and proposed clarifying text
+## Normative clarification Q-C7
 
-The implementation makes the following choices where the spec does not give an
-interface or resolve a version/completion detail. These statements are proposals
-for the spec, not changes to it.
+[Q-C7 in the spec](../spec.md) adopts the following population, completion,
+version and coding rules. The implementation follows them.
 
 - "The analysis reads planned worlds and study lanes from receipt-verified gate
   and main root exports. Candidate study memberships do not define its population."
@@ -124,6 +123,14 @@ for the spec, not changes to it.
   Version-bound episode packets contribute only to their owner-resolution
   version. Room support is the descriptive back-up code."
 
+Q-C7 also requires secondary and attention comparisons to report effects,
+intervals and labelled unadjusted p-values without reject or accept decisions.
+Only C1, C1-eq and the C2 gate carry decisions. The CLI protects both report
+destinations against all input evidence directories and bound files, following
+packet resolutions, retained submissions and correction ancestors. It compares
+resolved paths and existing file identities to refuse relative, case and link
+aliases before writing either report.
+
 ## Targeted tests
 
 `tests/v11/test_queue_analysis.py` covers hand-checked paired tables, binomial
@@ -131,6 +138,8 @@ intervals, TOST, Holm, Firth fits/profile intervals, missing resolutions,
 pair-weighting, world convolution against brute force and an 80-world case,
 ITT/reached gate effects, sensitivity exclusions, completion, agreement,
 executed attention memberships, descriptive timing and Q-C6 usage.
+Regression checks cover both output destinations for directly and indirectly
+bound evidence, path aliases, and decision-free secondary and attention reports.
 
 Its fake-transport integration creates small registered gate/main roots using
 Q2a's archive and receipt machinery, then Q2b's exports, scores, packets, retained
