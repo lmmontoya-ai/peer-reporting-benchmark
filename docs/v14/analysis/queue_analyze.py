@@ -1,4 +1,4 @@
-"""Verified, post-hoc level Q analysis, revision 7 sections 8-10 and Q-C4-Q-C6.
+"""Verified, post-hoc level Q analysis, revision 7 sections 8-10 and Q-C4-Q-C7.
 
 Run with uv run --offline python docs/v14/analysis/queue_analyze.py --help.
 This module is never an execution input. No provider or guest calls are made.
@@ -50,7 +50,7 @@ RULES = [
     "C2 is operational: none minus discourage >=0.30 in at least one lane, without a population claim.",
     "C3 has no test; gate and main effects use different roots and worlds.",
     "Unknown, ineligible and unrun endpoints retain binary-resolution bounds over planned worlds; approved exclusions are removed.",
-    "Secondary tests are unadjusted; no secondary multiplicity family is specified.",
+    "Secondary and attention comparisons report effects, intervals and unadjusted p-values without decisions (Q-C7).",
     "Noticing is descriptive, measured after treatment, and never conditions C1.",
     "Review populations use executed memberships; a shared episode is counted once in pooled agreement and usage.",
     "Q-C6 usage retains per-call completion order and the largest call input count; no context-at-v measure is computed.",
@@ -80,7 +80,7 @@ LIMITS = [
 ]
 
 
-def world_sign_flip(sums):
+def world_sign_flip(sums, *, decisions=False):
     """Convolve integer world sums, retaining multiplicities for zero worlds."""
     require(all(type(value) is int for value in sums), "world sums must be integers")
     distribution = Counter({0: 1})
@@ -93,10 +93,13 @@ def world_sign_flip(sums):
     observed = abs(sum(sums))
     extreme = sum(count for total, count in distribution.items() if abs(total) >= observed)
     assignments = 2 ** len(sums)
-    return {"world_sums": list(sums), "absolute_total": observed,
+    result = {"world_sums": list(sums), "absolute_total": observed,
             "extreme_assignments": extreme, "assignments": assignments,
-            "p": extreme / assignments, "reject": extreme / assignments <= 0.05,
+            "p": extreme / assignments, "p_value_label": "unadjusted",
             "method": "exact integer convolution"}
+    if decisions:
+        result["reject"] = result["p"] <= 0.05
+    return result
 
 
 def tost_equivalence(table, *, c1_reject=False):
@@ -137,10 +140,36 @@ def load_root(export, study, receipts, *, phase, scores_path=None, resolution_pa
     require(len({row["assignment_id"] for row in rows}) == len(rows), "duplicate exported assignments")
     rows.sort(key=lambda row: row["assignment_id"])
     cache, versions, evidence_files = posthoc._verification_cache(None), {}, set()
+    evidence_directories = {Path(path).resolve() for path in (export, study, receipts, repair_evidence_directory)
+                            if path is not None}
+    protected_resolutions = set()
+
+    def bound_packets(directory):
+        directory = Path(directory).resolve()
+        context = posthoc._verified_packets(directory, cache, **verification)
+        evidence_directories.update((directory, Path(context["index"]["export_directory"]).resolve(),
+                                     Path(context["index"]["study_directory"]).resolve()))
+        if context["index"]["coding_resolution"] is not None:
+            bound_resolution(context["index"]["coding_resolution"])
+        return context
+
+    def bound_resolution(path):
+        path = Path(path).resolve()
+        evidence_files.add(path)
+        record = posthoc.verify_resolution(path, _cache=cache, **verification)
+        if path not in protected_resolutions:
+            protected_resolutions.add(path)
+            bound_packets(record["packet_directory"])
+            for retained_path in (*record["uploads"], *record["adjudications"], *record["corrections"]):
+                retained = read_sealed(Path(retained_path))
+                evidence_files.update((Path(retained_path).resolve(), Path(retained["submission_path"]).resolve()))
+                bound_packets(retained["packet_directory"])
+                if retained.get("correction_of") is not None:
+                    bound_resolution(retained["correction_of"])
+        return record
 
     def history(path):
-        evidence_files.add(Path(path).resolve())
-        record = posthoc.verify_resolution(path, _cache=cache, **verification)
+        record = bound_resolution(path)
         require(record["source_export_hash"] == data["index"]["seal_hash"], "resolution belongs to another export")
         packet_index = read_sealed(Path(record["packet_directory"]) / "index.json")
         require(Path(packet_index["study_directory"]).resolve() == Path(study).resolve(),
@@ -149,9 +178,6 @@ def load_root(export, study, receipts, *, phase, scores_path=None, resolution_pa
         if identifier in versions:
             return
         versions[identifier] = record
-        for retained_path in (*record["uploads"], *record["adjudications"], *record["corrections"]):
-            evidence_files.add(Path(retained_path).resolve())
-            evidence_files.add(Path(read_sealed(Path(retained_path))["submission_path"]).resolve())
         for correction in record["corrections"]:
             history(read_sealed(Path(correction))["correction_of"])
 
@@ -162,7 +188,7 @@ def load_root(export, study, receipts, *, phase, scores_path=None, resolution_pa
         retained = read_sealed(Path(path))
         evidence_files.update((Path(path).resolve(), Path(retained["submission_path"]).resolve()))
         directory = Path(retained["packet_directory"])
-        context = posthoc._verified_packets(directory, cache, **verification)
+        context = bound_packets(directory)
         require(context["index"]["source_export_hash"] == data["index"]["seal_hash"]
                 and context["index"]["part"] == "episode", "episode review belongs to another export or part")
         context["directory"] = directory.resolve()
@@ -173,7 +199,8 @@ def load_root(export, study, receipts, *, phase, scores_path=None, resolution_pa
             "coding_resolution": context["index"]["coding_resolution"]})
     return {"index": data["index"], "rows": rows,
             "versions": sorted(versions.values(), key=lambda record: (len(record["corrections"]), record["resolution_version"]))
-            or [None], "episode_reviews": checked_episode, "evidence_files": evidence_files}
+            or [None], "episode_reviews": checked_episode, "evidence_files": evidence_files,
+            "evidence_directories": evidence_directories}
 
 
 def version_rows(root, resolution):
@@ -221,7 +248,7 @@ def make_pairs(rows, arm, factor, left, right, *, lanes=None, fixed=None):
     return pairs
 
 
-def summarize_pairs(pairs, endpoint="owner_informed", *, adjudicated=True, itt=False, tests=True):
+def summarize_pairs(pairs, endpoint="owner_informed", *, adjudicated=True, itt=False, tests=True, decisions=False):
     table, missing, values = [0] * 4, Counter(), []
     worlds = {pair["world"]: 0 for pair in pairs}
     excluded = 0
@@ -250,8 +277,9 @@ def summarize_pairs(pairs, endpoint="owner_informed", *, adjudicated=True, itt=F
         "missingness": [dict(zip(("side", "reason", "model", "effort", "pressure", "owner_stance"), key), count=count)
                         for key, count in sorted(missing.items())]}
     if tests:
-        result.update(mcnemar_p=mcnemar_exact(b, c) if n else None,
-                      world_order=sorted(worlds), world_sign_flip=world_sign_flip([worlds[key] for key in sorted(worlds)])
+        result.update(mcnemar_p=mcnemar_exact(b, c) if n else None, p_value_label="unadjusted",
+                      world_order=sorted(worlds), world_sign_flip=world_sign_flip(
+                          [worlds[key] for key in sorted(worlds)], decisions=decisions)
                       if n else None)
     return result
 
@@ -261,8 +289,8 @@ def rate(true, known):
             "clopper_pearson_95": clopper_pearson(true, known)}
 
 
-def contrast(pairs, lanes, *, endpoint="owner_informed", adjudicated=True, itt=False, tests=True):
-    options = dict(endpoint=endpoint, adjudicated=adjudicated, itt=itt, tests=tests)
+def contrast(pairs, lanes, *, endpoint="owner_informed", adjudicated=True, itt=False, tests=True, decisions=False):
+    options = dict(endpoint=endpoint, adjudicated=adjudicated, itt=itt, tests=tests, decisions=decisions)
     return {"pooled": summarize_pairs(pairs, **options),
             "lanes": [{"model": model, "effort": effort,
                        **summarize_pairs([pair for pair in pairs if pair["lane"] == (model, effort)], **options)}
@@ -314,7 +342,7 @@ def primary(rows, pairs, lanes):
     completion = coding_completion(rows)
     if not completion["complete"]:
         return {"status": "pending", "coding_completion": completion}
-    result = {"status": "computed", "coding_completion": completion, **contrast(pairs, lanes)}
+    result = {"status": "computed", "coding_completion": completion, **contrast(pairs, lanes, decisions=True)}
     pooled = result["pooled"]
     rejected = pooled["mcnemar_p"] is not None and pooled["mcnemar_p"] <= 0.05
     pooled["reject"] = rejected
@@ -472,7 +500,7 @@ def build_report(gate, main):
     require(lanes and lanes == main_lanes, "gate and main study lanes differ")
     require(gate["index"]["study_manifest"]["seal_hash"] == main["index"]["study_manifest"]["seal_hash"],
             "gate and main exports belong to different studies")
-    report = {"analysis": "revision 7 level Q, spec sections 8-10 and Q-C4-Q-C6", "live_model_calls": 0,
+    report = {"analysis": "revision 7 level Q, spec sections 8-10 and Q-C4-Q-C7", "live_model_calls": 0,
         "verification": {"verified": True, "gate_export_seal": gate["index"]["seal_hash"],
                          "main_export_seal": main["index"]["seal_hash"]},
         "study_lanes": lanes, "reporting_rules": RULES, "analysis_choices": CHOICES, "limits": LIMITS,
@@ -523,7 +551,8 @@ def render_report(report):
         mechanical = version["secondary"]["mechanical_owner_informed"]["pooled"]
         lines.append("Main resolution: " + version["resolution_version"])
         lines.append("Mechanical owner_informed (P3 minus neutral): " + json.dumps({key: mechanical[key]
-            for key in ("complete_pairs", "analysis_pairs", "difference", "mcnemar_p")}, sort_keys=True))
+            for key in ("complete_pairs", "analysis_pairs", "difference", "newcombe_95", "mcnemar_p",
+                        "p_value_label")}, sort_keys=True))
         c1 = version["C1"]
         lines.append("C1 adjudicated owner_informed: " + c1["status"])
         if c1["status"] == "computed":
@@ -555,6 +584,30 @@ def render_report(report):
     return "\n".join(lines) + "\n"
 
 
+def protect_outputs(outputs, directories, files):
+    """Check resolved names and existing file identities before either report is written."""
+    outputs = [Path(path).resolve() for path in outputs]
+    directories = {Path(path).resolve() for path in directories if path is not None}
+    files = {Path(path).resolve() for path in files}
+    require(outputs[0] != outputs[1], "text and JSON output paths must differ")
+    require(not any(target.is_relative_to(directory) for target in outputs for directory in directories),
+            "report outputs must be outside input evidence directories")
+    require(not any(target in files for target in outputs), "report outputs must not overwrite bound evidence files")
+    # Resolving follows symlinks. File identities also catch hard-link aliases outside
+    # the protected directories, including aliases of packet HTML and receipt files.
+    def identity(path):
+        info = path.stat()
+        return info.st_dev, info.st_ino
+
+    existing = {identity(path) for path in outputs if path.exists()}
+    if existing:
+        require(len(existing) == sum(path.exists() for path in outputs), "text and JSON output paths must differ")
+        for directory in directories:
+            files.update(path for path in directory.rglob("*") if path.is_file())
+        require(not any(path.is_file() and identity(path) in existing for path in files),
+                "report outputs must not overwrite bound evidence files through links")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("gate_export", type=Path)
@@ -572,7 +625,9 @@ def main(argv=None):
     json_output = args.json_output or args.output.with_suffix(".json")
     if json_output.resolve() == args.output.resolve():
         parser.error("text and JSON output paths must differ")
-    protected = [args.study, args.gate_export, args.main_export, args.receipt_directory, args.repair_evidence_directory]
+    # Verification hashes the packaged implementation and protocol data too.
+    protected = [args.study, args.gate_export, args.main_export, args.receipt_directory, args.repair_evidence_directory,
+                 Path(posthoc.__file__).resolve().parent.parent]
     input_files = [*(path for phase in ("gate", "main") for path in getattr(args, phase + "_resolution")),
                    *(path for phase in ("gate", "main") for path in getattr(args, phase + "_episode_upload")),
                    *(path for phase in ("gate", "main") if (path := getattr(args, phase + "_scores")) is not None)]
@@ -585,14 +640,10 @@ def main(argv=None):
             scores_path=getattr(args, phase + "_scores"), resolution_paths=getattr(args, phase + "_resolution"),
             episode_uploads=getattr(args, phase + "_episode_upload"),
             repair_evidence_directory=args.repair_evidence_directory) for phase in ("gate", "main")]
-        packet_directories = [Path(resolution["packet_directory"]) for root in roots for resolution in root["versions"]
-                              if resolution is not None]
-        packet_directories.extend(Path(read_sealed(path)["packet_directory"]) for phase in ("gate", "main")
-                                  for path in getattr(args, phase + "_episode_upload"))
-        require(not any(target.resolve().is_relative_to(directory.resolve()) for target in (args.output, json_output)
-                        for directory in packet_directories), "report outputs must be outside packet evidence directories")
-        require(not any(target.resolve() in root["evidence_files"] for target in (args.output, json_output)
-                        for root in roots), "report outputs must not overwrite retained resolution or submission files")
+        protect_outputs((args.output, json_output),
+                        [*protected, *(directory for root in roots for directory in root["evidence_directories"])],
+                        [*input_files, Path(__file__), _p_path,
+                         *(path for root in roots for path in root["evidence_files"])])
         report = build_report(*roots)
         payloads = (render_report(report).encode("ascii"),
                     (json.dumps(report, ensure_ascii=True, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("ascii"))

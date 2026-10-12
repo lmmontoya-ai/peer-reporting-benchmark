@@ -4,6 +4,7 @@ import importlib.util
 import itertools
 import json
 import math
+import os
 from copy import deepcopy
 from pathlib import Path
 
@@ -259,6 +260,73 @@ def test_descriptive_timing_usage_episode_codes_and_attention_memberships():
         "n": 4, "percent_agreement": 50, "cohens_kappa": 0, "table": [[1, 1], [1, 1]]}
 
 
+def assert_no_decisions(value):
+    if isinstance(value, dict):
+        assert not {"reject", "accept", "passed", "observed_threshold_met", "suppression_supported",
+                    "generalization_supported", "claim_supported", "supported", "equivalent_at_0_05"} & value.keys()
+        for child in value.values():
+            assert_no_decisions(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            assert_no_decisions(child)
+
+
+def test_secondary_attention_json_and_text_keep_p_values_without_decisions(monkeypatch):
+    rows = pair_rows([(False, True)] * 6, model="gpt-6-luna")
+    for standard in rows[1::2]:
+        standard["executed_arm_memberships"].append("queue_attention")
+        standard["score"]["endpoints"]["focal_engaged"]["value"] = False
+    rows += [row(f"salient/{block}", False, model="gpt-6-luna", arm="queue_attention", salience="salient", block=block)
+             for block in range(11, 17)]
+    gate_rows = [row(f"gate/{owner}", value, model="gpt-6-luna", arm="queue_gate", owner=owner)
+                 for owner, value in (("none", True), ("discourage", False))]
+    index = {"seal_hash": "export", "study_manifest": {"seal_hash": "study"}}
+    def root(rows):
+        resolution = {"resolution_version": "human-codes", "seal_hash": "resolution", "submission_inventory": {},
+                      "endpoints": {row["assignment_id"]: row["adjudicated"] for row in rows},
+                      "agreement": agreement([]), "agreement_by_arm": {}}
+        return {"index": index, "rows": rows, "versions": [resolution], "episode_reviews": []}
+    monkeypatch.setattr(analysis, "firth_sensitivity", lambda pairs: {"pairs": len(pairs)})
+    report = analysis.build_report(root(gate_rows), root(rows))
+    restored = json.loads(json.dumps(report))
+    main = restored["main_versions"][0]
+    comparisons = [*main["secondary"].values(), *[main["C4"]["attention"][name]
+                   for name in ("owner_informed", "focal_engaged")]]
+    assert set(main["secondary"]) == {"mechanical_owner_informed", "focal_hit", "all_eligible_pairs", "room_focal_concern"}
+    for comparison in comparisons:
+        assert_no_decisions(comparison)
+        for summary in (comparison["pooled"], *comparison["lanes"]):
+            assert summary["difference"] is not None and summary["newcombe_95"] is not None
+            assert summary["mcnemar_p"] is not None and summary["p_value_label"] == "unadjusted"
+            assert summary["world_sign_flip"]["p_value_label"] == "unadjusted"
+    assert main["C4"]["attention"]["owner_informed"]["pooled"]["mcnemar_p"] == 0.03125
+    assert main["C4"]["attention"]["focal_engaged"]["pooled"]["mcnemar_p"] == 0.03125
+    assert main["secondary"]["mechanical_owner_informed"]["pooled"]["mcnemar_p"] == 0.03125
+    assert_no_decisions(main["C1"]["sensitivity"])
+    assert_no_decisions(restored["C3"])
+    assert main["C1"]["pooled"]["reject"] is True
+    assert main["C1"]["pooled"]["world_sign_flip"]["reject"] is True
+    assert main["C1"]["lanes"][0]["holm"]["reject"] is True
+    assert main["C1"]["C1_eq"]["claim_supported"] is False
+    assert restored["gate_versions"][0]["C2"]["passed"] is True
+    text = analysis.render_report(restored)
+    # The text inventory contains the same comparison trees. Strip only the
+    # permitted decision sections and check every remaining rendered field.
+    descriptive = deepcopy(restored)
+    for version in descriptive["main_versions"]:
+        version["C1"] = {"status": "pending"}
+    for version in descriptive["gate_versions"]:
+        del version["C2"]
+    descriptive_text = analysis.render_report(descriptive)
+    for field in ("reject", "accept", "passed", "observed_threshold_met", "suppression_supported",
+                  "generalization_supported", "claim_supported", "supported", "equivalent_at_0_05"):
+        assert not any(line.strip().startswith(field + ":") for line in descriptive_text.splitlines())
+    assert 'p_value_label: "unadjusted"' in descriptive_text and "mcnemar_p: 0.03125" in descriptive_text
+    assert "newcombe_95:" in descriptive_text
+    assert "C1 world test:" in text and '"reject": true' in text
+    assert "C1-eq:" in text and "passed: true" in text
+
+
 @pytest.fixture(scope="module")
 async def transport(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("q3-transport")
@@ -342,10 +410,17 @@ async def transport(tmp_path_factory):
                     retain_upload(raw, packets / "reviewer" / (name + ".json"), packets / "controller" / (name + ".json"),
                                   validated, receipt_directory=receipts)
                     retained.append(validated)
+            adjudication = tmp / (phase + "-retained-adjudication.json")
+            submitted = upload(packet, "final-adjudicator", True, adjudication=True)
+            submitted["record_conflict"] = True
+            raw = tmp / (phase + "-adjudication.json")
+            atomic_json(raw, submitted)
+            retain_upload(raw, packets / "reviewer" / (name + ".json"), packets / "controller" / (name + ".json"),
+                          adjudication, adjudication=True, receipt_directory=receipts)
             resolved = tmp / (phase + "-resolved.json")
-            write_adjudication(packets, resolved, uploads=retained, receipt_directory=receipts)
+            write_adjudication(packets, resolved, uploads=retained, adjudications=[adjudication], receipt_directory=receipts)
             phases[phase] = dict(export=export, packets=packets, scores=scores, pending=pending, resolved=resolved,
-                                 uploads=retained)
+                                 uploads=retained, adjudication=adjudication)
         main = phases["main"]
         original = read_sealed(main["resolved"])
         violation_ids = {score["assignment_id"] for score in read_sealed(main["scores"])["scores"]
@@ -361,7 +436,8 @@ async def transport(tmp_path_factory):
         retain_upload(raw, main["packets"] / "reviewer" / (name + ".json"),
             main["packets"] / "controller" / (name + ".json"), retained, correction_of=main["resolved"], receipt_directory=receipts)
         corrected = tmp / "main-corrected.json"
-        write_adjudication(main["packets"], corrected, uploads=main["uploads"], corrections=[retained], receipt_directory=receipts)
+        write_adjudication(main["packets"], corrected, uploads=main["uploads"], adjudications=[main["adjudication"]],
+                           corrections=[retained], receipt_directory=receipts)
         main["corrected"] = corrected
         episode = tmp / "main-episode"
         write_packets(main["export"], episode, part="episode", coding_resolution=main["resolved"],
@@ -377,6 +453,18 @@ async def transport(tmp_path_factory):
         retain_upload(raw, episode / "reviewer" / (episode_name + ".json"),
                       episode / "controller" / (episode_name + ".json"), retained, receipt_directory=receipts)
         main["episode_upload"] = retained
+        # This packet binds a corrected owner resolution and its ancestor. Tests
+        # supply only the pending owner resolution, so these bindings are indirect.
+        bound_episode = tmp / "main-corrected-episode"
+        write_packets(main["export"], bound_episode, part="episode", coding_resolution=corrected,
+                      study_directory=study, receipt_directory=receipts)
+        episode_name = read_sealed(bound_episode / "index.json")["rows"][0]["review_packet_id"]
+        episode_packet = read_sealed(bound_episode / "reviewer" / (episode_name + ".json"))
+        raw, retained = tmp / "corrected-episode-upload.json", tmp / "retained-corrected-episode-upload.json"
+        atomic_json(raw, upload(episode_packet, "bound-episode-coder", True))
+        retain_upload(raw, bound_episode / "reviewer" / (episode_name + ".json"),
+                      bound_episode / "controller" / (episode_name + ".json"), retained, receipt_directory=receipts)
+        main["corrected_episode_upload"] = retained
         yield dict(tmp=tmp, study=study, receipts=receipts, **phases)
     finally:
         patch.undo()
@@ -463,6 +551,144 @@ def test_missing_receipts_wrong_score_binding_and_output_protection(transport, t
     assert error.value.code == 2 and not output.exists()
     with pytest.raises(SystemExit):
         analysis.main(arguments(transport, transport["study"] / "report.txt"))
+
+
+def bound_arguments(chain, output):
+    args = arguments(chain, output, pending=True)
+    args[args.index("--main-episode-upload") + 1] = str(chain["main"]["corrected_episode_upload"])
+    return args
+
+
+@pytest.fixture(scope="module")
+def protected_roots(transport):
+    # Verify the full transitive chain once; destination permutations reuse its
+    # provenance inventory rather than repeating receipt/Git reconstruction.
+    return {phase: analysis.load_root(transport[phase]["export"], transport["study"], transport["receipts"], phase=phase,
+        scores_path=transport[phase]["scores"], resolution_paths=[transport[phase]["pending" if phase == "main" else "resolved"]],
+        episode_uploads=[transport[phase]["corrected_episode_upload"]] if phase == "main" else [])
+        for phase in ("gate", "main")}
+
+
+def bound_targets(chain):
+    main = chain["main"]
+    resolution = read_sealed(main["corrected"])
+    correction = Path(resolution["corrections"][0])
+    retained = main["uploads"][0]
+    record = read_sealed(retained)
+    episode = read_sealed(main["corrected_episode_upload"])
+    packet_directory = Path(episode["packet_directory"])
+    packet_name = read_sealed(packet_directory / "index.json")["rows"][0]["review_packet_id"]
+    return {
+        "analysis_source": SCRIPT,
+        "level_p_source": analysis._p_path,
+        "verification_source": Path(analysis.posthoc.__file__),
+        "protocol": Path(analysis.posthoc.__file__).parent / "protocol.json",
+        "study": chain["study"] / "collection-manifest.json",
+        "archive": next((chain["study"] / "roots" / "main").rglob("attempt.json")),
+        "receipt": next(chain["receipts"].glob("*.json")),
+        "export": main["export"] / "index.json",
+        "exported_attempt": next((main["export"] / "attempts").glob("*.json")),
+        "score": main["scores"],
+        "resolution": main["corrected"],
+        "ancestor": main["resolved"],
+        "correction": correction,
+        "correction_submission": Path(read_sealed(correction)["submission_path"]),
+        "adjudication": main["adjudication"],
+        "adjudication_submission": Path(read_sealed(main["adjudication"])["submission_path"]),
+        "upload": retained,
+        "submission": Path(record["submission_path"]),
+        "primary_submission": main["packets"] / "submissions" / (record["submission_sha256"] + ".json"),
+        "inventory": main["packets"] / "resolution-inventories" / (resolution["resolution_version"] + ".json"),
+        "owner_packet": next((main["packets"] / "reviewer").glob("packet-*.json")),
+        "episode_index": packet_directory / "index.json",
+        "episode_packet": packet_directory / "reviewer" / (packet_name + ".json"),
+        "packet_html": packet_directory / "reviewer" / (packet_name + ".html"),
+        "controller": packet_directory / "controller" / (packet_name + ".json"),
+        "episode_upload": main["corrected_episode_upload"],
+        "episode_submission": Path(episode["submission_path"]),
+    }
+
+
+@pytest.mark.parametrize("destination", ["text", "json"])
+@pytest.mark.parametrize("kind", ["analysis_source", "level_p_source", "verification_source", "protocol",
+    "study", "archive", "receipt", "export", "exported_attempt", "score", "resolution",
+    "ancestor", "correction", "correction_submission", "adjudication", "adjudication_submission", "upload",
+    "submission", "primary_submission", "inventory", "owner_packet", "episode_index", "episode_packet",
+    "packet_html", "controller", "episode_upload", "episode_submission"])
+def test_bound_evidence_destinations_refused_before_any_write(transport, protected_roots, tmp_path, monkeypatch, capsys,
+                                                           destination, kind):
+    target = bound_targets(transport)[kind]
+    original = target.read_bytes()
+    output, json_output = tmp_path / "report.txt", tmp_path / "report.json"
+    args = bound_arguments(transport, target if destination == "text" else output)
+    args += ["--json-output", str(target if destination == "json" else json_output)]
+    def refuse(*args, **kwargs):
+        raise AssertionError("report computation or write started before output protection")
+    monkeypatch.setattr(Path, "write_bytes", refuse)
+    monkeypatch.setattr(analysis, "build_report", refuse)
+    monkeypatch.setattr(analysis, "load_root", lambda *args, phase, **kwargs: protected_roots[phase])
+    with pytest.raises(SystemExit) as error:
+        analysis.main(args)
+    assert error.value.code == 2 and "report outputs must" in capsys.readouterr().err
+    assert target.read_bytes() == original and not output.exists() and not json_output.exists()
+
+
+@pytest.mark.parametrize("destination", ["text", "json"])
+@pytest.mark.parametrize("alias", ["relative", "case", "symlink", "hardlink"])
+def test_bound_resolution_aliases_refused(transport, protected_roots, tmp_path, monkeypatch, capsys, destination, alias):
+    target = transport["main"]["corrected"]
+    original = target.read_bytes()
+    if alias == "relative":
+        # pytest's temporary evidence can live on another Windows drive.
+        monkeypatch.chdir(tmp_path)
+        target = Path(os.path.relpath(target, Path.cwd()))
+    elif alias == "case":
+        if os.name != "nt":
+            pytest.skip("case-insensitive path comparison is a Windows guard")
+        target = Path(str(target).swapcase())
+    else:
+        linked = tmp_path / (alias + ".json")
+        if alias == "hardlink":
+            os.link(target, linked)
+        else:
+            try:
+                linked.symlink_to(target)
+            except OSError as error:
+                pytest.skip(f"symlinks unavailable: {error}")
+        target = linked
+    output, json_output = tmp_path / "report.txt", tmp_path / "report.json"
+    args = bound_arguments(transport, target if destination == "text" else output)
+    args += ["--json-output", str(target if destination == "json" else json_output)]
+    def refuse(*args, **kwargs):
+        raise AssertionError("write started before alias protection")
+    monkeypatch.setattr(Path, "write_bytes", refuse)
+    monkeypatch.setattr(analysis, "load_root", lambda *args, phase, **kwargs: protected_roots[phase])
+    with pytest.raises(SystemExit) as error:
+        analysis.main(args)
+    assert error.value.code == 2 and "report outputs must" in capsys.readouterr().err
+    assert target.read_bytes() == original and not output.exists() and not json_output.exists()
+
+
+def test_new_outputs_accepted_without_analyzing_indirect_versions(transport, tmp_path):
+    output = tmp_path / "reports" / "queue.txt"
+    assert analysis.main(bound_arguments(transport, output)) == 0
+    report = json.loads(output.with_suffix(".json").read_bytes())
+    assert len(report["main_versions"]) == 1
+    assert report["main_versions"][0]["C1"]["status"] == "pending"
+    assert report["main_versions"][0]["resolution_version"] == read_sealed(transport["main"]["pending"])["resolution_version"]
+
+
+@pytest.mark.parametrize("kind", ["receipt", "packet_html", "episode_packet"])
+def test_hard_links_to_directory_evidence_refused(transport, protected_roots, tmp_path, monkeypatch, kind):
+    source = bound_targets(transport)[kind]
+    linked = tmp_path / "linked.txt"
+    os.link(source, linked)
+    original = source.read_bytes()
+    monkeypatch.setattr(analysis, "load_root", lambda *args, phase, **kwargs: protected_roots[phase])
+    with pytest.raises(SystemExit) as error:
+        analysis.main(bound_arguments(transport, linked))
+    assert error.value.code == 2 and source.read_bytes() == original
+    assert not linked.with_suffix(".json").exists()
 
 
 def test_pairing_refuses_duplicates_and_never_pairs_different_cells():
