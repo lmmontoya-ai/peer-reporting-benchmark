@@ -27,7 +27,7 @@ def check_pressure_arm_roots(partitions: list[tuple[str, list[dict]]], *, unit: 
     owners = {}
     for identity, assignments in partitions:
         for row in assignments:
-            if row.get("level") != "P":
+            if row.get("level") not in ("P", "Q"):
                 continue
             arm = row["arm"]
             _require(arm not in owners or owners[arm] == identity,
@@ -52,7 +52,7 @@ class PressurePopulation:
 
     def source_roots(self, source_plan_hash: str) -> list[str]:
         """Arms sharing a root export together from their latest successor."""
-        arms = {row["arm"] for row in self.roots[source_plan_hash].assignments if row["level"] == "P"}
+        arms = {row["arm"] for row in self.roots[source_plan_hash].assignments if row["level"] in ("P", "Q")}
         for arm in sorted(arms):
             latest = self.arm_latest[arm]
             _require(latest == source_plan_hash,
@@ -113,7 +113,7 @@ def registered_pressure_population(study_directory: Path, *, phase: str, study_m
     owners = {}
     for identity, root in roots.items():
         for row in root.assignments:
-            if row["level"] == "P":
+            if row["level"] in ("P", "Q"):
                 owners.setdefault(row["arm"], set()).add(identity)
     for arm, identities in owners.items():
         _require(any(identities <= ancestors[identity] for identity in identities),
@@ -148,7 +148,7 @@ def registered_pressure_population(study_directory: Path, *, phase: str, study_m
     grouped = {}
     for identity, root in roots.items():
         for row in root.assignments:
-            owner = arm_latest[row["arm"]] if row["level"] == "P" else identity
+            owner = arm_latest[row["arm"]] if row["level"] in ("P", "Q") else identity
             grouped.setdefault(owner, {})[row["assignment_id"]] = row
     partitions = [(identity, list(rows.values())) for identity, rows in grouped.items()]
     return PressurePopulation(roots, ancestors, arm_latest, partitions)
@@ -170,9 +170,9 @@ def check_pressure_export_population(rows: list[dict], partitions: list[tuple[st
              "P review export contains an assignment outside its sealed root plan")
     _require(len(identifiers) == len(rows), "P review export contains a duplicate assignment")
     represented = {assignments[identifier]["arm"] for identifier in identifiers
-                   if assignments[identifier]["level"] == "P"}
+                   if assignments[identifier]["level"] in ("P", "Q")}
     for arm in sorted(represented):
-        planned = {identifier for identifier, row in assignments.items() if row["level"] == "P" and row["arm"] == arm}
+        planned = {identifier for identifier, row in assignments.items() if row["level"] in ("P", "Q") and row["arm"] == arm}
         _require(planned <= identifiers,
                  f"level P arm {arm} export omits planned assignments from its registered root")
 

@@ -271,6 +271,10 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, ins
            ) -> tuple[dict, dict]:
     if type(instance_nonce) is not str or not INSTANCE_NONCE.fullmatch(instance_nonce):
         raise ValueError("the study instance nonce must be 32 lowercase hexadecimal characters")
+    if protocol.get("level") == "Q":
+        from .queue_study import study
+
+        return study(protocol, templates, caps_record, instance_nonce=instance_nonce)
     allocation = validate_protocol(protocol)
     caps = validate_caps_record(caps_record)
     ids = [template_id for split in SPLITS for template_id in protocol["templates"][split]]
@@ -373,7 +377,12 @@ def build_study(directory: Path, *, protocol: dict, templates: dict[str, dict], 
     directory.mkdir(parents=True, exist_ok=False)
     (directory / "fixtures").mkdir()
     for fixture_id, fixture in fixtures.items():
-        atomic_json(directory / f"fixtures/{fixture_id}.json", seal(fixture))
+        if fixture["parameters"]["level"] == "Q":
+            from .queue_storage import atomic_json as queue_json
+
+            queue_json(directory / f"fixtures/{fixture_id}.json", seal(fixture))
+        else:
+            atomic_json(directory / f"fixtures/{fixture_id}.json", seal(fixture))
     atomic_json(directory / STUDY_MANIFEST, manifest)
     return {"directory": str(directory), "seal_hash": manifest["seal_hash"], "plan_hash": manifest["seal_hash"],
             "instance_nonce": manifest["instance_nonce"], "counts": manifest["counts"],

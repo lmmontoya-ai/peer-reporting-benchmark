@@ -105,7 +105,7 @@ def validate_world_mode(value: Any) -> str:
 
 
 def validate_phase(value: Any) -> str:
-    if type(value) is not str or value not in PHASES:
+    if type(value) is not str or value not in (*PHASES, "screening", "gate", "main"):
         raise ValueError(f"phase must be one of {PHASES}")
     return value
 
@@ -155,19 +155,41 @@ def validate_caps_record(record: Any, *, require_frozen: bool = True) -> dict:
     if require_frozen and record["caps_status"] != "frozen":
         raise ValueError("live phases require frozen caps; no model session was created")
     trial = record["trial"]
+    queue = type(trial) is dict and "trial_input_token_stop" in trial
+    if queue:
+        from .queue_protocol import QUEUE_PHASES
+
+        expected = {"max_trial_wall_seconds", "drain_grace_seconds", "max_tool_requests_per_trial",
+                    "trial_input_token_stop", "trial_output_token_stop", "reserved_tokens_per_trial"}
+        if set(trial) != expected:
+            raise ValueError("queue trial caps have unexpected fields")
+        if type(record["lane_wall_seconds"]) is not dict or set(record["lane_wall_seconds"]) != set(QUEUE_PHASES):
+            raise ValueError("queue wall caps must name every queue phase")
+        for key, value in trial.items():
+            _positive(value, key, integer=True)
+        if trial["reserved_tokens_per_trial"] != trial["trial_input_token_stop"] + trial["trial_output_token_stop"]:
+            raise ValueError("queue reservation must equal the sum of both token stops")
+        for phase in QUEUE_PHASES:
+            _positive(record["lane_wall_seconds"][phase], phase)
+            lane_caps(record, phase, 1, _validated=True)
+        concurrency = record["global_max_concurrency"]
+        if type(concurrency) is not int or not 1 <= concurrency <= MAX_GLOBAL_CONCURRENCY:
+            raise ValueError("queue concurrency is outside the declared range")
+        return deepcopy(record)
     if type(trial) is not dict or set(trial) != set(TRIAL_CAP_FIELDS):
         raise ValueError(f"trial caps must contain exactly {list(TRIAL_CAP_FIELDS)}")
     if trial["max_tool_requests_per_trial"] != TOOL_REQUEST_CAP or type(trial["max_tool_requests_per_trial"]) is not int:
         raise ValueError(f"the v1.1 tool request cap is {TOOL_REQUEST_CAP}")
     walls = record["lane_wall_seconds"]
-    if type(walls) is not dict or set(walls) != set(PHASES):
-        raise ValueError(f"lane_wall_seconds must name exactly {list(PHASES)}")
+    earlier_phases = ("compatibility", "calibration", "smoke", "collection")
+    if type(walls) is not dict or set(walls) != set(earlier_phases):
+        raise ValueError(f"lane_wall_seconds must name exactly {list(earlier_phases)}")
     for phase, value in walls.items():
         _positive(value, f"lane_wall_seconds.{phase}")
     concurrency = record["global_max_concurrency"]
     if type(concurrency) is not int or not 1 <= concurrency <= MAX_GLOBAL_CONCURRENCY:
         raise ValueError(f"global_max_concurrency must be an integer from 1 to {MAX_GLOBAL_CONCURRENCY}")
-    for phase in PHASES:
+    for phase in earlier_phases:
         lane_caps(record, phase, 1, _validated=True)
     return deepcopy(record)
 
@@ -187,6 +209,8 @@ def lane_caps(record: dict, phase: str, planned_trials: int, *, _validated: bool
     reservation = record["trial"]["reserved_tokens_per_trial"]
     caps = {**record["trial"], "collection_wall_seconds": record["lane_wall_seconds"][phase],
             "collection_observed_token_stop_target": reservation * (planned_trials + 1), "max_concurrency": 1}
+    if "trial_input_token_stop" in caps:
+        caps["trial_observed_token_stop_target"] = reservation
     validate_caps(caps)
     validate_token_headroom(caps, planned_trials)
     return caps

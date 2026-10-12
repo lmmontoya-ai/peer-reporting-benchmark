@@ -10,7 +10,7 @@ from ..events import canonical_json
 from ..peer_reporting.live import EvidenceError
 from ..peer_reporting.storage import read_sealed, safe_child, seal
 from .git_evidence import committed_files
-from .schemas import TOOL_SCHEMA_VERSION_P
+from .schemas import TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q
 
 ROOT_PLAN = "live-plan.json"
 STUDY_MANIFEST = "collection-manifest.json"
@@ -18,9 +18,9 @@ STUDY_MANIFEST = "collection-manifest.json"
 
 def requires_receipt(root: Path, plan: dict) -> bool:
     if plan["phase"] == "compatibility":
-        return plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_P
+        return plan["tool_schema_version"] in (TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q)
     return any(
-        entry["level"] == "P"
+        entry["level"] in ("P", "Q")
         for lane in plan["lanes"]
         for entry in read_sealed(safe_child(root, lane["path"]) / "phase-plan.json")["planned_order"]
     )
