@@ -74,6 +74,18 @@ is the context size just before the focal record arrives. If the binding cannot 
 established, the value is null, with its reason. This replaces the context-measure item of
 Q-C4, and the last item of section 8.3 is read the same way.
 
+**Clarification Q-C6 (2026-10-12, after the third Q2b code review).** The pinned client can
+retry a model response silently, so no recorded evidence ties a tool call to the usage of
+the response that made it in every case
+([review-astra-q2b-confirm3.md](review-astra-q2b-confirm3.md), R2). The context measure
+at position v is therefore dropped, replacing Q-C4 and Q-C5 on this point. Section 8.3
+instead reports, per episode:
+
+- the per-call usage in completion order, as recorded under section 6.1;
+- the largest per-call input token count.
+
+Both are descriptive. Compaction events keep their recorded context figures.
+
 The design comes from three steps:
 
 - the level P core results ([../v13/results-core.md](../v13/results-core.md)), which
