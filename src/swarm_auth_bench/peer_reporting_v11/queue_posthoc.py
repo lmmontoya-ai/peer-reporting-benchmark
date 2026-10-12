@@ -30,6 +30,19 @@ def plain(value):
     return {key: child for key, child in value.items() if key != "seal_hash"}
 
 
+def _verification_cache(cache):
+    return cache if cache is not None else {"packets": {}, "resolutions": {}, "active": set(), "uploads": {}}
+
+
+def _verified_packets(directory, cache, **verification):
+    directory = Path(directory).resolve()
+    if directory not in cache["packets"]:
+        cache["packets"][directory] = verify_packets(directory, **verification)
+    # Resolution reconstruction only adds top-level context fields. Share the
+    # verified export and packets rather than copying the full episode evidence.
+    return dict(cache["packets"][directory])
+
+
 def export_coding_selection(attempts):
     """Callback injected into archive export, keeping review imports out of execution."""
     return coding_selection([score_trial(attempt) for attempt in attempts])
@@ -269,13 +282,13 @@ def validate_review_upload(upload, packet, *, controller, receipt_directory=None
     return {**validate_upload(upload, packet), "bindings_verified": True, "live_model_calls": 0}
 
 
-def _superseded_resolution(upload, path, directory, **verification):
+def _superseded_resolution(upload, path, directory, *, _cache=None, **verification):
     # Check the target before following its history. An altered reference back
     # to the current version must fail without recursively following itself.
     previous = read_sealed(Path(path))
     require(previous["packet_directory"] == str(Path(directory).resolve()), "Q correction belongs to another packet set")
     require(previous["seal_hash"] == upload["supersedes_resolution_hash"], "Q correction supersession hash mismatch")
-    return verify_resolution(path, **verification)
+    return verify_resolution(path, _cache=_cache, **verification)
 
 
 def retain_upload(upload_path, packet_path, controller_path, output, *, adjudication=False,
@@ -284,17 +297,19 @@ def retain_upload(upload_path, packet_path, controller_path, output, *, adjudica
 
     upload_path, output = Path(upload_path), Path(output)
     packet, upload = read_sealed(Path(packet_path)), read_json(upload_path)
+    cache = _verification_cache(None)
     require(not adjudication or correction_of is None, "Q correction and adjudication modes are distinct")
     if not adjudication and correction_of is None:
         validate_review_upload(upload, packet, controller=controller_path, **verification)
     else:
-        context = verify_packets(Path(controller_path).parent.parent, **verification)
+        context = _verified_packets(Path(controller_path).parent.parent, cache, **verification)
         require(context["bundles"][packet["review_packet_id"]]["packet"] == plain(packet), "Q adjudication packet mismatch")
         require(read_sealed(Path(controller_path)) == context["bundles"][packet["review_packet_id"]]["controller"],
                 "Q adjudication controller mismatch")
     validate_upload(upload, packet, adjudication=adjudication, correction=correction_of is not None)
     if correction_of is not None:
-        previous = _superseded_resolution(upload, correction_of, Path(controller_path).parent.parent, **verification)
+        previous = _superseded_resolution(upload, correction_of, Path(controller_path).parent.parent,
+                                          _cache=cache, **verification)
         name = packet["review_packet_id"]
         require(previous["resolutions"][name]["status"] == "final", "Q correction requires a final earlier resolution")
         resolve_reviews(packet, previous["resolutions"][name]["initial_reviews"],
@@ -333,7 +348,10 @@ def _upload_record(upload, packet, packet_directory, submission, adjudication, c
                  "validation": validate_upload(upload, packet, adjudication=adjudication, correction=correction_of is not None)})
 
 
-def _checked_upload(path, context):
+def _checked_upload(path, context, cache):
+    key = context["directory"], Path(path).resolve()
+    if key in cache["uploads"]:
+        return deepcopy(cache["uploads"][key])
     record = read_sealed(Path(path))
     require(record["packet_directory"] == str(context["directory"]), "Q retained review belongs to another packet set")
     name = record["review_packet_id"]
@@ -351,7 +369,9 @@ def _checked_upload(path, context):
             "Q retained adjudication type mismatch")
     require(record == _upload_record(upload, packet, context["directory"], submission, record["adjudication"], correction_of),
             "Q review validation differs from retained submission")
-    return name, upload, record["adjudication"], correction_of
+    result = name, upload, record["adjudication"], correction_of
+    cache["uploads"][key] = result
+    return deepcopy(result)
 
 
 def _submission_inventory(directory, upload_paths, adjudication_paths, correction_paths):
@@ -366,8 +386,18 @@ def _submission_inventory(directory, upload_paths, adjudication_paths, correctio
                  "packet_directory": str(Path(directory).resolve()), "submissions": entries})
 
 
-def _resolution_record(directory, upload_paths, adjudication_paths, correction_paths=(), *, inventory=None, **verification):
-    context = verify_packets(directory, **verification)
+def _same_episode_resolution(previous, current):
+    """Upload order has no coder role; compare each retained identity and content."""
+    def normalized(resolution):
+        return {**resolution, "initial_reviews": sorted(resolution["initial_reviews"],
+                                                        key=lambda upload: upload["reviewer_id"])}
+    return normalized(previous) == normalized(current)
+
+
+def _resolution_record(directory, upload_paths, adjudication_paths, correction_paths=(), *, inventory=None,
+                       _cache=None, **verification):
+    cache = _verification_cache(_cache)
+    context = _verified_packets(directory, cache, **verification)
     require(context["index"]["part"] == "owner_communications", "Q adjudicated endpoints require owner coding packets")
     context["directory"] = Path(directory).resolve()
     uploads, adjudications = {}, {}
@@ -383,11 +413,11 @@ def _resolution_record(directory, upload_paths, adjudication_paths, correction_p
         require(primary_inventory.is_file() and read_sealed(primary_inventory) == inventory == expected_inventory,
                 "Q resolution submission inventory differs from its retained version")
     for path in upload_paths:
-        name, upload, adjudication, correction_of = _checked_upload(path, context)
+        name, upload, adjudication, correction_of = _checked_upload(path, context, cache)
         require(not adjudication and correction_of is None, "initial Q upload is an adjudication or correction")
         uploads.setdefault(name, []).append(upload)
     for path in adjudication_paths:
-        name, upload, adjudication, correction_of = _checked_upload(path, context)
+        name, upload, adjudication, correction_of = _checked_upload(path, context, cache)
         require(adjudication and correction_of is None and name not in adjudications, "invalid or duplicate Q adjudication")
         adjudications[name] = upload
     by_assignment, resolutions, agreement_by_arm = {}, {}, {}
@@ -403,11 +433,12 @@ def _resolution_record(directory, upload_paths, adjudication_paths, correction_p
                 if bundle["row"]["assignment_id"] in context["index"]["selection"]["second_review_by_arm"][arm]:
                     agreement_by_arm.setdefault(arm, []).append(pair)
     for path in correction_paths:
-        name, upload, adjudication, correction_of = _checked_upload(path, context)
+        name, upload, adjudication, correction_of = _checked_upload(path, context, cache)
         require(not adjudication and correction_of is not None, "invalid Q correction")
-        previous = _superseded_resolution(upload, correction_of, context["directory"], **verification)
+        previous = _superseded_resolution(upload, correction_of, context["directory"], _cache=cache, **verification)
         require(previous["resolutions"][name]["status"] == "final"
-                and previous["resolutions"][name] == resolutions[name], "Q correction does not supersede the current episode resolution")
+                and _same_episode_resolution(previous["resolutions"][name], resolutions[name]),
+                "Q correction does not supersede the current episode resolution")
         bundle = context["bundles"][name]
         corrected = resolve_reviews(bundle["packet"], uploads.get(name, []), second_review=bundle["row"]["second_review"],
             adjudication={key: value for key, value in upload.items() if key != "supersedes_resolution_hash"})
@@ -465,9 +496,18 @@ def write_adjudication(directory, output, *, uploads=(), adjudications=(), corre
             "agreement": record["agreement"], "live_model_calls": 0}
 
 
-def verify_resolution(path, **verification):
-    record = read_sealed(Path(path))
-    expected = _resolution_record(record["packet_directory"], record["uploads"], record["adjudications"], record["corrections"],
-                                  inventory=record["submission_inventory"], **verification)
-    require(record == expected, "Q adjudication differs from retained submissions or primary evidence")
-    return expected
+def verify_resolution(path, *, _cache=None, **verification):
+    cache, path = _verification_cache(_cache), Path(path).resolve()
+    if path in cache["resolutions"]:
+        return deepcopy(cache["resolutions"][path])
+    require(path not in cache["active"], "cyclic Q correction history")
+    cache["active"].add(path)
+    try:
+        record = read_sealed(path)
+        expected = _resolution_record(record["packet_directory"], record["uploads"], record["adjudications"], record["corrections"],
+                                      inventory=record["submission_inventory"], _cache=cache, **verification)
+        require(record == expected, "Q adjudication differs from retained submissions or primary evidence")
+        cache["resolutions"][path] = expected
+        return deepcopy(expected)
+    finally:
+        cache["active"].remove(path)

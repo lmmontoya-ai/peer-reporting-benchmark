@@ -968,7 +968,8 @@ def check_queue_population(rows: list[dict], manifest: dict, phase: str, ledger:
 
 def check_queue_prior_starts(plan: dict, study_directory: Path | None, *, bundle: ProtocolBundle | None = None,
                              receipt_directory: Path | None = None,
-                             repair_evidence_directory: Path | None = None) -> None:
+                             repair_evidence_directory: Path | None = None,
+                             _verified_ancestors: dict | None = None) -> None:
     """Recheck Q exclusions against receipt-bound journals, even without supplied prior paths."""
     if plan["tool_schema_version"] != TOOL_SCHEMA_VERSION_Q or plan["phase"] == "compatibility":
         return
@@ -979,6 +980,7 @@ def check_queue_prior_starts(plan: dict, study_directory: Path | None, *, bundle
         raise EvidenceError("queue prior starts require the registered study directory")
     registrations = {entry["plan_hash"]: entry for entry in registered_roots(study_directory)}
     seen = set()
+    verified = {} if _verified_ancestors is None else _verified_ancestors
     for record in ledger["prior_roots"]:
         identity = record["plan_hash"]
         registration = registrations.get(identity)
@@ -987,7 +989,8 @@ def check_queue_prior_starts(plan: dict, study_directory: Path | None, *, bundle
         seen.add(identity)
         root = safe_child(Path(study_directory), registration["root_path"])
         prior, starts = consumed_attempts_in_root(root, bundle=bundle, study_directory=study_directory,
-            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory,
+            _verified_ancestors=verified)
         if (prior["phase"] != plan["phase"] or prior["source"] != plan["source"]
                 or prior["revision"] != record["revision"] or sorted(starts) != record["consumed_attempt_ids"]):
             raise EvidenceError("queue prior-start ledger differs from verified primary starts")
@@ -2071,13 +2074,19 @@ def superseded_by(directory: Path, plan: dict) -> list[str]:
 def consumed_attempts_in_root(directory: Path, *, bundle: ProtocolBundle | None = None,
                               study_directory: Path | None = None,
                                   receipt_directory: Path | None = None,
-                                  repair_evidence_directory: Path | None = None) -> tuple[dict, set[str]]:
+                                  repair_evidence_directory: Path | None = None,
+                              _verified_ancestors: dict | None = None) -> tuple[dict, set[str]]:
     """A root's plan and every attempt with a journaled ``attempt_started`` in any of its lanes.
 
     Each lane's journal hash chain, index checkpoint, budget history and repairs are
     checked, so a truncated journal cannot hide a start.
     """
-    directory = Path(directory)
+    directory = Path(directory).resolve()
+    verified = {} if _verified_ancestors is None else _verified_ancestors
+    if directory in verified:
+        if verified[directory] is None:
+            raise EvidenceError("cyclic queue prior-start history")
+        return deepcopy(verified[directory])
     plan = read_live_plan(directory)
     if bundle is not None:
         bundle = _tool_set_for_plan(plan, bundle)
@@ -2085,8 +2094,9 @@ def consumed_attempts_in_root(directory: Path, *, bundle: ProtocolBundle | None 
 
     check_root_assignment_binding(directory, plan, study_directory)
     check_receipt(directory, receipt_directory, study_directory=study_directory)
+    verified[directory] = None
     check_queue_prior_starts(plan, study_directory, bundle=bundle, receipt_directory=receipt_directory,
-                             repair_evidence_directory=repair_evidence_directory)
+                             repair_evidence_directory=repair_evidence_directory, _verified_ancestors=verified)
     if plan["phase"] != "compatibility":
         root_registration(study_directory, plan, directory=directory, require_finalized=False)
     consumed: set[str] = set()
@@ -2103,7 +2113,8 @@ def consumed_attempts_in_root(directory: Path, *, bundle: ProtocolBundle | None 
     from .ledger_repair import verify_root_ledger_repairs
 
     verify_root_ledger_repairs(directory, plan, journals, evidence_directory=repair_evidence_directory)
-    return plan, consumed
+    verified[directory] = plan, consumed
+    return deepcopy(verified[directory])
 
 
 def prior_root_ledger(prior_roots: list[Path] | tuple, *, phase: str, source: dict, study_directory: Path,
@@ -2113,13 +2124,15 @@ def prior_root_ledger(prior_roots: list[Path] | tuple, *, phase: str, source: di
     """The consumed-attempt ledger for a new root: every root of this study and phase that is registered and not
     abandoned must be named."""
     records, consumed_all, seen = [], set(), set()
+    verified = {}
     entries = (checked_pressure_registrations(study_directory, receipt_directory=receipt_directory)
                if bundle is not None and bundle.schema_version in (TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q)
                else registered_roots(study_directory))
     registrations = {entry["plan_hash"]: entry for entry in entries}
     for root in prior_roots:
         plan, consumed = consumed_attempts_in_root(root, bundle=bundle, study_directory=study_directory,
-            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory,
+            _verified_ancestors=verified)
         if plan["seal_hash"] in seen:
             raise ValueError(f"prior root {root} is listed twice")
         if plan["phase"] != phase or plan.get("source") != source:
@@ -2176,9 +2189,11 @@ def verify_consumed_ledger(directory: Path, plan: dict, prior_roots: list[Path] 
     sealed = {record["plan_hash"]: record for record in ledger["prior_roots"]}
     supplied: set[str] = set()
     consumed_all: set[str] = set()
+    verified = {}
     for root in prior_roots:
         prior_plan, consumed = consumed_attempts_in_root(root, bundle=bundle, study_directory=study_directory,
-            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory,
+            _verified_ancestors=verified)
         identity = prior_plan["seal_hash"]
         if identity not in sealed or identity in supplied:
             raise EvidenceError(f"{root} is not a prior root sealed in this plan, or it is listed twice")

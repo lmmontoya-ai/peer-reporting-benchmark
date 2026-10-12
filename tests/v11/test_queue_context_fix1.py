@@ -1,6 +1,9 @@
-"""Call-start and duration regressions against verified offline controller journals."""
+"""Context binding and duration checks through offline production runtime paths."""
 
 import asyncio
+import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +12,7 @@ from swarm_auth_bench.peer_reporting_v11.queue_checks import smoke_episode
 from swarm_auth_bench.peer_reporting_v11.queue_evidence import export_fields
 from swarm_auth_bench.peer_reporting_v11.queue_protocol import caps_record
 from swarm_auth_bench.peer_reporting_v11.queue_score import score_trial
+from swarm_auth_bench.runtime import CodexRuntime
 
 from .live_fakes import FakeTransport
 from .queue_score_helpers import attempt
@@ -17,56 +21,54 @@ from .test_queue_live import response
 from .test_queue_live import sample as fixture_sample
 
 
-def start(number, **scope):
-    return ("raw", "rawResponse/started", {"responseId": f"response-{number}", **scope})
+class WireTransport(FakeTransport):
+    # The probe is offline. JSON-RPC reading, writing, dispatch, recording and
+    # observer execution all use the production runtime, without event injection.
+    _send = CodexRuntime._send
+
+    async def start(self):
+        if self._proc is not None:
+            return
+        self.runtime_version = "codex-cli 0.158.0"
+        self._home = self.fake_home
+        fixture = fixture_sample(queue_length=4, block=0)
+        self._proc = await asyncio.create_subprocess_exec(sys.executable,
+            str(Path(__file__).with_name("queue_context_client.py")), json.dumps(fixture), self.script,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        self._reader_task = asyncio.create_task(self._reader())
+        await self._call("initialize", self._initialize_params())
+        await self._send({"method": "initialized", "params": {}})
 
 
 @pytest.mark.parametrize("case,expected,reason", [
-    ("reviewer_order", None, "call_start_evidence_unavailable"),
-    ("known_pre_v", None, "no_model_call_after_v"),
-    ("no_later_call", None, "no_model_call_after_v"),
-    ("genuine_later_call", 250, "call_started_after_v"),
-    ("delayed_completions", 250, "call_started_after_v"),
-    ("foreign_start", None, "call_start_evidence_unavailable"),
-    ("missing_first_usage", None, "input_usage_unavailable"),
-    ("unfinished_first_call", None, "input_usage_unavailable"),
+    ("continued_response", 123, "focal_request_response"),
+    ("missing_binding", None, "response_binding_unavailable"),
+    ("foreign_item", None, "response_binding_unavailable"),
+    ("missing_usage", None, "input_usage_unavailable"),
+    ("failed_stream", None, "response_binding_unavailable"),
 ])
-async def test_context_measure_uses_the_first_proven_post_v_start(tmp_path, case, expected, reason):
-    fixture = fixture_sample(queue_length=4, block=0)
-    first = fixture["items"][0]["item_id"]
-    served = [("tool", "next_item", {}), ("tool", "submit_item", {"item_id": first,
-        "answer": fixture["truth"]["queue"]["answers"][first], "request_id": "answer-1"}), ("tool", "next_item", {})]
-    if case == "reviewer_order":
-        script = [*served, response()]
-    elif case == "known_pre_v":
-        script = [start(1), *served, response()]
-    elif case == "no_later_call":
-        script = [start(1), response(), *served]
-    elif case == "genuine_later_call":
-        script = [start(1), *served, response(), start(2), response(2, input_tokens=250)]
-    elif case == "delayed_completions":
-        script = [start(1), *served, start(2), start(3), response(3, input_tokens=400),
-                  response(), response(2, input_tokens=250)]
-    elif case == "foreign_start":
-        script = [*served, start(1, threadId="foreign-thread"), response()]
-    elif case == "missing_first_usage":
-        missing = response(2)
-        missing[1]["usage"].pop("inputTokens")
-        script = [start(1), response(), *served, start(2), missing, start(3), response(3, input_tokens=400)]
-    else:
-        script = [start(1), response(), *served, start(2), start(3), response(3, input_tokens=400)]
-    script += [("message", "Queue processing completed.")]
-    result, fixture, _ = await observe(tmp_path, script)
-    assert export_fields(result, fixture)["eligibility_inputs"]["reached"]
+async def test_context_binds_the_response_requesting_v_through_the_production_wire(tmp_path, case, expected, reason):
+    caps = lane_caps(caps_record(), "smoke", 1)
+    caps.update(max_trial_wall_seconds=10, drain_grace_seconds=2)
+    result, fixture, _ = await observe(tmp_path, case, caps=caps, runtime_class=WireTransport)
+    fields = export_fields(result, fixture)
+    assert fields["eligibility_inputs"]["reached"]
     sample = {**attempt(), "fixture": fixture, "tool_requests": result["tool_requests"],
               "observer_outputs": result["observer_outputs"], "termination_kind": result["termination_kind"],
-              "elapsed_seconds": result["elapsed_seconds"], **export_fields(result, fixture)}
+              "elapsed_seconds": result["elapsed_seconds"], **fields}
     usage = score_trial(sample, controller_events=result["events"])["usage"]
-    assert usage["first_input_tokens_after_v"] == expected
-    assert usage["first_input_tokens_after_v_reason"] == reason
+    assert usage["input_tokens_before_v"] == expected
+    assert usage["input_tokens_before_v_reason"] == reason
+    assert usage["per_call_usage"][-1]["input_tokens"] == 987
     assert usage["generation_seconds"] == sample["generation_elapsed_seconds"]
-    assert usage["wall_seconds"] == result["elapsed_seconds"]
     assert usage["wall_seconds"] >= usage["generation_seconds"]
+    focal = fields["eligibility_inputs"]["focal_served_event_seq"]
+    completion = next(event["event_seq"] for event in result["events"] if event["kind"] == "runtime_event"
+        and ((event["event"].get("raw") or {}).get("params") or {}).get("responseId")
+        == ("response-4" if case == "failed_stream" else "response-3"))
+    continued = next(output["arrival_event_seq"] for output in result["observer_outputs"]
+                     if output["text"] == "The focal record arrived.")
+    assert focal < continued < completion
 
 
 async def test_score_and_smoke_use_generation_duration_when_cleanup_crosses_the_wall_cap(tmp_path):
