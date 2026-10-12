@@ -116,6 +116,25 @@ analysis ([review-astra-q3-partial.md](review-astra-q3-partial.md)) are now norm
 - **Outputs.** The analysis refuses to write a report to any path it reads, or to any
   evidence file that an input binds, directly or through another input.
 
+**Clarification Q-C8 (2026-10-13, after the Q2c code review).** These sizing rules
+([review-astra-q2c.md](review-astra-q2c.md)) are now normative:
+
+- **Token means.** The cost estimate takes its token means from one common set of
+  eligible screening episodes with known input, uncached input and output totals.
+  Generation-time means use their own set of episodes with known timing.
+- **Time estimate.** The study's generation time is estimated by summing the gate and
+  main phase maxima over lanes running in parallel. It is null when a required mean is
+  unavailable. It is generation time, not elapsed time with cleanup.
+- **Double censoring.** When one response crosses both token stops, each statistic is
+  censored at its own cap. Unavailable token totals are left out.
+- **Execution checks.** Before admitting any gate or main episode, execution verifies the
+  sizing record against its retained submissions and evidence. The main root starts
+  only after the gate root has run to its end or been stopped deliberately, as its
+  receipt-verified journal shows. The gate's result and coding do not hold it.
+- **Credibility inventory.** The sizing record binds every episode review submission of
+  the 8 P3 credibility episodes. Later reviews of other screening episodes do not affect
+  it.
+
 The design comes from three steps:
 
 - the level P core results ([../v13/results-core.md](../v13/results-core.md)), which
