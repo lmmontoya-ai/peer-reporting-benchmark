@@ -65,6 +65,15 @@ review ([review-astra-q2b.md](review-astra-q2b.md)) and are now normative:
   snapshot entries and the complete source population still verify against primary
   records.
 
+**Clarification Q-C5 (2026-10-12, after the second Q2b code review).** The pinned client
+reports when a model response completes, but not when it starts
+([review-astra-q2b-confirm.md](review-astra-q2b-confirm.md), R2). The context measure
+therefore changes. It is now the input tokens of the model response that requested the
+serving of position v, identified through the call ID of that `next_item` request. That
+is the context size just before the focal record arrives. If the binding cannot be
+established, the value is null, with its reason. This replaces the context-measure item of
+Q-C4, and the last item of section 8.3 is read the same way.
+
 The design comes from three steps:
 
 - the level P core results ([../v13/results-core.md](../v13/results-core.md)), which
