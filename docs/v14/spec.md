@@ -385,9 +385,9 @@ change.
    pass.
 8. **Counterparts.** The section 3.9 differences hold.
 9. **Output bounds.** Section 4.4 holds.
-10. **Reactions and notices.** Every reaction template renders for every roster actor and
-   for the fallback, and passes the text rules. Every notice template, rendered with its
-   observer-supplied fields empty, passes the hidden-label scan.
+10. **Reactions and notices.** Every reaction template renders for every roster actor
+    and for the fallback, and passes the text rules. Every notice template, rendered with
+    its observer-supplied fields empty, passes the hidden-label scan.
 
 ## 4 Instructions, owner message and tools
 
