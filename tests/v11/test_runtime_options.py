@@ -53,7 +53,7 @@ from .test_live_runtime_v11 import fixture
 #   git worktree add --detach <baseline-checkout> 0630195
 #   uv run --offline --extra dev python tests/v11/runtime_recording_bytes.py --checkout <baseline-checkout>
 # For 3.11, set UV_PROJECT_ENVIRONMENT=.venv311 and add
-#   --python C:\Users\luism\miniconda3\python.exe
+#   --python <path to a CPython 3.11 interpreter>
 # to uv run. Remove the scratch checkout with git worktree remove afterwards.
 PRE_WP1_RECORDING_SHA256 = {
     (3, 11): "e6b2d15f591d03eb4926ff12ed8694eddf9c07b51eeeba2c1f55bbc54d30caee",
