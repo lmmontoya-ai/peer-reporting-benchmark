@@ -31,11 +31,16 @@ def order_rows(rows, seed, phase):
     return [{**row, "round": 0, "planned_order": index} for index, row in enumerate(result)]
 
 
-def verify_order(rows, seed, phase):
+def verify_order(rows, seed, phase, *, required_rows=None, consumed_assignment_ids=()):
     identities = Counter((row["fixture_id"], row["model"], row["effort"]) for row in rows)
     if any(count != 1 for count in identities.values()):
         raise ValueError("queue order must run every fixture-lane once")
-    if rows != order_rows(rows, seed, phase):
+    expected = order_rows(rows if required_rows is None else required_rows, seed, phase)
+    consumed = set(consumed_assignment_ids)
+    expected = [row for row in expected if row.get("assignment_id") not in consumed]
+    if Counter((row["fixture_id"], row["model"], row["effort"]) for row in expected) != identities:
+        raise ValueError("queue plan differs from the complete required phase population")
+    if rows != expected:
         raise ValueError("queue groups must run whole and consecutively in the declared hash order")
 
 
@@ -70,6 +75,7 @@ def study(protocol, templates, caps_record, *, instance_nonce):
                     if (arm == "queue_main" and row["block"] <= 20 and row["variant"] == "violation"
                             and row["pressure"] == "neutral"):
                         row["arm_memberships"].append("queue_attention")
+                    row["candidate_arm_memberships"] = list(row["arm_memberships"])
                     row["assignment_id"] = assignment_identity(row, protocol_id=protocol["protocol_id"],
                                                                tool_manifest_hash=content_hash(tools),
                                                                caps_hash=content_hash(caps))

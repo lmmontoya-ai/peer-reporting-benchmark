@@ -45,6 +45,26 @@ def compatibility_plan(caps_record, *, revision, bundle):
                      source=source, gate_evidence={})
 
 
+def verify_compatibility_population(plan, lane_plans):
+    from .bundle import load_bundle
+
+    expected, lanes, _ = compatibility_plan(plan["caps"], revision=plan["revision"],
+                                            bundle=load_bundle().tool_set(plan["tool_schema_version"]))
+    if (plan["maximum_live_calls"] != 4 or plan["calls_by_lane"] != expected["calls_by_lane"]
+            or [lane["lane_id"] for lane in plan["lanes"]] != [lane["lane_id"] for lane in expected["lanes"]]
+            or set(lane_plans) != set(lanes)):
+        raise ValueError("queue compatibility plan differs from the complete required phase population")
+    from ..peer_reporting.storage import seal
+
+    for lane in plan["lanes"]:
+        actual = lane_plans[lane["lane_id"]]
+        required = lanes[lane["lane_id"]]
+        if (actual["planned_order"] != required["planned_order"] or actual["caps"] != required["caps"]
+                or actual["maximum_live_calls"] != 1 or lane["planned_calls"] != 1
+                or seal({key: value for key, value in actual.items() if key != "seal_hash"})["seal_hash"] != lane["plan_hash"]):
+            raise ValueError("queue compatibility groups differ from their required population and order")
+
+
 def evaluate_qualification(result, *, fixture, entry, preflight, bundle, orchestrator_failures,
                            usage_settlement=None, stop_reasons=None):
     from .live import _tool_usable, _transport_checks, provider_pause_classification, stop_truncated
@@ -106,14 +126,18 @@ def smoke_episode(result, caps):
     }
     input_tokens = sum(call["input_tokens"] for call in calls if type(call.get("input_tokens")) is int)
     output_tokens = sum(call["output_tokens"] for call in calls if type(call.get("output_tokens")) is int)
-    wall = result.get("boundary", {}).get("elapsed_seconds", result.get("elapsed_seconds"))
+    from .queue_evidence import generation_observations
+
+    generation_stops, wall = generation_observations(result)
     observations = {"input_tokens": input_tokens, "output_tokens": output_tokens,
                     "tool_requests": len(requests), "wall_seconds": wall,
                     "total_wall_seconds": result.get("elapsed_seconds"),
                     "caps": deepcopy(caps), "termination_kind": result.get("termination_kind")}
     observations["caps_binding"] = (input_tokens >= caps["trial_input_token_stop"]
         or output_tokens >= caps["trial_output_token_stop"] or len(requests) >= caps["max_tool_requests_per_trial"]
-        or (wall or 0) >= caps["max_trial_wall_seconds"])
+        or (wall or 0) >= caps["max_trial_wall_seconds"]
+        or any(event["generation_active"] and event["termination_kind"] == "per_trial_limit"
+               for event in generation_stops))
     return {"passed": all(checks.values()), "checks": checks, "resources": observations}
 
 

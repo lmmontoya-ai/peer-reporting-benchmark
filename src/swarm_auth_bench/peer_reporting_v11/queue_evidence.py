@@ -110,6 +110,15 @@ def verify_result(payload, directory, bundle):
     return world
 
 
+def generation_observations(result):
+    stops = [event for event in result["events"] if event["kind"] == "queue_generation_stop_observed"]
+    ended = [event for event in result["events"] if event["kind"] == "queue_generation_ended"]
+    active = [event for event in stops if event["generation_active"]]
+    elapsed = (active[0]["elapsed_seconds"] if active else ended[0]["elapsed_seconds"] if ended
+               else result.get("boundary", {}).get("elapsed_seconds", result.get("elapsed_seconds")))
+    return deepcopy(stops), elapsed
+
+
 def eligibility_inputs(result, fixture):
     v = fixture["truth"]["queue"]["focal_position"]
     served = [request for request in result["tool_requests"] if request["tool"] == "next_item"
@@ -123,17 +132,22 @@ def eligibility_inputs(result, fixture):
     compactions = result.get("runtime_recording", {}).get("compaction_events", [])
     token_stops = [event for event in result["events"] if event["kind"] == "queue_token_stop_observed"]
     before = any(focal_seq is None or raw_seqs[event["raw_event_index"]] < focal_seq for event in compactions)
+    after = any(focal_seq is not None and raw_seqs[event["raw_event_index"]] > focal_seq for event in compactions)
+    generation_stops, _ = generation_observations(result)
     return {"reached": bool(dispatched), "focal_served_event_seq": focal_seq,
-            "compaction_before_focal": before, "compaction_after_focal": bool(compactions) and not before,
+            "compaction_before_focal": before, "compaction_after_focal": after,
             "ineligibility_reason": "context_compacted" if before else None,
             "cap_ended": result["termination_kind"] == "per_trial_limit"
-                or any(event["generation_active"] for event in token_stops),
+                or any(event["generation_active"] for event in token_stops)
+                or any(event["generation_active"] and event["termination_kind"] == "per_trial_limit"
+                       for event in generation_stops),
             "token_stops": deepcopy(token_stops),
             "termination_kind": result["termination_kind"], "runtime_closed": result["runtime_closed"],
             "queue_reconciled": result["queue_reconciled"], "exposure_confirmed": result["exposure_confirmed"]}
 
 
 def export_fields(result, fixture):
+    generation_stops, generation_elapsed = generation_observations(result)
     recording = result.get("runtime_recording", {})
     calls = recording.get("model_calls", [])
     sums = {key: sum(call[key] for call in calls) if calls and all(type(call.get(key)) is int for call in calls)
@@ -153,4 +167,5 @@ def export_fields(result, fixture):
             "per_call_usage": deepcopy(calls), "provider_usage": sums,
             "closure_texts": deepcopy(closure_outputs(result["observer_outputs"])),
             "eligibility_inputs": eligibility_inputs(result, fixture), "boundary": deepcopy(result["boundary"]),
+            "generation_stops": generation_stops, "generation_elapsed_seconds": generation_elapsed,
             "primary_evidence_hash": content_hash(result["events"])}

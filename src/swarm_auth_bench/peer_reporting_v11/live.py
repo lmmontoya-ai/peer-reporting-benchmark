@@ -611,7 +611,9 @@ def _entry(row: dict, fixture: dict, instructions: str) -> dict:
         **({key: row[key] for key in ("difficulty", "block", "prevalence_k", "post_condition", "visibility", "pressure")}
            if row["level"] == "P" else {}),
         **({**{key: row[key] for key in QUEUE_FIELDS}, "phase": row["phase"],
-            **({"arm_memberships": row["arm_memberships"]} if "arm_memberships" in row else {})}
+            **({"arm_memberships": row["arm_memberships"]} if "arm_memberships" in row else {}),
+            "candidate_arm_memberships": list(row.get("candidate_arm_memberships", row.get("arm_memberships", [row["arm"]]))),
+            "executed_arm_memberships": list(row.get("executed_arm_memberships", [row["arm"]]))}
            if row["level"] == "Q" else {}),
     }
 
@@ -778,6 +780,8 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
                     or (row["model"], row["effort"]) not in QUEUE_LANES
                     or row["prompt_condition"] != "neutral" or row["world_mode"] != "normal"):
                 raise ValueError("queue assignment labels differ from the fixture or declared lanes")
+            if row.get("executed_arm_memberships", [row["arm"]]) != [row["arm"]]:
+                raise ValueError("queue executed memberships differ from the phase population")
         routing = ({"visibility": parameters["visibility"], "held_submissions": parameters["pressure"] == "P4"}
                    if row["level"] == "P" else {})
         if row["level"] == "Q":
@@ -911,6 +915,9 @@ def check_plan_assignment_binding(plan: dict, lane_plans: dict[str, dict], manif
                 or canonical_json(lane_plan["caps"]) != canonical_json(lane_caps(plan["caps"], plan["phase"], lane["planned_calls"]))):
             raise EvidenceError(f"lane {identifier} differs from its sealed execution lane")
         seen_lanes.add(identifier)
+        if plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q and lane_plan["planned_order"] != sorted(
+                lane_plan["planned_order"], key=lambda entry: entry["planned_order"]):
+            raise EvidenceError("queue groups differ from their declared consecutive order")
         for position, entry in enumerate(lane_plan["planned_order"]):
             if type(entry.get("planned_index")) is not int or entry["planned_index"] != position:
                 raise EvidenceError(f"{entry['entry_id']}: assignment index differs from its execution lane")
@@ -925,11 +932,66 @@ def check_plan_assignment_binding(plan: dict, lane_plans: dict[str, dict], manif
         raise EvidenceError("assignment count differs from the sealed execution lanes")
     canonical = check_assignment_binding(rows, manifest=manifest, source=plan["source"], phase=plan["phase"],
                                          fixtures=fixtures)
+    if plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q:
+        check_queue_population(sorted(canonical, key=lambda row: row["planned_order"]),
+                               manifest, plan["phase"], plan.get("consumed_attempts"))
+        for row in rows:
+            if row.get("executed_arm_memberships") != [row["arm"]]:
+                raise EvidenceError("queue executed memberships differ from the phase population")
     from .pilot import verify_core_binding
 
     verify_core_binding(plan, entry_arms={row["arm"] for row in canonical},
                         entry_lanes={lane_id(row["model"], row["effort"]) for row in canonical})
     return canonical
+
+
+def check_queue_population(rows: list[dict], manifest: dict, phase: str, ledger: dict | None) -> None:
+    """Require whole canonical groups, minus starts retained by prior roots."""
+    from .queue_study import verify_order
+
+    if phase not in ("compatibility", "smoke", "screening"):
+        raise EvidenceError("queue gate and main populations require the sizing decision builder")
+    required = [row for row in manifest["assignments"] if row["phase"] == phase]
+    ledger = ledger or _empty_ledger()
+    starts = [attempt for record in ledger["prior_roots"] for attempt in record["consumed_attempt_ids"]]
+    consumed = set(starts)
+    excluded = sorted(row["assignment_id"] for row in required if row["assignment_id"] + ATTEMPT_SUFFIX in consumed)
+    if (ledger["policy"] != LEDGER_POLICY or len(starts) != len(consumed)
+            or ledger["consumed_attempt_ids"] != sorted(consumed)
+            or ledger["excluded_assignment_ids"] != excluded
+            or consumed != {identifier + ATTEMPT_SUFFIX for identifier in excluded}):
+        raise EvidenceError("queue phase population differs from its prior-start ledger")
+    split = "smoke" if phase in ("compatibility", "smoke") else "calibration"
+    verify_order(rows, manifest["protocol"]["seeds"][split], phase,
+                 required_rows=required, consumed_assignment_ids=excluded)
+
+
+def check_queue_prior_starts(plan: dict, study_directory: Path | None, *, bundle: ProtocolBundle | None = None,
+                             receipt_directory: Path | None = None,
+                             repair_evidence_directory: Path | None = None) -> None:
+    """Recheck Q exclusions against receipt-bound journals, even without supplied prior paths."""
+    if plan["tool_schema_version"] != TOOL_SCHEMA_VERSION_Q or plan["phase"] == "compatibility":
+        return
+    ledger = plan["consumed_attempts"]
+    if not ledger["prior_roots"]:
+        return
+    if study_directory is None:
+        raise EvidenceError("queue prior starts require the registered study directory")
+    registrations = {entry["plan_hash"]: entry for entry in registered_roots(study_directory)}
+    seen = set()
+    for record in ledger["prior_roots"]:
+        identity = record["plan_hash"]
+        registration = registrations.get(identity)
+        if identity in seen or registration is None or registration["state"] == "abandoned":
+            raise EvidenceError("queue prior-start ledger names an unknown, duplicate or abandoned root")
+        seen.add(identity)
+        root = safe_child(Path(study_directory), registration["root_path"])
+        prior, starts = consumed_attempts_in_root(root, bundle=bundle, study_directory=study_directory,
+            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+        if (prior["phase"] != plan["phase"] or prior["source"] != plan["source"]
+                or prior["revision"] != record["revision"] or sorted(starts) != record["consumed_attempt_ids"]):
+            raise EvidenceError("queue prior-start ledger differs from verified primary starts")
+        check_start_claims(study_directory, prior, root)
 
 
 def check_root_assignment_binding(directory: Path, plan: dict, study_directory: Path | None) -> None:
@@ -941,6 +1003,10 @@ def check_root_assignment_binding(directory: Path, plan: dict, study_directory: 
     if "study_manifest_hash" not in plan["source"]:
         if plan["phase"] != "compatibility":
             raise EvidenceError("behavioral plans require their sealed study binding")
+        if plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q:
+            from .queue_checks import verify_compatibility_population
+
+            verify_compatibility_population(plan, lane_plans)
         return
     if study_directory is None:
         raise EvidenceError("assignment binding requires the registered study directory")
@@ -960,6 +1026,7 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
                           pilot_decision: dict | None = None,
                           pilot_decision_verifier: Callable[..., dict] | None = None,
                           study_manifest: dict | None = None,
+                          study_directory: Path | None = None,
                           receipt_directory: Path | None = None, repair_evidence_directory: Path | None = None
                           ) -> tuple[dict, dict, dict]:
     """Seal rows into lanes; core counts require an injected offline decision verifier.
@@ -971,6 +1038,8 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
     from .pilot import CORE_ARMS, check_core_decision
 
     canonical = rows
+    if bundle.schema_version == TOOL_SCHEMA_VERSION_Q and "study_manifest_hash" not in source:
+        raise EvidenceError("queue assignment plans require their sealed study population")
     if "study_manifest_hash" in source:
         if study_manifest is None:
             raise EvidenceError("study-bound build requires its sealed study manifest")
@@ -978,6 +1047,12 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
             raise EvidenceError("plan caps differ from its sealed study")
         canonical = check_assignment_binding(rows, manifest=study_manifest, source=source, phase=phase,
                                              fixtures=fixtures)
+        if bundle.schema_version == TOOL_SCHEMA_VERSION_Q:
+            check_queue_population(canonical, study_manifest, phase, consumed_attempts)
+            check_queue_prior_starts({"tool_schema_version": bundle.schema_version, "phase": phase,
+                                      "source": source, "consumed_attempts": consumed_attempts or _empty_ledger()},
+                study_directory, bundle=bundle, receipt_directory=receipt_directory,
+                repair_evidence_directory=repair_evidence_directory)
     if phase == "collection" and study_manifest is not None:
         expected_smoke = sorted(row["assignment_id"] for row in study_manifest["assignments"] if row.get("phase", row["split"]) == "smoke")
         if sorted(smoke_assignment_ids or []) != expected_smoke:
@@ -2010,6 +2085,8 @@ def consumed_attempts_in_root(directory: Path, *, bundle: ProtocolBundle | None 
 
     check_root_assignment_binding(directory, plan, study_directory)
     check_receipt(directory, receipt_directory, study_directory=study_directory)
+    check_queue_prior_starts(plan, study_directory, bundle=bundle, receipt_directory=receipt_directory,
+                             repair_evidence_directory=repair_evidence_directory)
     if plan["phase"] != "compatibility":
         root_registration(study_directory, plan, directory=directory, require_finalized=False)
     consumed: set[str] = set()
@@ -2153,6 +2230,10 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
     """
     top, lane_plans, fixtures = plan
     check_execution_policy(top, lane_plans)
+    if top["phase"] == "compatibility" and top["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q:
+        from .queue_checks import verify_compatibility_population
+
+        verify_compatibility_population(top, lane_plans)
     check_prerequisite_receipts(top, compatibility_directories, receipt_directory)
     if top["phase"] != "compatibility" and ("study_manifest_hash" not in top["source"]
                                               or top.get("consumed_attempts") is None):
@@ -2161,6 +2242,8 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
         if study_directory is None:
             raise EvidenceError("assignment binding requires the registered study directory")
         check_plan_assignment_binding(top, lane_plans, read_study_manifest(study_directory), fixtures)
+        check_queue_prior_starts(top, study_directory, bundle=bundle, receipt_directory=receipt_directory,
+                                 repair_evidence_directory=repair_evidence_directory)
     from .pilot import CORE_ARMS, verify_core_binding
 
     entry_arms = {entry["arm"] for lane in lane_plans.values() for entry in lane["planned_order"]}
@@ -2410,6 +2493,8 @@ def verify_live_root(directory: Path, *, bundle: ProtocolBundle | None = None,
     bundle = _tool_set_for_plan(plan, bundle)
     check_root_assignment_binding(directory, plan, study_directory)
     check_prerequisite_receipts(plan, compatibility_directories, receipt_directory)
+    check_queue_prior_starts(plan, study_directory, bundle=bundle, receipt_directory=receipt_directory,
+                             repair_evidence_directory=repair_evidence_directory)
     from .pilot import verify_core_binding
 
     verify_core_binding(plan, entry_arms=planned_arms(directory, plan))
@@ -2790,6 +2875,7 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
                                  smoke_assignment_ids=smoke_ids, review_plan_hash=review_plan_hash,
                                  selected_arms=selected_arms, pilot_decision=pilot_decision,
                                  pilot_decision_verifier=pilot_decision_verifier, study_manifest=manifest,
+                                 study_directory=study_directory,
                                  receipt_directory=receipt_directory,
                                      repair_evidence_directory=repair_evidence_directory)
 
