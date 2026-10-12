@@ -1,5 +1,6 @@
 """Level S allocation, paired rounds, and a real offline 72-entry pilot root."""
 
+import shutil
 from collections import Counter, defaultdict
 from copy import deepcopy
 
@@ -166,7 +167,9 @@ def test_cli_builds_offline_pilot_root_with_all_four_fields_unchanged(tmp_path, 
     # This creates no runtime and authorizes no model call.
     monkeypatch.setattr(live, "compatibility_evidence", lambda directories, *, bundle: (
         {lane_id(model, effort): {"test_only": True} for model, effort in lane_order()}, []))
-    study, manifest, _ = wp6_study
+    study = tmp_path / "study"
+    shutil.copytree(wp6_study[0], study)
+    manifest = wp6_study[1]
     caps = tmp_path / "caps.json"
     atomic_json(caps, wp6_inputs["caps_record"])
     root = study / "roots" / "social-pilot-offline-test"

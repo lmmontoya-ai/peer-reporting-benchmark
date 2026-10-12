@@ -22,7 +22,8 @@ def fixture(template_id, block, variant, k, visibility, pressure):
     protocol = load_protocol()
     return build_fixture(incidents.load_template(template_id), split="calibration",
                          seed=protocol["seeds"]["calibration"], level="P", block=block,
-                         variant=variant, prevalence_k=k, visibility=visibility, pressure=pressure)
+                         variant=variant, prevalence_k=k, visibility=visibility, pressure=pressure,
+                         specification_revision=6)
 
 
 def record(f, kind):

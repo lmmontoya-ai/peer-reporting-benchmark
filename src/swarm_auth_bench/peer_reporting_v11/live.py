@@ -634,7 +634,9 @@ def _assemble(phase: str, revision: str, caps_record: dict, bundle: ProtocolBund
         lanes.append({"lane_id": lane, "model": model, "reasoning_effort": effort, "path": f"lanes/{lane}",
                       "plan_hash": seal(plan)["seal_hash"], "planned_calls": len(planned)})
     top = {
-        "kind": TOP_PLAN_KIND, **bindings, "specification_revision": SPECIFICATION_REVISION, "phase": phase,
+        "kind": TOP_PLAN_KIND, **bindings,
+        "specification_revision": SPECIFICATION_REVISION if bundle.schema_version == "peer-reporting-v11-tools-v3" else 6,
+        "phase": phase,
         "revision": revision, "caps": deepcopy(caps_record), "caps_hash": content_hash(caps_record),
         "global_max_concurrency": caps_record["global_max_concurrency"], "source": deepcopy(source),
         "gate_evidence": deepcopy(gate_evidence), "lanes": lanes,

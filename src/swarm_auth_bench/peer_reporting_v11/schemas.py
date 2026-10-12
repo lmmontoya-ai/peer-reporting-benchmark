@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -10,6 +11,7 @@ from . import TOOL_SCHEMA_VERSION
 
 SCHEMA_VERSION = TOOL_SCHEMA_VERSION
 TOOL_SCHEMA_VERSION_P = "peer-reporting-v11-tools-v2"
+TOOL_SCHEMA_VERSION_Q = "peer-reporting-v11-tools-v3"
 DRAFT = "https://json-schema.org/draft/2020-12/schema"
 ID = {"type": "string", "minLength": 1, "maxLength": 100}
 NULLABLE_ID = {**ID, "type": ["string", "null"]}
@@ -254,6 +256,8 @@ def validate_schema(value: object, schema: dict[str, Any], path: str = "") -> No
             raise V11SchemaError(path, "minLength", schema["minLength"])
         if len(value) > schema.get("maxLength", len(value)):
             raise V11SchemaError(path, "maxLength", schema["maxLength"])
+        if "pattern" in schema and not re.search(schema["pattern"], value):
+            raise V11SchemaError(path, "pattern")
     elif type(value) is int:
         if value < schema.get("minimum", value):
             raise V11SchemaError(path, "minimum", schema["minimum"])
@@ -261,13 +265,23 @@ def validate_schema(value: object, schema: dict[str, Any], path: str = "") -> No
             raise V11SchemaError(path, "maximum", schema["maximum"])
 
 
-def validate_input(name: str, arguments: object) -> None:
+def validate_input(name: str, arguments: object, *, schema_version: str = SCHEMA_VERSION) -> None:
+    if schema_version == TOOL_SCHEMA_VERSION_Q:
+        from .queue_schema import validate_input as validate_queue_input
+
+        return validate_queue_input(name, arguments)
+    if schema_version not in {SCHEMA_VERSION, TOOL_SCHEMA_VERSION_P}:
+        raise ValueError(f"unknown tool schema version: {schema_version}")
     if name not in INPUT_SCHEMAS:
         raise V11SchemaError("", "enum")
     validate_schema(arguments, INPUT_SCHEMAS[name])
 
 
 def validate_output(name: str, value: object, *, schema_version: str = SCHEMA_VERSION) -> None:
+    if schema_version == TOOL_SCHEMA_VERSION_Q:
+        from .queue_schema import validate_output as validate_queue_output
+
+        return validate_queue_output(name, value)
     if schema_version not in {SCHEMA_VERSION, TOOL_SCHEMA_VERSION_P}:
         raise ValueError(f"unknown tool schema version: {schema_version}")
     outputs = OUTPUT_SCHEMAS_P if schema_version == TOOL_SCHEMA_VERSION_P else OUTPUT_SCHEMAS

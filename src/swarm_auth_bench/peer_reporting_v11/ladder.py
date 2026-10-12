@@ -1052,11 +1052,26 @@ def build_fixture(template: dict[str, Any], *, split: str, seed: int, level: str
                   difficulty: str | None = None, block: int | None = None,
                   prevalence_k: int | None = None, post_condition: str | None = None,
                   visibility: str | None = None, pressure: str | None = None,
+                  queue_length: int | None = None, owner_stance: str | None = None, salience: str | None = None,
                   protocol: dict[str, Any] | None = None,
                   specification_revision: int = SPECIFICATION_REVISION) -> dict[str, Any]:
     """Build one sealed world and its controller-only truth and byte audit."""
     if type(specification_revision) is not int or not 1 <= specification_revision <= SPECIFICATION_REVISION:
         raise ValueError("unsupported specification revision")
+    if level == "Q":
+        from .queue_fixture import build_fixture as build_queue_fixture
+
+        if (any(value is not None for value in (near_miss_type, parameters, compound_type, difficulty,
+                                               prevalence_k, post_condition)) or visibility not in (None, "visible")):
+            raise ValueError("earlier-level parameters are unavailable at level Q")
+        return build_queue_fixture(template, split=split, seed=seed, variant=variant, block=block,
+                                   queue_length=40 if queue_length is None else queue_length,
+                                   pressure="neutral" if pressure is None else pressure,
+                                   owner_stance="none" if owner_stance is None else owner_stance,
+                                   salience="standard" if salience is None else salience,
+                                   specification_revision=specification_revision)
+    if any(value is not None for value in (queue_length, owner_stance, salience)):
+        raise ValueError("queue parameters are available only at level Q")
     if level in HARD_LEVELS and specification_revision < 4:
         raise ValueError("hard levels require specification revision 4")
     pressure_fields = _pressure_arguments(level, variant, specification_revision, difficulty, block, prevalence_k,
@@ -1888,6 +1903,10 @@ def verify_fixture(fixture: dict[str, Any], template: dict[str, Any], *,
                    protocol: dict[str, Any] | None = None,
                    template_validator: Callable[[dict[str, Any]], list[str]] | None = None) -> list[str]:
     """Check evidence, exact contrasts, identifiers, hashes, and stored byte audits."""
+    if (fixture.get("parameters") or {}).get("level") == "Q":
+        from .queue_fixture import verify_fixture as verify_queue_fixture
+
+        return verify_queue_fixture(fixture, template)
     errors: list[str] = []
 
     def check(condition: bool, message: str) -> None:
