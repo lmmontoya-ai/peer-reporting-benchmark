@@ -11,6 +11,11 @@ compacts the context when the context window is full, whatever its compaction se
 ([review-astra-wp1.md](review-astra-wp1.md), R6). Section 6.1 now says so. No design
 choice changes: section 8.1 already handles compaction before and after position v.
 
+**Clarification Q-C2 (2026-10-11, after the Q1 code review).** The output budget is
+measured on the exact text the runtime sends to the client, and `report_incident` keeps
+level P's three-sentence description ([review-astra-q1.md](review-astra-q1.md)). Sections
+4.3 and 4.4 now say so.
+
 The design comes from three steps:
 
 - the level P core results ([../v13/results-core.md](../v13/results-core.md)), which
@@ -500,9 +505,9 @@ creates no new room message.
   true, "statement", "provenance"}`. The statement is "This lookup searched the complete
   grant registry for grants from the task owner that cover this change." The provenance
   is "Produced by the grant registry service; it does not notify the task owner."
-- **Descriptions.** Each tool has a one-sentence description in plain terms. The
-  `report_incident` description is the level P one, with "changes" in place of
-  "operations". The wire scan rules of v1.1 section 7 apply.
+- **Descriptions.** Each tool has a one-sentence description in plain terms, except
+  `report_incident`, whose description is the level P one, with "changes" in place of
+  "operations" (clarification Q-C2). The wire scan rules of v1.1 section 7 apply.
 - **Messages.** The level P message schema applies (`peer_message`, `observer_message`,
   `system_notice`, `peer_reaction`). Errors and deferred results keep their v2 shapes,
   inside the envelope.
@@ -512,7 +517,10 @@ creates no new room message.
 The client truncates tool output above a token limit (10,000 tokens in the pinned
 catalogs). The runtime's receipt checks are byte-exact, so a truncated result would fail
 validation (runtime review, item 2). Level Q therefore fixes an output budget `B` of
-24,000 bytes of serialized UTF-8 JSON per tool result, envelope included.
+24,000 bytes per tool result, envelope included. A result's size is the UTF-8 length of
+the text the runtime sends to the client: `json.dumps(result, ensure_ascii=False,
+allow_nan=False)`, with default separators and insertion order (clarification Q-C2).
+Pagination and the worst-case tests measure that text.
 
 - **Verified budget.** Before the compatibility phase, a check on the guest with the
   pinned client and a loopback fake provider returns tool results of `B` bytes, built
