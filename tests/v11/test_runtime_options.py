@@ -351,14 +351,14 @@ async def test_full_drain_still_has_its_own_cleanup_budget(tmp_path, monkeypatch
     assert not any("runtime cleanup incomplete" in failure for failure in result["infrastructure_failures"])
 
 
-async def test_cancelled_close_kills_process_cancels_tasks_removes_home_and_clears_sessions(tmp_path):
+async def test_cancelled_close_leaves_process_running_cancels_tasks_removes_home_and_clears_sessions(tmp_path,
+                                                                                                  monkeypatch):
     runtime = CodexRuntime(codex_executable="not-executed")
     runtime._temporary_home = tempfile.TemporaryDirectory(prefix="work-", dir=tmp_path)
     runtime._home = Path(runtime._temporary_home.name)
     home = runtime._home
     proc = await asyncio.create_subprocess_exec(sys.executable, "-c", "import time; time.sleep(60)",
                                                 start_new_session=os.name != "nt")
-    runtime._bind_process_handle(proc)
     runtime._proc = proc
     runtime._reader_task = asyncio.create_task(asyncio.Event().wait())
     background = asyncio.create_task(asyncio.Event().wait())
@@ -369,17 +369,27 @@ async def test_cancelled_close_kills_process_cancels_tasks_removes_home_and_clea
         await asyncio.Event().wait()
 
     runtime._stop_process = hang
+    signals = []
+    original_kill = proc.kill
+    monkeypatch.setattr(proc, "kill", lambda: signals.append("kill"))
+    monkeypatch.setattr(proc, "terminate", lambda: signals.append("terminate"))
+    monkeypatch.setattr(proc, "send_signal", lambda sig: signals.append(sig))
     try:
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(runtime.close(), 0.02)
         assert runtime._proc is proc and home.exists()
-        await asyncio.wait_for(runtime.close(), 5)
-        assert proc.returncode is not None and not home.exists()
-        assert background.cancelled() and runtime._sessions == {} and runtime._proc is None
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(runtime.close(), 5)
+        assert proc.returncode is None and not home.exists() and signals == []
+        assert background.cancelled() and runtime._sessions == {} and runtime._proc is proc
+        assert runtime._home is runtime._temporary_home is runtime._reader_task is None
+        original_kill()
+        await proc.wait()
         await runtime.close()
+        assert runtime._proc is None and signals == []
     finally:
         if proc.returncode is None:
-            proc.kill()
+            original_kill()
             await proc.wait()
 
 
@@ -400,7 +410,8 @@ async def test_first_close_hang_is_retried_within_cleanup_budget(tmp_path, monke
     assert not result["infrastructure_failures"]
 
 
-async def test_both_close_passes_failing_preserve_failure_text_and_root_hold(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["hang", "process_running"])
+async def test_both_close_passes_failing_preserve_failure_text_and_root_hold(tmp_path, monkeypatch, failure):
     monkeypatch.setattr(runtime_cleanup, "CLEANUP_BUDGET_SECONDS", 0.06)
     root, plan = compat_root(tmp_path / "root")
     sample = compat_fixture(root, plan)
@@ -410,10 +421,20 @@ async def test_both_close_passes_failing_preserve_failure_text_and_root_hold(tmp
 
     def failing_factory(*args):
         runtime = factory(*args)
+        original_close = runtime.close
+
+        async def stop(_proc):
+            await asyncio.Event().wait()
+
+        if failure == "process_running":
+            runtime._proc = SimpleNamespace(pid=90101, returncode=None)
+            runtime._stop_process = stop
 
         async def hang():
             attempts.append(runtime)
-            await asyncio.Event().wait()
+            if failure == "hang":
+                await asyncio.Event().wait()
+            await original_close()
 
         runtime.close = hang
         return runtime
@@ -428,6 +449,12 @@ async def test_both_close_passes_failing_preserve_failure_text_and_root_hold(tmp
             assert result["termination_kind"] == "infrastructure_incomplete" and not result["runtime_closed"]
             assert "runtime cleanup incomplete: TimeoutError: " in result["infrastructure_failures"]
     assert all(attempts.count(runtime) == 2 for runtime in harness.created)
+    if failure == "process_running":
+        for runtime in harness.created:
+            assert runtime._sessions == {} and runtime._home is None and runtime._close_started
+            assert runtime._proc.returncode is None
+            runtime._proc.returncode = 0
+            await runtime.close()
 
 
 @pytest.mark.parametrize("prefix", ["swarm-codex-controller-", "work-"])

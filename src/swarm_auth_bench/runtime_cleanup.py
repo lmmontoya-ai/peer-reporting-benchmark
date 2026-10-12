@@ -144,7 +144,7 @@ async def close_runtime(runtime: Any) -> None:
                     raise
                 cancellation = cancellation or error
                 # Cancelling the cooperative pass starts the resumable retry.
-                # Outer cancellation never cancels the force-close pass.
+                # Outer cancellation never cancels the second cleanup pass.
                 if not first_pass.done():
                     first_pass.cancel()
     except Exception as error:

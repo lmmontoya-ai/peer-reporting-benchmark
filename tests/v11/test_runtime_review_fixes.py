@@ -90,19 +90,45 @@ async def test_orphan_report_leaves_dead_owner_home_and_live_child_untouched(tmp
         await proc.wait()
 
 
-async def test_retry_after_process_exit_does_not_signal_reused_pid_and_clears_resources(tmp_path, monkeypatch):
-    signals = []
-    monkeypatch.setattr(core, "_kill_group", signals.append)
+@pytest.mark.parametrize("platform", ["posix", "nt"])
+@pytest.mark.parametrize("state", ["exited", "replaced", "running", "exit_during_check"])
+async def test_second_close_after_timeout_sends_no_signal_and_clears_resources(tmp_path, monkeypatch,
+                                                                            platform, state):
+    signals, stops = [], []
+    owners = {90101: "original"}
+
+    class Process:
+        pid = 90101
+        code = None
+        check_exit = False
+
+        @property
+        def returncode(self):
+            observed = self.code
+            if self.check_exit:
+                # Exit and PID reuse before Python publishes the observed exit.
+                self.check_exit = False
+                self.code = 0
+                owners[self.pid] = "replacement"
+            return observed
+
+        def kill(self):
+            signals.append("kill")
+
+        def terminate(self):
+            signals.append("terminate")
+
+        def send_signal(self, sig):
+            signals.append(sig)
+
+        async def wait(self):
+            pytest.fail("second close waited for the process")
+
     runtime = core.CodexRuntime(codex_executable="not-executed")
     runtime._temporary_home = tempfile.TemporaryDirectory(prefix="work-", dir=tmp_path)
     runtime._home = home = Path(runtime._temporary_home.name)
-
-    async def wait():
-        return 0
-
-    proc = SimpleNamespace(pid=90101, returncode=None, wait=wait, _runtime_start="original")
-    runtime._proc = proc
-    runtime._reader_task = asyncio.create_task(asyncio.Event().wait())
+    runtime._proc = proc = Process()
+    runtime._reader_task = reader = asyncio.create_task(asyncio.Event().wait())
     background = asyncio.create_task(asyncio.Event().wait())
     runtime._background.add(background)
     runtime._peer_dispatches = {asyncio.create_task(asyncio.Event().wait())}
@@ -111,264 +137,131 @@ async def test_retry_after_process_exit_does_not_signal_reused_pid_and_clears_re
     pending = asyncio.get_running_loop().create_future()
     runtime._pending[1] = pending
 
-    async def stop(_proc):
-        proc.returncode = 0
+    async def stop(stopped):
+        stops.append(stopped)
+        await asyncio.Event().wait()
 
     runtime._stop_process = stop
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(runtime.close(), 0.02)
     assert runtime._proc is proc and home.exists()
-    monkeypatch.setattr(core, "process_start", lambda pid: "replacement")
-    await runtime.close()
-    assert signals == [] and not home.exists() and runtime._home is None
-    assert runtime._proc is runtime._reader_task is runtime._temporary_home is None
+    if state == "exited":
+        proc.code = 0
+    elif state == "replaced":
+        owners[proc.pid] = "replacement"
+    elif state == "exit_during_check":
+        proc.check_exit = True
+    monkeypatch.setattr(core, "os", SimpleNamespace(name=platform,
+        kill=lambda *args: signals.append(("kill", args)),
+        killpg=lambda *args: signals.append(("killpg", args))))
+    monkeypatch.setattr(core, "signal", SimpleNamespace(SIGTERM=15, SIGKILL=9,
+        pidfd_send_signal=lambda *args: signals.append(("pidfd", args))))
+    monkeypatch.setattr(cleanup, "process_start", lambda pid: pytest.fail("second close read a PID identity"))
+
+    if state == "exited":
+        await runtime.close()
+        assert runtime._proc is None and not runtime._close_started
+    else:
+        with pytest.raises(asyncio.TimeoutError) as caught:
+            await runtime.close()
+        assert str(caught.value) == "" and runtime._proc is proc and runtime._close_started
+    assert signals == [] and stops == [proc]
+    assert not home.exists() and runtime._home is runtime._temporary_home is runtime._reader_task is None
     assert runtime._sessions == runtime._pending == {} and runtime._background == set()
-    assert background.cancelled() and pending.cancelled()
+    assert reader.cancelled() and background.cancelled() and pending.cancelled()
     assert runtime._peer_dispatches == set() and all(task.cancelled() for task in dispatches)
+    assert owners[proc.pid] == ("replacement" if state in {"replaced", "exit_during_check"} else "original")
+    # A later observation of exit can finish an incomplete close without signals.
+    proc.code = 0
+    await runtime.close()
+    assert runtime._proc is None and not runtime._close_started and signals == [] and stops == [proc]
 
 
 @pytest.mark.parametrize("platform", ["posix", "nt"])
-async def test_force_close_exit_and_pid_reuse_after_last_observation_never_signals_replacement(monkeypatch,
-                                                                                           platform):
-    signals, attempts, closed = [], [], []
-    owners = {90101: "original"}
-
-    class Process:
-        pid, _runtime_start, _runtime_pidfd = 90101, "original", 42 if platform == "posix" else None
-        code = None
-
-        @property
-        def returncode(self):
-            observed = self.code
-            if observed is None:
-                # Exit and reuse after the runtime's last observation, before signalling.
-                self.code = 0
-                owners[self.pid] = "replacement"
-            return observed
-
-        def kill(self):
-            attempts.append("process-handle")
-            assert owners[self.pid] == "replacement"
-            raise ProcessLookupError()
-
-        async def wait(self):
-            return self.code
-
-    def send(pidfd, sig):
-        attempts.append((pidfd, sig))
-        assert owners[90101] == "replacement" and pidfd == 42
-        # The retained pidfd still refers to the exited original process.
-        raise ProcessLookupError()
-
-    monkeypatch.setattr(core, "os", SimpleNamespace(name=platform, close=closed.append,
-                                                   kill=lambda pid, sig: signals.append((pid, sig)),
-                                                   killpg=lambda pid, sig: signals.append((pid, sig))))
-    monkeypatch.setattr(core, "signal", SimpleNamespace(SIGKILL=9, pidfd_send_signal=send))
-    monkeypatch.setattr(core, "_kill_group", signals.append)
-    monkeypatch.setattr(core, "process_start", lambda pid: pytest.fail("force-close read a PID identity"))
-    runtime = core.CodexRuntime(codex_executable="not-executed")
-    runtime._proc, runtime._close_started = Process(), True
-    await runtime.close()
-    assert signals == [] and runtime._proc is None
-    assert attempts == ([(42, 9)] if platform == "posix" else ["process-handle"])
-    assert closed == ([42] if platform == "posix" else [])
-
-
-@pytest.mark.parametrize("platform", ["posix", "nt"])
-async def test_force_close_live_process_uses_only_its_bound_handle(monkeypatch, platform):
-    attempts, closed, pid_signals = [], [], []
-    proc = SimpleNamespace(pid=90101, returncode=None, _runtime_pidfd=42 if platform == "posix" else None)
-
-    def kill():
-        attempts.append("process-handle")
-        proc.returncode = -9
-
-    def send(pidfd, sig):
-        attempts.append((pidfd, sig))
-        proc.returncode = -sig
-
-    async def wait():
-        assert proc.returncode is not None
-        return proc.returncode
-
-    proc.kill, proc.wait = kill, wait
-    monkeypatch.setattr(core, "os", SimpleNamespace(name=platform, close=closed.append,
-                                                   kill=lambda pid, sig: pid_signals.append((pid, sig)),
-                                                   killpg=lambda pid, sig: pid_signals.append((pid, sig))))
-    monkeypatch.setattr(core, "signal", SimpleNamespace(SIGKILL=9, pidfd_send_signal=send))
-    monkeypatch.setattr(core, "_kill_group", pid_signals.append)
-    runtime = core.CodexRuntime(codex_executable="not-executed")
-    runtime._proc, runtime._close_started = proc, True
-    await runtime.close()
-    assert proc.returncode == -9 and runtime._proc is None and pid_signals == []
-    assert attempts == ([(42, 9)] if platform == "posix" else ["process-handle"])
-    assert closed == ([42] if platform == "posix" else [])
-
-
-async def test_launch_retains_pidfd_before_identity_lookup_and_closes_it_when_reaped(tmp_path, monkeypatch):
-    order, closed = [], []
-    exited = asyncio.Event()
+@pytest.mark.parametrize("outcome", ["success", "spawn_failure", "marker_failure"])
+async def test_launch_opens_no_extra_descriptor_or_reaper_even_on_failure(tmp_path, monkeypatch,
+                                                                        platform, outcome):
+    order, descriptors, waits = [], [], []
     proc = SimpleNamespace(pid=90101, returncode=None)
 
     async def wait():
-        await exited.wait()
+        waits.append(True)
         return proc.returncode
 
     async def launch(*args, **kwargs):
         order.append("launch")
+        if outcome == "spawn_failure":
+            raise OSError("launch failed")
         return proc
 
-    def open_pidfd(pid):
-        assert pid == proc.pid
-        order.append("pidfd")
-        return 42
+    def mark_home(home, **process):
+        assert home == tmp_path
+        order.append("mark")
+        if process:
+            assert process == {"process_pid": proc.pid}
+            if outcome == "marker_failure":
+                raise OSError("marker failed")
 
-    def identity(pid):
-        order.append("identity")
-        assert proc._runtime_pidfd == 42
-        return "original"
-
-    proc.wait = wait
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
-    monkeypatch.setattr(core, "os", SimpleNamespace(name="posix", environ={}, pidfd_open=open_pidfd,
-                                                   close=closed.append))
-    monkeypatch.setattr(core, "mark_home", lambda *args, **kwargs: None)
-    monkeypatch.setattr(core, "process_start", identity)
-    runtime = core.CodexRuntime(codex_executable="not-executed")
-    assert await runtime._launch(home=tmp_path) is proc
-    reapers = list(runtime._background)
-    await asyncio.sleep(0)
-    assert order == ["launch", "pidfd", "identity"] and closed == []
-    proc.returncode = 0
-    exited.set()
-    await asyncio.gather(*reapers)
-    assert closed == [42] and proc._runtime_pidfd is None
-    await runtime.close()
-    assert closed == [42] and runtime._background == set()
-
-
-async def test_cancelled_first_close_retains_pidfd_for_force_close(monkeypatch):
-    attempts, closed = [], []
-    started, exited = asyncio.Event(), asyncio.Event()
-    proc = SimpleNamespace(pid=90101, returncode=None)
-
-    async def wait():
-        await exited.wait()
-        return proc.returncode
-
-    async def stop(_proc):
-        started.set()
-        await asyncio.Event().wait()
-
-    def send(pidfd, sig):
-        attempts.append((pidfd, sig))
-        proc.returncode = -sig
-        exited.set()
-
-    proc.wait = wait
-    monkeypatch.setattr(core, "os", SimpleNamespace(name="posix", pidfd_open=lambda pid: 42,
-                                                   close=closed.append))
-    monkeypatch.setattr(core, "signal", SimpleNamespace(SIGKILL=9, pidfd_send_signal=send))
-    runtime = core.CodexRuntime(codex_executable="not-executed")
-    runtime._bind_process_handle(proc)
-    runtime._proc, runtime._stop_process = proc, stop
-    first = asyncio.create_task(runtime.close())
-    await started.wait()
-    first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
-    assert proc._runtime_pidfd == 42 and closed == [] and attempts == []
-    await runtime.close()
-    assert attempts == [(42, 9)] and closed == [42]
-    assert runtime._proc is None and runtime._background == set()
-
-
-@pytest.mark.parametrize("missing", ["pidfd_open", "unsupported", "pidfd_send_signal"])
-async def test_unavailable_pidfd_records_incomplete_cleanup_without_signalling(tmp_path, monkeypatch, missing):
-    signals, closed = [], []
-    proc = SimpleNamespace(pid=90101, returncode=None)
-
-    async def wait():
-        await asyncio.Event().wait()
-
-    async def launch(*args, **kwargs):
-        return proc
-
-    def open_pidfd(pid):
-        if missing == "unsupported":
-            raise OSError("pidfds unavailable")
+    def descriptor(*args):
+        descriptors.append(args)
         return 42
 
     proc.wait = wait
-    platform = SimpleNamespace(name="posix", environ={}, close=closed.append,
-                               kill=lambda pid, sig: signals.append((pid, sig)),
-                               killpg=lambda pid, sig: signals.append((pid, sig)))
-    if missing != "pidfd_open":
-        platform.pidfd_open = open_pidfd
-    monkeypatch.setattr(core, "os", platform)
-    monkeypatch.setattr(core, "mark_home", lambda *args, **kwargs: None)
-    monkeypatch.setattr(core, "process_start", lambda pid: "original")
-    monkeypatch.setattr(core, "_kill_group", signals.append)
-    monkeypatch.setattr(core, "signal", SimpleNamespace(SIGKILL=9))
     monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
-
-    class UnboundClose(FakeTransport):
-        async def close(self):
-            if self._proc is None:
-                self._proc = await self._launch(home=self._home)
-                self._close_started = True
-            await core.CodexRuntime.close(self)
-
-    result, runtime, _ = await observe(tmp_path, runtime_class=UnboundClose)
-    assert not result["runtime_closed"] and result["termination_kind"] == "infrastructure_incomplete"
-    assert "runtime cleanup incomplete: RuntimeProtocolError: app-server process has no bound termination handle" in (
-        result["infrastructure_failures"])
-    assert signals == [] and proc.returncode is None and runtime._proc is proc
-    # Release the synthetic process and retained handle after checking the failed cleanup.
-    reapers = list(runtime._background)
-    proc.returncode = 0
-    for task in reapers:
-        task.cancel()
-    await asyncio.gather(*reapers, return_exceptions=True)
-    await core.CodexRuntime.close(runtime)
-    assert closed == ([42] if missing == "pidfd_send_signal" else [])
-
-
-async def test_force_close_real_local_process_releases_bound_handle(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "os", SimpleNamespace(name=platform, environ={}, pidfd_open=descriptor,
+                                                   open=descriptor, close=descriptor))
+    monkeypatch.setattr(core, "mark_home", mark_home)
     runtime = core.CodexRuntime(codex_executable="not-executed")
-    monkeypatch.setattr(runtime, "_command", lambda overrides=(): [sys.executable, "-c",
-                                                                 "import time; time.sleep(60)"])
-    proc = await runtime._launch(home=tmp_path)
-    runtime._proc, runtime._close_started = proc, True
-    attempts = []
-    if os.name == "nt":
-        original = proc.kill
-
-        def kill():
-            attempts.append("process-handle")
-            original()
-
-        monkeypatch.setattr(proc, "kill", kill)
+    if outcome == "success":
+        assert await runtime._launch(home=tmp_path) is proc
     else:
-        original = core.signal.pidfd_send_signal
-        pidfd = proc._runtime_pidfd
+        with pytest.raises(OSError, match="failed"):
+            await runtime._launch(home=tmp_path)
+    await asyncio.sleep(0)
+    assert order == (["mark", "launch"] if outcome == "spawn_failure" else ["mark", "launch", "mark"])
+    assert descriptors == waits == [] and runtime._background == set()
+    assert "_runtime_pidfd" not in vars(proc) and "_runtime_start" not in vars(proc)
 
-        def send(fd, sig):
-            attempts.append((fd, sig))
-            original(fd, sig)
 
-        monkeypatch.setattr(core.signal, "pidfd_send_signal", send)
-    monkeypatch.setattr(core, "_kill_group", lambda pid: pytest.fail("force-close signalled a PID"))
-    try:
-        await asyncio.wait_for(runtime.close(), 5)
-        assert proc.returncode is not None and runtime._proc is None
-        assert attempts == (["process-handle"] if os.name == "nt" else [(pidfd, core.signal.SIGKILL)])
-        assert getattr(proc, "_runtime_pidfd", None) is None
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()
-        await runtime.close()
+@pytest.mark.parametrize("exited", [True, False])
+async def test_second_close_records_process_exit_or_incomplete_cleanup(tmp_path, monkeypatch, exited):
+    monkeypatch.setattr(cleanup, "CLEANUP_BUDGET_SECONDS", 0.1)
+    signals = []
+    proc = SimpleNamespace(pid=90101, returncode=None,
+                           kill=lambda: signals.append("kill"), terminate=lambda: signals.append("terminate"),
+                           send_signal=lambda sig: signals.append(sig))
+
+    class RetryClose(FakeTransport):
+        passes = 0
+
+        async def _stop_process(self, stopped):
+            assert stopped is proc
+            try:
+                await asyncio.Event().wait()
+            finally:
+                if exited:
+                    proc.returncode = 0
+
+        async def close(self):
+            self.passes += 1
+            if self.passes == 1:
+                self._proc = proc
+            await super().close()
+
+    result, runtime, _ = await observe(tmp_path, runtime_class=RetryClose)
+    assert runtime.passes == 2 and signals == [] and result["runtime_closed"] is exited
+    assert runtime._sessions == runtime._pending == {} and runtime._background == set()
+    assert runtime._home is runtime._temporary_home is runtime._reader_task is None
+    if exited:
+        assert runtime._proc is None and not result["infrastructure_failures"]
+        assert result["termination_kind"] == "natural_end"
+    else:
+        assert runtime._proc is proc and runtime._close_started
+        assert result["termination_kind"] == "infrastructure_incomplete"
+        assert "runtime cleanup incomplete: TimeoutError: " in result["infrastructure_failures"]
+        proc.returncode = 0
+        await core.CodexRuntime.close(runtime)
+    assert signals == []
 
 
 @pytest.mark.parametrize("cancel_pass", [1, 2])
