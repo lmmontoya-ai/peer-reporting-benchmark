@@ -30,7 +30,11 @@ leave the endpoint pending. Unrun or ineligible episodes are execution missingne
 not unfinished human coding.
 
 C1 waits for all required main-root owner-communication coding, including the
-executed attention membership and twin packets. It does not wait for episode coding. A
+executed attention membership and twin packets. Completion uses the verified
+export's required-packet inventory and each resolution version's packet statuses.
+An eligible twin without owner communications retains both false-alarm endpoints as `False`,
+but its required packet must be final, including any required second review.
+C1 does not wait for episode coding. A
 pending C1 contains only its status and coding-completion inventory, with no
 primary estimates, tests, equivalence result or sensitivity fit. Mechanical
 secondary analyses, C2/C3 complete-case descriptive effects and missing bounds
@@ -140,6 +144,9 @@ ITT/reached gate effects, sensitivity exclusions, completion, agreement,
 executed attention memberships, descriptive timing and Q-C6 usage.
 Regression checks cover both output destinations for directly and indirectly
 bound evidence, path aliases, and decision-free secondary and attention reports.
+An eligible empty twin keeps C1 pending without an upload or with a missing
+required second review, then releases it when the packet is final. The regression
+checks each retained resolution version and preserves the automatic false endpoints.
 
 Its fake-transport integration creates small registered gate/main roots using
 Q2a's archive and receipt machinery, then Q2b's exports, scores, packets, retained

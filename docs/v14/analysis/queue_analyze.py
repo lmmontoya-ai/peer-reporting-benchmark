@@ -140,6 +140,7 @@ def load_root(export, study, receipts, *, phase, scores_path=None, resolution_pa
     require(len({row["assignment_id"] for row in rows}) == len(rows), "duplicate exported assignments")
     rows.sort(key=lambda row: row["assignment_id"])
     cache, versions, evidence_files = posthoc._verification_cache(None), {}, set()
+    coding_statuses = {}
     evidence_directories = {Path(path).resolve() for path in (export, study, receipts, repair_evidence_directory)
                             if path is not None}
     protected_resolutions = set()
@@ -178,6 +179,9 @@ def load_root(export, study, receipts, *, phase, scores_path=None, resolution_pa
         if identifier in versions:
             return
         versions[identifier] = record
+        context = bound_packets(record["packet_directory"])
+        coding_statuses[identifier] = {bundle["row"]["assignment_id"]: record["resolutions"][name]["status"]
+                                       for name, bundle in context["bundles"].items()}
         for correction in record["corrections"]:
             history(read_sealed(Path(correction))["correction_of"])
 
@@ -199,12 +203,17 @@ def load_root(export, study, receipts, *, phase, scores_path=None, resolution_pa
             "coding_resolution": context["index"]["coding_resolution"]})
     return {"index": data["index"], "rows": rows,
             "versions": sorted(versions.values(), key=lambda record: (len(record["corrections"]), record["resolution_version"]))
-            or [None], "episode_reviews": checked_episode, "evidence_files": evidence_files,
+            or [None], "coding_statuses": coding_statuses,
+            "episode_reviews": checked_episode, "evidence_files": evidence_files,
             "evidence_directories": evidence_directories}
 
 
 def version_rows(root, resolution):
-    return [{**row, "adjudicated": (resolution["endpoints"][row["assignment_id"]] if resolution else
+    required = {row["assignment_id"] for row in root["index"]["queue_coding_selection"]["rows"]}
+    statuses = root["coding_statuses"][resolution["resolution_version"]] if resolution else {}
+    return [{**row, "coding_required": row["assignment_id"] in required,
+             "coding_status": statuses.get(row["assignment_id"], "pending"),
+             "adjudicated": (resolution["endpoints"][row["assignment_id"]] if resolution else
              adjudicated_endpoints(row["score"])) if row["score"] else {}} for row in root["rows"]]
 
 
@@ -298,13 +307,12 @@ def contrast(pairs, lanes, *, endpoint="owner_informed", adjudicated=True, itt=F
 
 
 def coding_completion(rows):
+    """Required Q2b packets must be final, including automatic-false twins."""
     pending = []
     for row in rows:
         if not row.get("score") or row.get("excluded_from_analysis") or not row["score"]["eligibility"]["eligible"]:
             continue
-        required = ("focal_false_alarm", "twin_any_allegation") if row["variant"] == "twin" else (
-            "owner_informed",) if row["variant"] == "violation" and row["score"]["reached"] else ()
-        if any(row["adjudicated"][name]["value"] is None for name in required):
+        if row["coding_required"] and row["coding_status"] != "final":
             pending.append(row["assignment_id"])
     return {"complete": not pending, "pending_assignments": sorted(pending)}
 
