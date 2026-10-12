@@ -352,6 +352,107 @@ def test_closed_finish_before_notice_storage_remains_a_valid_crash_prefix(tmp_pa
     assert not state["queue"]["closure_notices_stored"] and not state["messages"]
 
 
+@pytest.mark.parametrize("final_texts", [[], ["Final text."]])
+def test_external_closure_notices_without_a_finish_remain_valid(tmp_path, final_texts):
+    w = world(tmp_path)
+    w.close()
+    assert audit_state(w.directory) == w.snapshot()
+    w.store_closure_notices(final_texts, [])
+    assert w.snapshot()["queue"]["closure_notices_stored"]
+    assert audit_state(w.directory) == w.snapshot()
+
+
+def test_final_notice_without_finish_notice_refuses_after_resealing(tmp_path):
+    w = world(tmp_path)
+    w.dispatch("agent_finish", {"reason": "completed", "summary": "A change was made without authorization."})
+    w.store_closure_notices(["The task is complete."], [])
+    assert audit_state(w.directory) == w.snapshot()
+    state = w.snapshot()
+    state["events"] = [event for event in state["events"] if not (
+        event["kind"] == "public_message_stored" and event["data"].get("notice_kind") == "finish_summary")]
+    final_event = next(event for event in state["events"] if (
+        event["kind"] == "public_message_stored" and event["data"].get("notice_kind") == "final_message"))
+    final_event["data"]["message"].update(event_id=w._id("message", 1), sequence=0)
+    state["messages"] = [deepcopy(final_event["data"]["message"])]
+    state["queue"]["closure_notices_stored"] = False
+    reseal(state, w.directory)
+    with pytest.raises(ValueError, match="closure notice|finish notice"):
+        audit_state(w.directory)
+
+
+@pytest.mark.parametrize("alteration", ["closure_flag_false", "final_flag_false", "final_flag_missing",
+                                       "final_flag_without_notice", "closure_flag_integer", "final_flag_integer"])
+def test_closure_notice_flags_must_match_stored_notices_after_resealing(tmp_path, alteration):
+    w = world(tmp_path)
+    w.dispatch("agent_finish", {"reason": "completed", "summary": "Done."})
+    if alteration != "final_flag_without_notice":
+        w.store_closure_notices(["Final text."], [])
+    assert audit_state(w.directory) == w.snapshot()
+    state = w.snapshot()
+    if alteration == "final_flag_missing":
+        state["queue"].pop("final_notices_stored")
+    else:
+        flag, value = {
+            "closure_flag_false": ("closure_notices_stored", False),
+            "final_flag_false": ("final_notices_stored", False),
+            "final_flag_without_notice": ("final_notices_stored", True),
+            "closure_flag_integer": ("closure_notices_stored", 1),
+            "final_flag_integer": ("final_notices_stored", 1),
+        }[alteration]
+        state["queue"][flag] = value
+    reseal(state, w.directory)
+    with pytest.raises(ValueError, match="closure notice"):
+        audit_state(w.directory)
+
+
+@pytest.mark.parametrize("event_kind", ["agent_finished", "queue_item_served", "item_answer_stored",
+                                       "public_message_stored", "fixed_reply_stored", "pressure_reactions_stored",
+                                       "incident_report_stored"])
+def test_requestless_effect_refuses_after_resealing(tmp_path, event_kind):
+    w = world(tmp_path)
+    if event_kind == "agent_finished":
+        w.dispatch("read_channel", {"after_event_id": None, "limit": 16})
+        event = deepcopy(w.events[-1])
+        event.update(kind="agent_finished", data={"reason": "completed", "summary": "Done."})
+    else:
+        serve(w, 2)
+        w.dispatch("send_message", post(recipient=w._fixture["truth"]["queue"]["violator_id"], reply=True))
+        w.dispatch("report_incident", report())
+        event = deepcopy(next(event for event in w.events if event["kind"] == event_kind))
+    assert audit_state(w.directory) == w.snapshot()
+    state = w.snapshot()
+    event["arrival_seq"] = None
+    state["events"].append(event)
+    reseal(state, w.directory)
+    with pytest.raises(ValueError, match="request arrival sequence"):
+        audit_state(w.directory)
+
+
+@pytest.mark.parametrize("arrival_seq", [0, -1, 2])
+def test_finish_effect_with_unknown_request_refuses_after_resealing(tmp_path, arrival_seq):
+    w = world(tmp_path)
+    w.dispatch("read_channel", {"after_event_id": None, "limit": 16})
+    state = w.snapshot()
+    event = deepcopy(state["events"][-1])
+    event.update(kind="agent_finished", arrival_seq=arrival_seq, data={"reason": "completed", "summary": "Done."})
+    state["events"].insert(-1, event)
+    reseal(state, w.directory)
+    with pytest.raises(ValueError, match="request arrival sequence"):
+        audit_state(w.directory)
+
+
+def test_finish_effect_cannot_belong_to_a_different_tool_after_resealing(tmp_path):
+    w = world(tmp_path)
+    w.dispatch("read_channel", {"after_event_id": None, "limit": 16})
+    state = w.snapshot()
+    event = deepcopy(state["events"][-1])
+    event.update(kind="agent_finished", data={"reason": "completed", "summary": "Done."})
+    state["events"].insert(-1, event)
+    reseal(state, w.directory)
+    with pytest.raises(ValueError, match="events differ from replay"):
+        audit_state(w.directory)
+
+
 @pytest.mark.parametrize("boundary", ["open", "limit", "finish", "external"])
 @pytest.mark.parametrize("exposed", [False, True])
 def test_held_request_crash_prefixes_preserve_admission_and_exposure(tmp_path, monkeypatch, boundary, exposed):
