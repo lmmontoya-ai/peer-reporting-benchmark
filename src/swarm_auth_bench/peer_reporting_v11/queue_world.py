@@ -272,6 +272,135 @@ class QueueWorld(V11World):
             return deepcopy(notices)
 
 
+def _validate_lifecycle(state: dict) -> dict[int, str]:
+    """Derive request dispositions from the ordered durable lifecycle events."""
+    arrivals, pending, dispositions, rejections = {}, [], {}, {}
+    exposed, closed, boundary, reason = False, False, None, None
+    required = []
+    closing_unexposed = False
+
+    def external_boundary():
+        nonlocal boundary, reason
+        if boundary is None:
+            if state["boundary_arrival_seq"] != len(arrivals):
+                raise ValueError("queue external closure boundary mismatch")
+            boundary, reason = len(arrivals), state["boundary_reason"]
+            if type(reason) is not str or not 1 <= len(reason) <= 100:
+                raise ValueError("queue closure reason mismatch")
+
+    for event in state["events"][1:]:
+        kind, seq, data = event["kind"], event["arrival_seq"], event["data"]
+        followup = bool(required)
+        if required:
+            expected = required.pop(0)
+            if (kind, seq, canonical_json(data)) != expected:
+                raise ValueError("queue lifecycle event missing or out of order")
+        if kind == "initial_exposure_confirmed":
+            if exposed or closed or closing_unexposed or seq is not None:
+                raise ValueError("queue exposure outside its opportunity")
+            exposed = True
+        elif kind == "tool_requested":
+            if closing_unexposed or type(seq) is not int or seq != len(arrivals) + 1:
+                raise ValueError("queue arrival lifecycle order mismatch")
+            request = state["requests"][seq - 1]
+            # close() can persist an external admission boundary without an event,
+            # while exposed requests are still awaiting their durable dispatch.
+            if boundary is None and state["boundary_arrival_seq"] is not None and seq > state["boundary_arrival_seq"]:
+                external_boundary()
+            admitted = boundary is None and not closed
+            if request["admitted"] is not admitted or request["exposure_confirmed_at_arrival"] is not exposed:
+                raise ValueError("queue request admission or exposure differs from lifecycle")
+            arrivals[seq] = request
+            if admitted:
+                pending.append(seq)
+            else:
+                rejections[seq] = "tool_request_limit" if reason == "tool_request_limit" else "closed"
+            if request["name"] == "report_incident":
+                required.append(("incident_report_attempted", seq, canonical_json({"exposure_confirmed": exposed})))
+            if not admitted:
+                required.append(("tool_rejected", seq, canonical_json({"result": envelope(_error(rejections[seq]))})))
+            else:
+                if seq == state["max_tool_requests"]:
+                    required.append(("limit_reached", seq, canonical_json({"limit": "tool_requests"})))
+                if request["actor_id"] == state["observer_id"] and QueueWorld._finish_is_valid(
+                        request["name"], request["arguments"]):
+                    required.append(("finish_requested", seq, canonical_json({})))
+        elif kind == "incident_report_attempted":
+            if not followup or seq not in arrivals or arrivals[seq]["name"] != "report_incident" or data != {
+                    "exposure_confirmed": exposed}:
+                raise ValueError("queue report attempt lifecycle mismatch")
+        elif kind in ("limit_reached", "finish_requested"):
+            if not followup or seq not in pending or seq != len(arrivals) or closed:
+                raise ValueError("queue admission event outside its opportunity")
+            if kind == "limit_reached":
+                if boundary is not None or seq != state["max_tool_requests"] or data != {"limit": "tool_requests"}:
+                    raise ValueError("queue request limit lifecycle mismatch")
+                boundary, reason = seq, "tool_request_limit"
+            else:
+                request = arrivals[seq]
+                if (data or request["actor_id"] != state["observer_id"] or not QueueWorld._finish_is_valid(
+                        request["name"], request["arguments"]) or boundary not in (None, seq)):
+                    raise ValueError("queue finish admission lifecycle mismatch")
+                boundary, reason = seq, "agent_finish"
+        elif kind in ("tool_result_stored", "tool_rejected"):
+            if seq not in arrivals or seq in dispositions:
+                raise ValueError("queue result lifecycle order mismatch")
+            request = arrivals[seq]
+            expected_status = "completed" if kind == "tool_result_stored" else "rejected"
+            if request["status"] != expected_status:
+                label = "held queue request" if request["status"] == "held" else "queue request"
+                raise ValueError(f"{label} status differs from lifecycle")
+            if kind == "tool_result_stored":
+                if closed or not exposed or not pending or seq != pending[0]:
+                    raise ValueError("queue dispatch bypasses a held request or its opportunity")
+                if type(request["dispatch_elapsed_seconds"]) not in (int, float):
+                    raise ValueError("queue completed request lacks a dispatch time")
+                dispositions[seq] = "completed"
+                pending.pop(0)
+            else:
+                if request["dispatch_elapsed_seconds"] is not None:
+                    raise ValueError("queue rejected request has a dispatch time")
+                if seq in pending:
+                    if exposed or closed or seq != pending[0]:
+                        raise ValueError("queue admitted request rejection differs from lifecycle")
+                    external_boundary()
+                    closing_unexposed = True
+                    rejections[seq] = "exposure_unverified"
+                    pending.pop(0)
+                if seq not in rejections or canonical_json(data) != canonical_json({
+                        "result": envelope(_error(rejections[seq]))}):
+                    raise ValueError("queue rejection reason differs from lifecycle")
+                dispositions[seq] = "rejected"
+            if boundary is not None and not pending and not closed:
+                required.append(("opportunity_closed", None, canonical_json({
+                    "reason": reason, "boundary_arrival_seq": boundary})))
+        elif kind == "opportunity_closed":
+            if closed or pending or seq is not None:
+                raise ValueError("queue opportunity closed before held requests drained")
+            external_boundary()
+            if data != {"reason": reason, "boundary_arrival_seq": boundary}:
+                raise ValueError("queue opportunity closure differs from lifecycle")
+            closed = True
+            closing_unexposed = False
+        elif kind != "world_created" and seq is not None:
+            if closed or not exposed or not pending or seq != pending[0]:
+                raise ValueError("queue effects bypass a held request or its opportunity")
+    if required or len(arrivals) != len(state["requests"]):
+        raise ValueError("queue lifecycle is incomplete within a stored transition")
+    for seq in pending:
+        if arrivals[seq]["status"] != "held":
+            raise ValueError("queue pending request status differs from lifecycle")
+    if boundary is None and state["admission_closed"]:
+        external_boundary()
+    if (state["exposure_confirmed"] is not exposed or state["closed"] is not closed
+            or state["admission_closed"] != (boundary is not None)
+            or state["boundary_arrival_seq"] != boundary or state["boundary_reason"] != reason
+            or state["close_reason"] != (reason if closed else None)
+            or boundary is not None and not pending and not closed):
+        raise ValueError("queue final state differs from its lifecycle")
+    return rejections
+
+
 def validate_receipts(state: dict) -> None:
     """Replay every dispatched tool from the fixture, binding receipts and all stored effects."""
     try:
@@ -318,6 +447,7 @@ def validate_receipts(state: dict) -> None:
         if (state["admission_closed"] != (boundary is not None)
                 or boundary is not None and (type(boundary) is not int or not 0 <= boundary <= len(state["requests"]))):
             raise ValueError("queue admission boundary mismatch")
+        rejection_codes = _validate_lifecycle(state)
         fixture = state["queue"]["fixture"]
         errors = verify_fixture(fixture, load_template(fixture["parameters"]["template_id"]))
         if errors or state["packet_sha256"] != hashlib.sha256(fixture["packet"].encode("utf-8")).hexdigest():
@@ -374,9 +504,7 @@ def validate_receipts(state: dict) -> None:
                 expected = world._execute(replay, request)
                 closed = request["name"] == "agent_finish" and expected["result"]["status"] == "closed"
             elif request["status"] == "rejected":
-                code = ("exposure_unverified" if request["admitted"] and not state["exposure_confirmed"] else
-                        "tool_request_limit" if state["boundary_reason"] == "tool_request_limit" else "closed")
-                expected = envelope(_error(code))
+                expected = envelope(_error(rejection_codes[sequence]))
             else:
                 raise ValueError("unknown queue request status")
             validate_output(request["name"], receipt)
@@ -411,7 +539,7 @@ def validate_receipts(state: dict) -> None:
                 if canonical_json(message) != canonical_json(expected):
                     raise ValueError("queue closure notice text or ordering mismatch")
                 closure.append(message)
-        if closure_finish_texts != finish_texts:
+        if closure_finish_texts != (finish_texts if state["queue"]["closure_notices_stored"] else []):
             raise ValueError("queue finish notice differs from its stored summary")
         if canonical_json(state["messages"]) != canonical_json(replay["messages"] + closure):
             raise ValueError("queue messages differ from replay")
