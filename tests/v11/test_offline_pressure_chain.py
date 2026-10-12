@@ -85,6 +85,8 @@ async def test_revision6_entire_offline_chain(tmp_path, wp6_study, wp6_inputs, m
     manifest = read_sealed(study / STUDY_MANIFEST)
     assert manifest["protocol"]["specification_revision"] == 6
     assert manifest["total_trials"] == 2922 and len(manifest["fixtures"]) == 405
+    assert {read_sealed(study / reference["path"])["provenance"]["specification_revision"]
+            for reference in manifest["fixtures"].values()} == {6}
     assert verify_study(study, **wp6_inputs)["valid"]
     compatibility = tmp_path / "compatibility"
     built = live.build_compatibility_plan(caps, revision="r6-offline-compat", bundle=bundle,

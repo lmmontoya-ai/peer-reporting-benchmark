@@ -28,13 +28,11 @@ IDS = {"type": "array", "maxItems": 32, "uniqueItems": True, "items": ID}
 def _ids(schema: dict) -> dict:
     """Replace inherited ID leaves without changing earlier schema objects."""
     value = deepcopy(schema)
-    if value.get("type") in ("string", ["string", "null"]) and value.get("maxLength") == 100:
-        value["pattern"] = ID["pattern"]
-    for key, child in value.items():
-        if isinstance(child, dict):
-            value[key] = _ids(child)
-        elif isinstance(child, list):
-            value[key] = [_ids(entry) if isinstance(entry, dict) else entry for entry in child]
+    for name, child in value.get("properties", {}).items():
+        if name.endswith("_ids"):
+            child["items"] = {**child["items"], "pattern": ID["pattern"]}
+        elif name.endswith("_id") or name in ("recipient", "reply_to", "incident_ref"):
+            child["pattern"] = ID["pattern"]
     return value
 
 
@@ -139,8 +137,8 @@ def validate_input(name: str, arguments: object) -> None:
 
 
 def serialized_bytes(value: object) -> bytes:
-    """Use the more conservative ASCII-escaped JSON bound, including default spacing."""
-    return json.dumps(value, ensure_ascii=True, allow_nan=False).encode("utf-8")
+    """Measure the runtime's client text, including default spacing and insertion order."""
+    return json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
 def validate_output(name: str, value: object) -> None:

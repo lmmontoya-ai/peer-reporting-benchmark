@@ -286,7 +286,8 @@ def _study(protocol: dict, templates: dict[str, dict], caps_record: dict, *, ins
     policy = trial_policy(caps)
     fixtures, rows = {}, []
     for split in SPLITS:
-        split_fixtures = build_split_fixtures(protocol, templates, split)
+        split_fixtures = build_split_fixtures(
+            protocol, templates, split, specification_revision=protocol["specification_revision"])
         calibration_types = (calibration_near_miss_types(protocol["templates"][split], protocol["seeds"][split],
                                                         protocol=protocol) if split == "calibration" else {})
         for fixture in split_fixtures:

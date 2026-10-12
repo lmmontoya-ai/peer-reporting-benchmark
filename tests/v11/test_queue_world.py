@@ -215,8 +215,8 @@ def test_budget_pagination_returns_whole_messages_and_correct_cursors(tmp_path):
         output = w.dispatch("read_channel", {"after_event_id": cursor, "limit": 16})
         assert len(serialized_bytes(output)) <= B
         page = output["result"]
-        assert len(page["messages"]) == 1
-        assert page["messages"][0]["text"] == text
+        assert len(page["messages"]) == 3
+        assert all(message["text"] == text for message in page["messages"])
         observed += page["messages"]
         cursor = page["next_after_event_id"]
         assert cursor == observed[-1]["event_id"]
@@ -281,12 +281,110 @@ def test_deferred_errors_and_request_cap_all_use_the_envelope(tmp_path):
 
 def reseal(state, directory):
     previous = GENESIS_HASH
-    for event in state["events"]:
+    for sequence, event in enumerate(state["events"]):
+        event["event_seq"] = sequence
         event["previous_hash"] = previous
         event["hash"] = content_hash({key: value for key, value in event.items() if key != "hash"})
         previous = event["hash"]
     data = {"state": state, "state_hash": content_hash(state)}
     (directory / "state.json").write_bytes((json.dumps(data, ensure_ascii=True) + "\n").encode("utf-8"))
+
+
+@pytest.mark.parametrize("alteration", ["admitted_rejection", "dispatch_order", "finish_open"])
+def test_review_lifecycle_reproductions_refuse_after_resealing(tmp_path, alteration):
+    w = world(tmp_path)
+    if alteration == "finish_open":
+        w.dispatch("agent_finish", {"reason": "completed", "summary": "Done."})
+        state = w.snapshot()
+        state.update(closed=False, close_reason=None)
+        state["events"] = [e for e in state["events"]
+                           if e["kind"] not in ("opportunity_closed", "public_message_stored")]
+        state["messages"] = []
+        state["queue"]["closure_notices_stored"] = False
+    else:
+        w.dispatch("read_channel", {"after_event_id": None, "limit": 16})
+        if alteration == "dispatch_order":
+            w.dispatch("read_channel", {"after_event_id": None, "limit": 16})
+        state = w.snapshot()
+        request = state["requests"][0]
+        if alteration == "admitted_rejection":
+            request.update(status="rejected", dispatch_elapsed_seconds=None,
+                           result={"result": {"status": "error", "error": "closed"}, "room_events": []})
+            for event in state["events"]:
+                if event["kind"] == "tool_result_stored":
+                    event["kind"] = "tool_rejected"
+                    event["data"]["result"] = deepcopy(request["result"])
+        else:
+            request.update(status="held", result=None, dispatch_elapsed_seconds=None)
+            state["events"] = [e for e in state["events"]
+                               if not (e["arrival_seq"] == 1 and e["kind"] == "tool_result_stored")]
+    reseal(state, w.directory)
+    with pytest.raises(ValueError, match="lifecycle|held request"):
+        audit_state(w.directory)
+
+
+@pytest.mark.parametrize("event_kind", ["finish_requested", "limit_reached", "incident_report_attempted"])
+def test_missing_admission_or_attempt_event_refuses_after_resealing(tmp_path, event_kind):
+    f = fixture(queue_length=4)
+    w = QueueWorld(f, tmp_path / "world", max_tool_requests=1 if event_kind == "limit_reached" else 300)
+    w.confirm_exposure(f["packet"])
+    name, args = (("agent_finish", {"reason": "completed", "summary": "Done."})
+                  if event_kind == "finish_requested" else ("report_incident", report()))
+    w.dispatch(name, args)
+    state = w.snapshot()
+    state["events"] = [e for e in state["events"] if e["kind"] != event_kind]
+    reseal(state, w.directory)
+    with pytest.raises(ValueError, match="lifecycle"):
+        audit_state(w.directory)
+
+
+def test_closed_finish_before_notice_storage_remains_a_valid_crash_prefix(tmp_path, monkeypatch):
+    w = world(tmp_path)
+
+    def stopped(*args):
+        raise RuntimeError("Stopped before notice storage.")
+
+    monkeypatch.setattr(w, "store_closure_notices", stopped)
+    with pytest.raises(RuntimeError, match="before notice storage"):
+        w.dispatch("agent_finish", {"reason": "completed", "summary": "Done."})
+    state = audit_state(w.directory, w.checkpoint)
+    assert state["closed"] and state["requests"][0]["status"] == "completed"
+    assert not state["queue"]["closure_notices_stored"] and not state["messages"]
+
+
+@pytest.mark.parametrize("boundary", ["open", "limit", "finish", "external"])
+@pytest.mark.parametrize("exposed", [False, True])
+def test_held_request_crash_prefixes_preserve_admission_and_exposure(tmp_path, monkeypatch, boundary, exposed):
+    f = fixture(queue_length=4)
+    w = QueueWorld(f, tmp_path / "world", max_tool_requests=1 if boundary == "limit" else 300)
+
+    def stopped():
+        raise RuntimeError("Stopped before draining.")
+
+    monkeypatch.setattr(w, "_drain", stopped)
+    name, args = (("agent_finish", {"reason": "completed", "summary": "Done."})
+                  if boundary == "finish" else ("next_item", {}))
+    w.dispatch(name, args)
+    if exposed:
+        with pytest.raises(RuntimeError, match="before draining"):
+            w.confirm_exposure(f["packet"])
+    if boundary == "external":
+        if exposed:
+            with pytest.raises(RuntimeError, match="before draining"):
+                w.close("trial_wall_limit")
+        else:
+            w.close("trial_wall_limit")
+    assert audit_state(w.directory, w.checkpoint) == w.snapshot()
+
+
+def test_unexposed_closure_and_late_rejections_follow_the_lifecycle(tmp_path):
+    f = fixture(queue_length=4)
+    w = QueueWorld(f, tmp_path / "world")
+    w.dispatch("next_item", {})
+    w.dispatch("report_incident", report())
+    w.close()
+    assert w.dispatch("report_incident", report("late"))["result"]["error"] == "closed"
+    assert audit_state(w.directory) == w.snapshot()
 
 
 @pytest.mark.parametrize("name", tuple(OUTPUT_SCHEMAS_Q))

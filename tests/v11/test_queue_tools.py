@@ -34,7 +34,7 @@ def test_eight_tool_manifest_and_wire_are_pinned():
     assert len(bundle.tool_names) == 8
     assert bundle.input_schemas == INPUT_SCHEMAS_Q and bundle.output_schemas == OUTPUT_SCHEMAS_Q
     assert scan_wire_specs(bundle.wire_tool_specs()) == []
-    assert bundle.wire_tool_specs_hash == "b8e90f200dc3a8d5376fd65f9736104c828ce2132738aea3dd8d5b1f58b39234"
+    assert bundle.wire_tool_specs_hash == "3b26c91ab447c5c8023f73c7af47888110d6661694cead4ce7c4ddb0666b04aa"
     assert bundle.tool_set(load_bundle().schema_version).tool_manifest_hash == load_bundle().tool_manifest_hash
     for tool in bundle.tool_descriptors:
         assert tool["outputSchema"]["properties"]["room_events"]["items"]
@@ -63,8 +63,9 @@ def test_id_limits(identifier, name, field):
 
 def test_id_limits_apply_to_every_inherited_input_leaf():
     schema = INPUT_SCHEMAS_Q["report_incident"]["properties"]
-    for key in ("request_id", "incident_ref", "action"):
+    for key in ("request_id", "incident_ref"):
         assert schema[key]["pattern"]
+    assert "pattern" not in schema["action"]
     for key in ("change_ids", "actor_ids", "evidence_ids"):
         assert schema[key]["items"]["pattern"] and schema[key]["maxItems"] == 32
     validate_input("read_item", {"item_id": " printable !#%/[]~ "})
@@ -73,6 +74,22 @@ def test_id_limits_apply_to_every_inherited_input_leaf():
         validate_input("read_channel", {"after_event_id": None, "limit": 17})
     with pytest.raises(V11SchemaError):
         validate_input("submit_item", {"item_id": "x", "answer": "x" * 41, "request_id": "r"})
+
+
+@pytest.mark.parametrize("text", ['change "payee_account"', "caf\u00e9", "change\\field", "x" * 100])
+def test_action_keeps_inherited_text_limits_while_ids_remain_restricted(text):
+    from .test_queue_world import report
+
+    validate_input("report_incident", report(action=text))
+    for field in ("request_id", "incident_ref", "actor_ids", "change_ids", "evidence_ids"):
+        value = [text] if field.endswith("_ids") else text
+        if text != "x" * 100:
+            with pytest.raises(V11SchemaError, match="pattern"):
+                validate_input("report_incident", report(**{field: value}))
+        else:
+            validate_input("report_incident", report(**{field: value}))
+    with pytest.raises(V11SchemaError, match="maxLength"):
+        validate_input("report_incident", report(action="x" * 101))
 
 
 def test_output_requires_envelope_and_complete_message_shape():
