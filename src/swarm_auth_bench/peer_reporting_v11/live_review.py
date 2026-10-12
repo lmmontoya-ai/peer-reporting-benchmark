@@ -505,6 +505,7 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
                        scorer: Callable[[dict], dict] | None = None,
                        summarize: Callable[[list[dict]], dict] | None = None,
                        pressure_review_selector: Callable[[list[dict]], dict] | None = None,
+                       queue_review_selector: Callable[[list[dict]], dict] | None = None,
                            receipt_directory: Path | None = None,
                            repair_evidence_directory: Path | None = None) -> dict:
     """Write a fresh researcher export: one sealed attempt per archived row and a sealed index.
@@ -529,7 +530,8 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
     if plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q and output is not None:
         return export_queue_root(directory, output, study_directory=study_directory, prior_roots=prior_roots,
                            bundle=bundle, receipt_directory=receipt_directory,
-                           repair_evidence_directory=repair_evidence_directory)
+                           repair_evidence_directory=repair_evidence_directory,
+                           queue_review_selector=queue_review_selector)
     _require(plan["phase"] != "compatibility" or plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q,
              "compatibility attempts are engineering checks, not behavioral observations")
     from .receipts import check_receipt
@@ -609,7 +611,8 @@ def export_live_review(directory: Path, output: Path, *, study_directory: Path |
 
 
 def export_queue_root(directory, output, *, study_directory=None, prior_roots=(), bundle=None,
-                receipt_directory=None, repair_evidence_directory=None, compatibility_directories=()):
+                receipt_directory=None, repair_evidence_directory=None, compatibility_directories=(),
+                queue_review_selector=None):
     from .live import study_registry_listing, verify_live_root
     from .queue_storage import atomic_json
     from .receipts import check_receipt
@@ -631,6 +634,7 @@ def export_queue_root(directory, output, *, study_directory=None, prior_roots=()
     output.mkdir(parents=True, exist_ok=False)
     (output / "attempts").mkdir()
     rows = []
+    queue_attempts = []
     for row in data["rows"]:
         visible = {key: value for key, value in row.items() if key != "attempt"}
         if row["attempt"] is not None:
@@ -640,6 +644,8 @@ def export_queue_root(directory, output, *, study_directory=None, prior_roots=()
             path = f"attempts/{row['assignment_id']}.json"
             atomic_json(safe_child(output, path), seal(attempt))
             visible.update(attempt_path=path, attempt_hash=content_hash(attempt))
+            if not compatibility:
+                queue_attempts.append(attempt)
         rows.append(visible)
     index = seal({"kind": EXPORT_KIND, "phase": plan["phase"], "tool_schema_version": plan["tool_schema_version"],
                   "source_plan_hash": plan["seal_hash"], "rows": rows, "scored": False,
@@ -649,7 +655,9 @@ def export_queue_root(directory, output, *, study_directory=None, prior_roots=()
                   "authorization_evidence": data["authorization_evidence"], "ledger_repairs": repairs,
                   "study_registry": study_registry_listing(study_directory) if not compatibility else None,
                   "study_manifest": read_study_manifest(study_directory) if not compatibility else None,
-                  "receipt_plan_hash": plan["seal_hash"], "live_model_calls": 0})
+                  "receipt_plan_hash": plan["seal_hash"], "live_model_calls": 0,
+                  **({"queue_coding_selection": queue_review_selector(queue_attempts)}
+                     if queue_review_selector is not None else {})})
     atomic_json(output / "index.json", index)
     return {"output": str(output), "phase": plan["phase"], "assignments": len(rows),
             "attempts": sum("attempt_path" in row for row in rows), "scored": False,

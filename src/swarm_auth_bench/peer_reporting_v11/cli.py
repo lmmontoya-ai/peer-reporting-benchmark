@@ -98,6 +98,57 @@ def _review_commands(commands) -> None:
     upload.add_argument("--controller", type=Path, help="researcher-only controller record; checks the bindings")
 
 
+def _queue_review_commands(commands) -> None:
+    for name in ("score-queue", "queue-coding-packets", "queue-episode-packets"):
+        command = commands.add_parser(name, help="offline level Q scoring or human review packets")
+        command.add_argument("export", type=Path)
+        command.add_argument("--study", type=Path, required=True)
+        command.add_argument("--output", type=Path, required=True)
+        if name != "score-queue":
+            command.add_argument("--plan", type=Path, help="optional selection, checked against primary evidence")
+            command.add_argument("--scores", type=Path, help="optional scores, checked against primary evidence")
+        if name == "queue-episode-packets":
+            command.add_argument("--coding-resolution", type=Path, help="verified owner-coding adjudication result")
+    upload = commands.add_parser("validate-queue-review-upload", help="validate and retain human Q codes")
+    upload.add_argument("upload", type=Path)
+    upload.add_argument("--packet", type=Path, required=True)
+    upload.add_argument("--controller", type=Path, required=True)
+    upload.add_argument("--output", type=Path, required=True, help="fresh validation file; exact submission retained beside it")
+    upload.add_argument("--adjudication", action="store_true")
+    resolve = commands.add_parser("adjudicate-queue-review", help="resolve retained Q owner codes offline")
+    resolve.add_argument("packets", type=Path)
+    resolve.add_argument("--upload", type=Path, action="append", default=[])
+    resolve.add_argument("--adjudication", type=Path, action="append", default=[])
+    resolve.add_argument("--output", type=Path, required=True)
+    for name in QUEUE_REVIEW_COMMANDS:
+        commands.choices[name].add_argument("--receipt-directory", type=Path)
+        commands.choices[name].add_argument("--repair-evidence-directory", type=Path, action="append")
+
+
+QUEUE_REVIEW_COMMANDS = ("score-queue", "queue-coding-packets", "queue-episode-packets",
+                         "validate-queue-review-upload", "adjudicate-queue-review")
+
+
+def _queue_review(args):
+    from ..peer_reporting.storage import read_sealed
+    from .queue_posthoc import retain_upload, write_adjudication, write_packets, write_scores
+
+    verification = {"receipt_directory": args.receipt_directory,
+                    "repair_evidence_directory": args.repair_evidence_directory}
+    if args.command == "score-queue":
+        return write_scores(args.export, args.output, study_directory=args.study, **verification)
+    if args.command in ("queue-coding-packets", "queue-episode-packets"):
+        return write_packets(args.export, args.output, study_directory=args.study,
+            part="episode" if args.command == "queue-episode-packets" else "owner_communications",
+            selection=read_sealed(args.plan) if args.plan else None, scores_path=args.scores,
+            coding_resolution=getattr(args, "coding_resolution", None), **verification)
+    if args.command == "validate-queue-review-upload":
+        return retain_upload(args.upload, args.packet, args.controller, args.output,
+                             adjudication=args.adjudication, **verification)
+    return write_adjudication(args.packets, args.output, uploads=args.upload,
+                              adjudications=args.adjudication, **verification)
+
+
 def _review(args: argparse.Namespace) -> dict:
     from datetime import datetime, timezone
 
@@ -233,6 +284,7 @@ def _parser() -> argparse.ArgumentParser:
     _study(export, "study directory in which the root is registered")
     _prior_roots(export)
     _review_commands(commands)
+    _queue_review_commands(commands)
     for name in LIVE_COMMANDS:
         command = commands.add_parser(name, help=f"run the sealed {name} phase after explicit authorization")
         command.add_argument("root", type=Path, help="sealed live root built for this phase")
@@ -272,6 +324,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def _run(args: argparse.Namespace) -> dict:
     from .bundle import load_bundle
+
+    if args.command in QUEUE_REVIEW_COMMANDS:
+        return _queue_review(args)
 
     if args.command == "queue-budget-check":
         from .queue_budget import check_budget
@@ -452,12 +507,14 @@ def _run(args: argparse.Namespace) -> dict:
                                 scorer=scorer)
     if args.command == "export-review":
         from .live_review import export_live_review
+        from .queue_posthoc import export_coding_selection
         from .review_plan import pressure_review_selection
 
         scorer, summarize = _scorer(not args.no_score)
         return export_live_review(args.root, args.output, study_directory=args.study, prior_roots=args.prior_roots,
                                   bundle=load_bundle(), scorer=scorer, summarize=summarize,
                                   pressure_review_selector=pressure_review_selection,
+                                  queue_review_selector=export_coding_selection,
                                       receipt_directory=args.receipt_directory,
                                       repair_evidence_directory=args.repair_evidence_directory)
     from .live import read_live_plan, reviewed_runtime_factory, run_live_phase
