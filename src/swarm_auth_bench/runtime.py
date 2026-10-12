@@ -15,10 +15,11 @@ import shutil
 import signal
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
+from .runtime_cleanup import _kill_group, mark_home
 from .world import ToolError
 
 LOCKED_CONFIG = (
@@ -70,6 +71,32 @@ class ToolTermination(Exception):
         super().__init__(reason)
         self.reason = reason
         self.result = result if result is not None else {"status": reason}
+
+
+@dataclass(frozen=True)
+class RuntimeOptions:
+    """Opt-in transport settings; defaults add no request or record fields.
+
+    disable_auto_compaction suppresses threshold and turn-end compaction.
+    Codex 0.158.0 still compacts at its hard context-window limit.
+    """
+
+    reasoning_summary: str | None = None
+    disable_auto_compaction: bool = False
+    record_calls: bool = False
+    home_prefix: str = "swarm-codex-controller-"
+
+    def __post_init__(self) -> None:
+        if self.reasoning_summary not in (None, "detailed"):
+            raise ValueError("reasoning_summary must be None or detailed")
+        if type(self.disable_auto_compaction) is not bool or type(self.record_calls) is not bool:
+            raise ValueError("runtime recording and compaction options must be booleans")
+        if self.home_prefix not in ("swarm-codex-controller-", "work-"):
+            raise ValueError("home_prefix must be swarm-codex-controller- or work-")
+
+    @property
+    def manifest_prefix(self) -> str:
+        return "swarm-codex-manifest-" if self.home_prefix == "swarm-codex-controller-" else self.home_prefix
 
 
 @dataclass
@@ -189,12 +216,15 @@ class CodexRuntime:
         codex_executable: str | None = None,
         auth_file: str | Path | None = None,
         client_name: str = "swarm_auth_bench",
+        options: RuntimeOptions = RuntimeOptions(),
     ) -> None:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.codex_executable = codex_executable or _codex_executable()
         self.auth_file = Path(auth_file) if auth_file is not None else Path.home() / ".codex/auth.json"
         self.client_name = client_name
+        self.options = options
+        self._close_started = False
         self._temporary_home: tempfile.TemporaryDirectory[str] | None = None
         self._home: Path | None = None
         self._proc: asyncio.subprocess.Process | None = None
@@ -227,10 +257,18 @@ class CodexRuntime:
             "tool_config": list(LOCKED_CONFIG),
             "manifest_attestations": list(self._verified.values()),
             "model_catalog_override": catalog,
+            **({"runtime_options": asdict(self.options)} if self.options != RuntimeOptions() else {}),
         }
 
     def _command(self, overrides: tuple[str, ...] = ()) -> list[str]:
         cmd = [self.codex_executable, "app-server", "--listen", "stdio://", "--strict-config"]
+        if self.options.disable_auto_compaction:
+            # rust-v0.158.0 clamps the total-scope limit to 90% of context.
+            # BodyAfterPrefix uses the configured limit directly. The hard
+            # context-window guard still compacts on exhaustion in this client.
+            overrides = (*overrides, "model_auto_compact_token_limit=9223372036854775807",
+                         'model_auto_compact_token_limit_scope="body_after_prefix"',
+                         "model_post_turn_compact_threshold_percent=0")
         for setting in (*LOCKED_CONFIG, *overrides):
             cmd += ["-c", setting]
         return cmd
@@ -256,7 +294,8 @@ class CodexRuntime:
         env["CODEX_HOME"] = str(home)
         if env_extra:
             env.update(env_extra)
-        return await asyncio.create_subprocess_exec(
+        mark_home(home)
+        proc = await asyncio.create_subprocess_exec(
             *self._command(overrides),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -266,6 +305,8 @@ class CodexRuntime:
             limit=16 * 1024 * 1024,
             start_new_session=os.name != "nt",
         )
+        mark_home(home, process_pid=proc.pid)
+        return proc
 
     async def _stop_process(self, proc: asyncio.subprocess.Process) -> None:
         if proc.returncode is not None:
@@ -288,6 +329,10 @@ class CodexRuntime:
             except ProcessLookupError:
                 pass
             await proc.wait()
+
+    async def _kill_process(self, proc: asyncio.subprocess.Process) -> None:
+        await asyncio.to_thread(_kill_group, proc.pid)
+        await proc.wait()
 
     async def _send(self, message: dict[str, Any], proc: asyncio.subprocess.Process | None = None) -> None:
         proc = proc or self._proc
@@ -344,7 +389,7 @@ class CodexRuntime:
 
         server = await asyncio.start_server(fake_provider, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
-        with tempfile.TemporaryDirectory(prefix="swarm-codex-manifest-") as tmp:
+        with tempfile.TemporaryDirectory(prefix=self.options.manifest_prefix) as tmp:
             home = Path(tmp)
             overrides = (
                 'model_provider="swarm_probe"',
@@ -369,6 +414,9 @@ class CodexRuntime:
                 await self._stop_process(proc)
                 server.close()
                 await server.wait_closed()
+        return self._attest_manifest(request, specs)
+
+    def _attest_manifest(self, request: dict[str, Any], specs: list[dict[str, Any]]) -> dict[str, Any]:
         observed = _manifest_names(request.get("tools"))
         expected = SAFE_NATIVE_TOOLS | {f"function:{name}" for name in _tool_names(specs)}
         additional = [
@@ -382,7 +430,18 @@ class CodexRuntime:
             )
         if request.get("model") != self.model:
             raise RuntimeProtocolError(f"provider model mismatch: {request.get('model')!r}")
-        return {"model": request["model"], "tools": sorted(observed), "verified": True}
+        proof = {"model": request["model"], "tools": sorted(observed), "verified": True}
+        if self.options.reasoning_summary is not None:
+            if (request.get("reasoning") or {}).get("summary") != self.options.reasoning_summary:
+                raise RuntimeProtocolError("provider reasoning summary differs from runtime options")
+            proof["reasoning_summary"] = self.options.reasoning_summary
+        if self.options.record_calls:
+            from .runtime_recording import probe_record
+
+            proof["request_recording"] = probe_record(request)
+            if not proof["request_recording"]["environment_frame"]:
+                raise RuntimeProtocolError("manifest probe environment frame is unavailable")
+        return proof
 
     async def _probe_call(self, proc: asyncio.subprocess.Process, request_id: int,
                           method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -425,6 +484,7 @@ class CodexRuntime:
             "sandboxPolicy": {"type": "readOnly"},
             "approvalPolicy": "never",
             "effort": effort or self.reasoning_effort,
+            **({"summary": self.options.reasoning_summary} if self.options.reasoning_summary is not None else {}),
         }
 
     async def start(self) -> None:
@@ -444,8 +504,9 @@ class CodexRuntime:
                 )
             if not self.auth_file.is_file():
                 raise RuntimeProtocolError(f"Codex ChatGPT auth file unavailable: {self.auth_file}")
-            self._temporary_home = tempfile.TemporaryDirectory(prefix="swarm-codex-controller-")
+            self._temporary_home = tempfile.TemporaryDirectory(prefix=self.options.home_prefix)
             self._home = Path(self._temporary_home.name)
+            mark_home(self._home)
             if os.name != "nt":
                 self._home.chmod(0o700)
             dest = self._home / "auth.json"
@@ -798,23 +859,37 @@ class CodexRuntime:
             session.active = False
 
     async def close(self) -> None:
+        force = self._close_started
+        self._close_started = True
         if self._proc is not None:
-            await self._stop_process(self._proc)
-            self._proc = None
+            if force:
+                await self._kill_process(self._proc)
+            else:
+                await self._stop_process(self._proc)
         if self._reader_task:
-            await self._reader_task
+            if force:
+                self._reader_task.cancel()
+            await asyncio.gather(self._reader_task, return_exceptions=True)
             self._reader_task = None
         current = asyncio.current_task()
-        dispatches = [task for task in self._background if task is not current]
+        dispatches = [task for task in self._background | set(getattr(self, "_peer_dispatches", ()))
+                      if task is not current]
         for task in dispatches:
             task.cancel()
         if dispatches:
             await asyncio.gather(*dispatches, return_exceptions=True)
         self._background.difference_update(dispatches)
+        for future in self._pending.values():
+            if not future.done():
+                future.cancel()
+        self._pending.clear()
         if self._temporary_home:
             self._temporary_home.cleanup()
             self._temporary_home = None
         self._sessions.clear()
+        self._proc = None
+        self._home = None
+        self._close_started = False
 
     async def __aenter__(self) -> "CodexRuntime":
         await self.start()

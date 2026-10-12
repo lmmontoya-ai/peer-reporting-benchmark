@@ -114,7 +114,8 @@ FINAL_USAGE_SOURCE = "final"
 # Why an attempt settled at its reservation bound (``settlement_reason`` in lane reports).
 BOUNDED_AFTER_CLEAN_CLOSE = "observed_usage_after_clean_close"
 _ATTEMPT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
-_SHARED_MODULES = ("runtime.py", "model_catalog.py", "isolation.py", "events.py", "long_events.py")
+_SHARED_MODULES = ("runtime.py", "runtime_cleanup.py", "runtime_recording.py", "model_catalog.py",
+                   "isolation.py", "events.py", "long_events.py")
 
 
 def implementation_hashes() -> dict[str, str]:
@@ -1045,6 +1046,8 @@ class _PhaseRun:
             "authorization_hash": self.hooks.authorization_hash,
             "instructions_hash": content_hash(instructions), "fixture_hash": content_hash(fixture),
             "observer_result": result, "observer_error": observer_error,
+            **{key: deepcopy(result[key]) for key in ("reasoning_items", "runtime_recording")
+               if isinstance(result, dict) and key in result},
             "orchestrator": {"evidence_failures": failures, "usage_failures": usage_failures,
                              "collection_stop_reasons": stop_reasons, "sink_checkpoint": sink_checkpoint,
                              "usage_settlement": settlement, "ledger_after": _ledger_summary(self.state.ledger_state()),
