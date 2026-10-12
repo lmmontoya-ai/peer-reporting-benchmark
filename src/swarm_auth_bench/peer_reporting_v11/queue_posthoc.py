@@ -31,13 +31,24 @@ def plain(value):
 
 
 def _verification_cache(cache):
-    return cache if cache is not None else {"packets": {}, "resolutions": {}, "active": set(), "uploads": {}}
+    if cache is None:
+        cache = {"packets": {}, "resolutions": {}, "active": set(), "uploads": {}}
+    cache.setdefault("exports", {})
+    return cache
+
+
+def _verified_export(directory, study_directory, cache, **verification):
+    """Reuse primary verification only within one offline operation, never globally."""
+    key = (Path(directory).resolve(), Path(study_directory).resolve())
+    if key not in cache["exports"]:
+        cache["exports"][key] = verify_export(directory, study_directory=study_directory, **verification)
+    return cache["exports"][key]
 
 
 def _verified_packets(directory, cache, **verification):
     directory = Path(directory).resolve()
     if directory not in cache["packets"]:
-        cache["packets"][directory] = verify_packets(directory, **verification)
+        cache["packets"][directory] = verify_packets(directory, _cache=cache, **verification)
     # Resolution reconstruction only adds top-level context fields. Share the
     # verified export and packets rather than copying the full episode evidence.
     return dict(cache["packets"][directory])
@@ -166,14 +177,14 @@ def verify_scores(path, **verification):
     return data
 
 
-def _selection(data, part, coding_resolution=None, **verification):
+def _selection(data, part, coding_resolution=None, *, _cache=None, **verification):
     if part == "owner_communications":
         require(coding_resolution is None, "owner packets do not use an adjudication result")
         return data["index"]["queue_coding_selection"]
     require(part == "episode", "unknown Q review part")
     human = {score["assignment_id"]: adjudicated_endpoints(score) for score in data["scores"]}
     if coding_resolution is not None:
-        resolution = verify_resolution(coding_resolution, **verification)
+        resolution = verify_resolution(coding_resolution, _cache=_cache, **verification)
         require(resolution["source_export_hash"] == data["index"]["seal_hash"], "Q resolution belongs to another export")
         human = resolution["endpoints"]
     return episode_selection(data["scores"], human)
@@ -202,11 +213,12 @@ def _packet_index(data, selection, part, source, entries, coding_resolution=None
 
 def write_packets(export_directory, output, *, study_directory, part="owner_communications",
                   selection=None, scores_path=None, coding_resolution=None, **verification):
-    data = verify_export(export_directory, study_directory=study_directory, **verification)
+    cache = _verification_cache(None)
+    data = _verified_export(export_directory, study_directory, cache, **verification)
     if scores_path is not None:
         checked = verify_scores(scores_path, **verification)
         require(checked["index"] == data["index"], "Q scoring record belongs to another export")
-    expected = _selection(data, part, coding_resolution, **verification)
+    expected = _selection(data, part, coding_resolution, _cache=cache, **verification)
     if selection is not None:
         check_seal(selection)
         require(selection == expected, "Q review selection differs from primary evidence")
@@ -235,12 +247,13 @@ def write_packets(export_directory, output, *, study_directory, part="owner_comm
         row["second_review"] for row in entries), "live_model_calls": 0}
 
 
-def verify_packets(directory, **verification):
+def verify_packets(directory, *, _cache=None, **verification):
     directory = Path(directory)
     index = read_sealed(directory / "index.json")
-    data = verify_export(index["export_directory"], study_directory=index["study_directory"], **verification)
+    cache = _verification_cache(_cache)
+    data = _verified_export(index["export_directory"], index["study_directory"], cache, **verification)
     source = _source(index["export_directory"], index["study_directory"])
-    selected = _selection(data, index["part"], index["coding_resolution"], **verification)
+    selected = _selection(data, index["part"], index["coding_resolution"], _cache=cache, **verification)
     require(len(index["rows"]) == len(selected["rows"]), "Q packet population differs from primary evidence")
     identifiers = [row["review_packet_id"] for row in index["rows"]]
     require(len(set(identifiers)) == len(identifiers), "duplicate Q packet IDs")
@@ -291,10 +304,26 @@ def _superseded_resolution(upload, path, directory, *, _cache=None, **verificati
     return verify_resolution(path, _cache=_cache, **verification)
 
 
-def retain_upload(upload_path, packet_path, controller_path, output, *, adjudication=False,
-                  correction_of=None, **verification):
+def retain_submission_bytes(raw, companion, primary_directory):
+    """Keep exact human input bytes beside validation and in a separate primary copy."""
     import hashlib
 
+    companion, primary_directory = Path(companion), Path(primary_directory)
+    with companion.open("xb") as stream:
+        stream.write(raw)
+    primary_directory.mkdir(exist_ok=True)
+    digest = hashlib.sha256(raw).hexdigest()
+    primary = primary_directory / (digest + ".json")
+    if primary.exists():
+        require(primary.read_bytes() == raw, "Q retained primary submission mismatch")
+    else:
+        with primary.open("xb") as stream:
+            stream.write(raw)
+    return digest
+
+
+def retain_upload(upload_path, packet_path, controller_path, output, *, adjudication=False,
+                  correction_of=None, **verification):
     upload_path, output = Path(upload_path), Path(output)
     packet, upload = read_sealed(Path(packet_path)), read_json(upload_path)
     cache = _verification_cache(None)
@@ -320,16 +349,7 @@ def retain_upload(upload_path, packet_path, controller_path, output, *, adjudica
     output.parent.mkdir(parents=True, exist_ok=True)
     # The submitted file is primary evidence. Keep its exact bytes, separately
     # from the derived validation record, so resealing a copy cannot change codes.
-    with submission.open("xb") as stream:
-        stream.write(upload_path.read_bytes())
-    retained = Path(controller_path).parent.parent / "submissions"
-    retained.mkdir(exist_ok=True)
-    primary = retained / (hashlib.sha256(submission.read_bytes()).hexdigest() + ".json")
-    if primary.exists():
-        require(primary.read_bytes() == submission.read_bytes(), "Q retained primary submission mismatch")
-    else:
-        with primary.open("xb") as stream:
-            stream.write(submission.read_bytes())
+    retain_submission_bytes(upload_path.read_bytes(), submission, Path(controller_path).parent.parent / "submissions")
     record = _upload_record(upload, packet, Path(controller_path).parent.parent, submission, adjudication, correction_of)
     atomic_json(output, record)
     return {"output": str(output), "valid": True, "reviewer_id": upload["reviewer_id"], "live_model_calls": 0}

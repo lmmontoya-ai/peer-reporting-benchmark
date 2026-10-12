@@ -37,7 +37,71 @@ from ..peer_reporting.config import read_json
 from . import PROTOCOL_ID, TOOL_SCHEMA_VERSION
 from .lanes import PHASES
 
-LIVE_COMMANDS = ("compatibility", "calibration", "smoke", "collection", "screening")
+LIVE_COMMANDS = ("compatibility", "calibration", "smoke", "collection", "screening", "gate", "main")
+
+QUEUE_SIZING_COMMANDS = ("queue-screening-measures", "queue-sizing-record", "build-queue-gate", "build-queue-main")
+
+
+def _queue_sizing_commands(commands):
+    for name in QUEUE_SIZING_COMMANDS:
+        command = commands.add_parser(name, help="offline Q screening, sizing or study plan build")
+        command.add_argument("--study", type=Path, required=True)
+        command.add_argument("--receipt-directory", type=Path, required=True)
+        command.add_argument("--repair-evidence-directory", type=Path, action="append")
+        if name.startswith("build-"):
+            command.add_argument("root", type=Path)
+            command.add_argument("--sizing-record", type=Path, required=True)
+            command.add_argument("--revision", required=True)
+            command.add_argument("--compatibility", type=Path, action="append", default=[])
+            command.add_argument("--smoke", type=Path, required=True)
+            _prior_roots(command)
+        else:
+            command.add_argument("export", type=Path)
+            command.add_argument("--coding-resolution", type=Path, required=True)
+            command.add_argument("--episode-packets", type=Path, required=True)
+            command.add_argument("--episode-upload", type=Path, action="append", default=[])
+            command.add_argument("--episode-adjudication", type=Path, action="append", default=[])
+            command.add_argument("--submission", type=Path, required=True)
+            command.add_argument("--output", type=Path, required=True)
+
+
+def _queue_sizing(args):
+    from ..peer_reporting.storage import read_sealed
+    from .queue_sizing_posthoc import (
+        build_screening_measures,
+        build_sizing_record,
+        retain_submission,
+        validate_sizing_record,
+    )
+
+    verification = {"receipt_directory": args.receipt_directory, "repair_evidence_directory": args.repair_evidence_directory}
+    if args.command.startswith("build-"):
+        from .live import prepare_live_root
+        from .queue_plans import build_study_plan
+
+        options = {"study_directory": args.study, "compatibility_directories": args.compatibility,
+                   "smoke_directory": args.smoke, "prior_roots": args.prior_roots, **verification}
+        built = build_study_plan("gate" if args.command == "build-queue-gate" else "main",
+            sizing_record=read_sealed(args.sizing_record), sizing_verifier=validate_sizing_record, revision=args.revision, **options)
+        prepared = prepare_live_root(args.root, built, sizing_verifier=validate_sizing_record,
+                                     **{key: value for key, value in options.items() if key != "smoke_directory"})
+        caps_path = args.root / "sized-caps.json"
+        _write_new_json_files({caps_path: built[0]["caps"]})
+        return {**prepared, "caps_output": str(caps_path)}
+    options = {"export_directory": args.export, "study_directory": args.study, "coding_resolution": args.coding_resolution,
+               "episode_packets": args.episode_packets, "episode_uploads": args.episode_upload,
+               "episode_adjudications": args.episode_adjudication, **verification}
+    if args.command == "queue-screening-measures":
+        record = build_screening_measures(submission=read_json(args.submission), **options)
+    else:
+        # Verify all coding/reviews before retaining the final sizing submission.
+        build_screening_measures(submission=read_json(args.submission), **options)
+        retained = retain_submission(args.submission, args.output.with_name(args.output.stem + "-user.json"),
+                                     study_directory=args.study)
+        record = build_sizing_record(retained_submission=retained, **options)
+    _write_new_json_files({args.output: record})
+    return {"output": str(args.output), "seal_hash": record["seal_hash"], "decision": record["decision"],
+            "study_lanes": record["study_lanes"], "live_model_calls": 0}
 
 
 def _scorer(enabled: bool):
@@ -204,7 +268,7 @@ def _parser() -> argparse.ArgumentParser:
                         help="new raw caps JSON; approval is retained in <output-stem>-approval.json")
     build = commands.add_parser("build", help="seal a live phase plan offline; no model call")
     build.add_argument("root", type=Path, help="fresh output directory; a behavioral root must be STUDY/roots/<name>")
-    build.add_argument("--phase", choices=(*PHASES, "screening"), required=True)
+    build.add_argument("--phase", choices=(*PHASES, "screening", "gate", "main"), required=True)
     build.add_argument("--caps", type=Path, required=True)
     build.add_argument("--revision", required=True)
     from .schemas import TOOL_SCHEMA_VERSION_P, TOOL_SCHEMA_VERSION_Q
@@ -218,6 +282,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--arm", dest="arms", action="append",
                        help="calibration only: plan only this arm's rows (repeatable); sealed as selected_arms")
     build.add_argument("--pilot-decision", type=Path, help="sealed pilot decision required for P core arms")
+    build.add_argument("--sizing-record", type=Path, help="sealed Q sizing record required for gate/main")
     _prior_roots(build)
     _amendments(build)
     decision = commands.add_parser("pilot-decision", help="compute and seal the P pilot decision offline")
@@ -287,6 +352,7 @@ def _parser() -> argparse.ArgumentParser:
     _prior_roots(export)
     _review_commands(commands)
     _queue_review_commands(commands)
+    _queue_sizing_commands(commands)
     for name in LIVE_COMMANDS:
         command = commands.add_parser(name, help=f"run the sealed {name} phase after explicit authorization")
         command.add_argument("root", type=Path, help="sealed live root built for this phase")
@@ -329,6 +395,8 @@ def _run(args: argparse.Namespace) -> dict:
 
     if args.command in QUEUE_REVIEW_COMMANDS:
         return _queue_review(args)
+    if args.command in QUEUE_SIZING_COMMANDS:
+        return _queue_sizing(args)
 
     if args.command == "queue-budget-check":
         from .queue_budget import check_budget
@@ -468,6 +536,11 @@ def _run(args: argparse.Namespace) -> dict:
         elif args.review_plan is not None:
             raise ValueError("--review-plan applies only to a collection build")
         decision_verifier = None
+        sizing_verifier = None
+        if args.sizing_record:
+            from .queue_sizing_posthoc import validate_sizing_record
+
+            sizing_verifier = validate_sizing_record
         if args.pilot_decision:
             from .pilot_decision import validate_core_decision
 
@@ -478,12 +551,15 @@ def _run(args: argparse.Namespace) -> dict:
                                 tool_schema_version=args.tool_schema_version,
                                 pilot_decision=read_sealed(args.pilot_decision) if args.pilot_decision else None,
                                 pilot_decision_verifier=decision_verifier,
+                                sizing_record=read_sealed(args.sizing_record) if args.sizing_record else None,
+                                sizing_verifier=sizing_verifier,
                                     receipt_directory=args.receipt_directory,
                                     repair_evidence_directory=args.repair_evidence_directory)
         study = args.study if args.phase != "compatibility" else None
         return {**prepare_live_root(args.root, plan, study_directory=study, prior_roots=args.prior_roots,
                                     bundle=bundle, review_plan=review,
                                     pilot_decision_verifier=decision_verifier,
+                                    sizing_verifier=sizing_verifier,
                                         receipt_directory=args.receipt_directory,
                                         repair_evidence_directory=args.repair_evidence_directory,
                                         compatibility_directories=args.compatibility), "selected_arms": plan[0]["selected_arms"]}

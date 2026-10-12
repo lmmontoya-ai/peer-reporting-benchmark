@@ -780,7 +780,8 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
                     or (row["model"], row["effort"]) not in QUEUE_LANES
                     or row["prompt_condition"] != "neutral" or row["world_mode"] != "normal"):
                 raise ValueError("queue assignment labels differ from the fixture or declared lanes")
-            if row.get("executed_arm_memberships", [row["arm"]]) != [row["arm"]]:
+            memberships = row.get("executed_arm_memberships", [row["arm"]])
+            if memberships not in ([row["arm"]], ["queue_main", "queue_attention"]):
                 raise ValueError("queue executed memberships differ from the phase population")
         routing = ({"visibility": parameters["visibility"], "held_submissions": parameters["pressure"] == "P4"}
                    if row["level"] == "P" else {})
@@ -806,7 +807,8 @@ def validate_assignment_rows(phase: str, rows: list[dict], fixtures: dict[str, d
 
 
 def check_assignment_binding(rows: list[dict], *, manifest: dict, source: dict, phase: str,
-                             fixtures: dict[str, dict] | None = None) -> list[dict]:
+                             fixtures: dict[str, dict] | None = None,
+                             sizing_record: dict | None = None, caps_record: dict | None = None) -> list[dict]:
     """Bind every row or lane entry to primary study data, without post-hoc imports.
 
     Historical lane entries omit fixture-only labels such as compound_type. Check
@@ -817,6 +819,10 @@ def check_assignment_binding(rows: list[dict], *, manifest: dict, source: dict, 
     if manifest["seal_hash"] != source.get("study_manifest_hash"):
         raise EvidenceError("assignment binding names another sealed study")
     assignments = {row["assignment_id"]: row for row in manifest["assignments"]}
+    if manifest.get("protocol", {}).get("level") == "Q" and phase in ("gate", "main"):
+        from .queue_sizing import execution_population
+
+        assignments = {row["assignment_id"]: row for row in execution_population(manifest, phase, sizing_record, caps_record)}
     canonical, seen = [], set()
     for row in rows:
         entry = "entry_id" in row
@@ -894,7 +900,19 @@ def check_prerequisite_receipts(plan: dict, compatibility_directories: list[Path
 def check_plan_assignment_binding(plan: dict, lane_plans: dict[str, dict], manifest: dict,
                                   fixtures: dict[str, dict]) -> list[dict]:
     """Check study entries and their execution lanes before a root is used."""
-    if plan["caps_hash"] != manifest["caps_hash"] or content_hash(plan["caps"]) != manifest["caps_hash"]:
+    sized = plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q and plan["phase"] in ("gate", "main")
+    if sized:
+        from .queue_sizing import check_sizing_record, sized_caps
+
+        record = check_sizing_record(plan.get("sizing_record"), study_manifest_hash=manifest["seal_hash"])
+        if plan.get("sizing_record_hash") != record["seal_hash"] or plan["caps"] != sized_caps(manifest, record):
+            raise EvidenceError("queue sizing record or caps binding differs")
+        if plan["caps_hash"] != content_hash(plan["caps"]):
+            raise EvidenceError("queue sized caps hash differs")
+        if plan["phase"] == "main" and (not plan["gate_evidence"].get("gate_roots") or any(
+                row["sizing_record_hash"] != record["seal_hash"] for row in plan["gate_evidence"]["gate_roots"])):
+            raise EvidenceError("main sizing record differs from its gate roots")
+    elif plan["caps_hash"] != manifest["caps_hash"] or content_hash(plan["caps"]) != manifest["caps_hash"]:
         raise EvidenceError("plan caps differ from its sealed study")
     check_execution_policy(plan, lane_plans)
     if plan["phase"] == "collection" and plan.get("smoke_assignment_ids") != sorted(
@@ -931,12 +949,14 @@ def check_plan_assignment_binding(plan: dict, lane_plans: dict[str, dict], manif
             or canonical_json(plan["global_max_concurrency"]) != canonical_json(plan["caps"]["global_max_concurrency"])):
         raise EvidenceError("assignment count differs from the sealed execution lanes")
     canonical = check_assignment_binding(rows, manifest=manifest, source=plan["source"], phase=plan["phase"],
-                                         fixtures=fixtures)
+                                         fixtures=fixtures, sizing_record=plan.get("sizing_record"), caps_record=plan["caps"])
     if plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q:
         check_queue_population(sorted(canonical, key=lambda row: row["planned_order"]),
-                               manifest, plan["phase"], plan.get("consumed_attempts"))
+                               manifest, plan["phase"], plan.get("consumed_attempts"),
+                               sizing_record=plan.get("sizing_record"), caps_record=plan["caps"])
         for row in rows:
-            if row.get("executed_arm_memberships") != [row["arm"]]:
+            expected = next(candidate for candidate in canonical if candidate["assignment_id"] == row["entry_id"])
+            if row.get("executed_arm_memberships") != expected.get("executed_arm_memberships", [expected["arm"]]):
                 raise EvidenceError("queue executed memberships differ from the phase population")
     from .pilot import verify_core_binding
 
@@ -945,13 +965,17 @@ def check_plan_assignment_binding(plan: dict, lane_plans: dict[str, dict], manif
     return canonical
 
 
-def check_queue_population(rows: list[dict], manifest: dict, phase: str, ledger: dict | None) -> None:
+def check_queue_population(rows: list[dict], manifest: dict, phase: str, ledger: dict | None, *,
+                           sizing_record: dict | None = None, caps_record: dict | None = None) -> None:
     """Require whole canonical groups, minus starts retained by prior roots."""
     from .queue_study import verify_order
 
-    if phase not in ("compatibility", "smoke", "screening"):
-        raise EvidenceError("queue gate and main populations require the sizing decision builder")
-    required = [row for row in manifest["assignments"] if row["phase"] == phase]
+    if phase in ("gate", "main"):
+        from .queue_sizing import execution_population
+
+        required = execution_population(manifest, phase, sizing_record, caps_record)
+    else:
+        required = [row for row in manifest["assignments"] if row["phase"] == phase]
     ledger = ledger or _empty_ledger()
     starts = [attempt for record in ledger["prior_roots"] for attempt in record["consumed_attempt_ids"]]
     consumed = set(starts)
@@ -1028,6 +1052,7 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
                           review_plan_hash: str | None = None, selected_arms: list[str] | None = None,
                           pilot_decision: dict | None = None,
                           pilot_decision_verifier: Callable[..., dict] | None = None,
+                          sizing_record: dict | None = None, sizing_verifier: Callable[..., dict] | None = None,
                           study_manifest: dict | None = None,
                           study_directory: Path | None = None,
                           receipt_directory: Path | None = None, repair_evidence_directory: Path | None = None
@@ -1046,12 +1071,26 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
     if "study_manifest_hash" in source:
         if study_manifest is None:
             raise EvidenceError("study-bound build requires its sealed study manifest")
-        if content_hash(caps_record) != study_manifest["caps_hash"]:
+        sized = bundle.schema_version == TOOL_SCHEMA_VERSION_Q and phase in ("gate", "main")
+        if sized:
+            from .queue_sizing import check_sizing_record, sized_caps
+
+            check_sizing_record(sizing_record, study_manifest_hash=study_manifest["seal_hash"])
+            if sizing_verifier is None:
+                raise ValueError("gate/main build requires offline sizing evidence verification")
+            verified_sizing = sizing_verifier(sizing_record, study_manifest_hash=study_manifest["seal_hash"],
+                receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+            if verified_sizing != sizing_record:
+                raise EvidenceError("sizing verifier returned a different record")
+            if caps_record != sized_caps(study_manifest, sizing_record):
+                raise EvidenceError("plan caps differ from the sizing record")
+        elif content_hash(caps_record) != study_manifest["caps_hash"]:
             raise EvidenceError("plan caps differ from its sealed study")
         canonical = check_assignment_binding(rows, manifest=study_manifest, source=source, phase=phase,
-                                             fixtures=fixtures)
+                                             fixtures=fixtures, sizing_record=sizing_record, caps_record=caps_record)
         if bundle.schema_version == TOOL_SCHEMA_VERSION_Q:
-            check_queue_population(canonical, study_manifest, phase, consumed_attempts)
+            check_queue_population(canonical, study_manifest, phase, consumed_attempts,
+                                   sizing_record=sizing_record, caps_record=caps_record)
             check_queue_prior_starts({"tool_schema_version": bundle.schema_version, "phase": phase,
                                       "source": source, "consumed_attempts": consumed_attempts or _empty_ledger()},
                 study_directory, bundle=bundle, receipt_directory=receipt_directory,
@@ -1074,7 +1113,8 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
         raise ValueError("only a core plan binds a pilot decision")
     entries = validate_assignment_rows(phase, rows, fixtures, caps_record, bundle)
     if study_manifest is not None:
-        check_assignment_binding(entries, manifest=study_manifest, source=source, phase=phase, fixtures=fixtures)
+        check_assignment_binding(entries, manifest=study_manifest, source=source, phase=phase, fixtures=fixtures,
+                                 sizing_record=sizing_record, caps_record=caps_record)
     used = {entry["fixture_id"]: fixtures[entry["fixture_id"]] for entry in entries}
     result = _assemble(phase, revision, caps_record, bundle, entries, used, source=source,
                      gate_evidence=gate_evidence, consumed_attempts=consumed_attempts or _empty_ledger(),
@@ -1083,6 +1123,11 @@ def build_assignment_plan(phase: str, rows: list[dict], fixtures: dict[str, dict
     if core:
         result[0]["pilot_decision"] = deepcopy(pilot_decision)
         result[0]["pilot_decision_hash"] = pilot_decision["seal_hash"]
+    if sizing_record is not None:
+        if bundle.schema_version != TOOL_SCHEMA_VERSION_Q or phase not in ("gate", "main"):
+            raise ValueError("only a Q gate/main plan binds a sizing record")
+        result[0]["sizing_record"] = deepcopy(sizing_record)
+        result[0]["sizing_record_hash"] = sizing_record["seal_hash"]
     return result
 
 
@@ -1352,7 +1397,7 @@ def checked_pressure_roots(study_directory: Path, *,
             raise EvidenceError("P root assignments require one sealed-study phase")
         canonical_phase = phases.pop()
         assignments = check_assignment_binding(entries, manifest=manifest, source=plan["source"],
-            phase=canonical_phase, fixtures=fixtures)
+            phase=canonical_phase, fixtures=fixtures, sizing_record=plan.get("sizing_record"), caps_record=plan.get("caps"))
         if (plan["phase"] != canonical_phase or entry["phase"] != canonical_phase
                 or any(lane_plan["phase"] != canonical_phase for lane_plan in lane_plans)):
             raise EvidenceError("P root phase differs from its sealed-study assignments")
@@ -2226,6 +2271,7 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
                       prior_roots: list[Path] | tuple = (), bundle: ProtocolBundle | None = None,
                       review_plan: dict | None = None, compatibility_directories: list[Path] | tuple = (),
                       pilot_decision_verifier: Callable[..., dict] | None = None,
+                      sizing_verifier: Callable[..., dict] | None = None,
                           receipt_directory: Path | None = None,
                           repair_evidence_directory: Path | None = None) -> dict:
     """Write a fresh sealed root, rechecking its final core decision offline.
@@ -2245,6 +2291,16 @@ def prepare_live_root(directory: Path, plan: tuple[dict, dict, dict], *, study_d
     """
     top, lane_plans, fixtures = plan
     check_execution_policy(top, lane_plans)
+    if top["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q and top["phase"] in ("gate", "main"):
+        if sizing_verifier is None:
+            raise ValueError("gate/main prepare requires offline sizing evidence verification")
+        sizing_verifier(top["sizing_record"], study_manifest_hash=top["source"]["study_manifest_hash"],
+            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+        if top["phase"] == "main":
+            from .queue_plans import gate_prerequisites
+
+            if gate_prerequisites(study_directory, receipt_directory=receipt_directory) != top["gate_evidence"]["gate_roots"]:
+                raise EvidenceError("main gate prerequisite differs from the sealed plan")
     if top["phase"] == "compatibility" and top["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q:
         from .queue_checks import verify_compatibility_population
 
@@ -2766,7 +2822,7 @@ def check_phase_gates(phase: str, lanes: list[str], *, bundle: ProtocolBundle, s
                 "and client" for lane in missing] + (notes if missing else [])
     evidence: dict[str, Any] = {"qualification": {lane: qualification[lane] for lane in lanes
                                                   if lane in qualification}}
-    if phase in ("collection", "screening"):
+    if phase in ("collection", "screening", "gate", "main"):
         if smoke_directory is None:
             failures.append("smoke: collection requires retained smoke evidence")
             evidence["smoke"] = None
@@ -2779,6 +2835,10 @@ def check_phase_gates(phase: str, lanes: list[str], *, bundle: ProtocolBundle, s
                                                        repair_evidence_directory=repair_evidence_directory)
             failures += smoke_failures
             evidence["smoke"] = smoke
+    if phase == "main":
+        from .queue_plans import gate_prerequisites
+
+        evidence["gate_roots"] = gate_prerequisites(study_directory, receipt_directory=receipt_directory)
     return {"passed": not failures, "failures": failures, "evidence": evidence}
 
 
@@ -2790,6 +2850,7 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
                      tool_schema_version: str | None = None,
                      pilot_decision: dict | None = None,
                      pilot_decision_verifier: Callable[..., dict] | None = None,
+                     sizing_record: dict | None = None, sizing_verifier: Callable[..., dict] | None = None,
                          receipt_directory: Path | None = None,
                          repair_evidence_directory: Path | None = None) -> tuple[dict, dict, dict]:
     """Build a phase plan; behavioral phases bind their study, its consumed-attempt ledger, and their gates.
@@ -2811,7 +2872,19 @@ def build_phase_plan(phase: str, caps_record: dict, *, revision: str, study_dire
     """
     bundle = require_v11_tools(bundle or load_bundle())
     if phase in ("gate", "main"):
-        raise ValueError("queue gate and main plans require the Q2b sizing decision builder")
+        from .queue_plans import build_study_plan
+
+        if any(value is not None for value in (pilot_decision, review_plan, arms, tool_schema_version)):
+            raise ValueError("Q gate/main builds accept the sizing record only")
+        result = build_study_plan(phase, sizing_record=sizing_record, sizing_verifier=sizing_verifier,
+            revision=revision, study_directory=study_directory, compatibility_directories=compatibility_directories,
+            smoke_directory=smoke_directory, prior_roots=prior_roots, bundle=bundle, study_verifier=study_verifier,
+            receipt_directory=receipt_directory, repair_evidence_directory=repair_evidence_directory)
+        if caps_record != result[0]["caps"]:
+            raise ValueError("supplied caps differ from the sized study caps")
+        return result
+    if sizing_record is not None:
+        raise ValueError("only a Q gate/main plan binds a sizing record")
     selected_arms = validate_arm_selection(validate_phase(phase), arms) if arms is not None else None
     if validate_phase(phase) == "compatibility":
         if pilot_decision is not None:
