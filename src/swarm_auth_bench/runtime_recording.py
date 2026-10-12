@@ -8,6 +8,12 @@ import re
 from copy import deepcopy
 from typing import Any
 
+CREDENTIAL_KEY = r"(?:api[_-]?key|(?:access|refresh)[_-]?token|password|(?:client[_-]?)?secret|authorization)"
+CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?i)([\"']?" + CREDENTIAL_KEY + r"[\"']?\s*[=:]\s*)"
+    r"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s\"'<>;,}\]]+)"
+)
+
 
 def _hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
@@ -16,16 +22,21 @@ def _hash(value: Any) -> str:
 
 def _redact(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: ("[redacted]" if re.search(r"secret|password|authorization|api[_-]?key|access[_-]?token",
+        return {key: ("[redacted]" if re.search(r"secret|password|authorization|api[_-]?key|(?:access|refresh)[_-]?token",
                                                key, re.I) else _redact(child))
                 for key, child in value.items()}
     if isinstance(value, list):
         return [_redact(child) for child in value]
     if isinstance(value, str):
         value = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[redacted]", value)
-        value = re.sub(r"(?i)\bBearer\s+[^\s\"<>]+", "Bearer [redacted]", value)
-        return re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*)[^\s\"<>]+",
-                      r"\1[redacted]", value)
+        value = re.sub(r"(?i)\bBearer\s+[^\s\"'<>]+", "Bearer [redacted]", value)
+
+        def replace(match: re.Match) -> str:
+            captured = match[2]
+            quote = captured[0] if captured[0] in "\"'" else ""
+            return match[1] + quote + "[redacted]" + quote
+
+        return CREDENTIAL_ASSIGNMENT.sub(replace, value)
     return value
 
 
@@ -49,12 +60,15 @@ def probe_record(request: dict) -> dict:
 
 
 def attempt_recording(events: list[dict], *, thread_id: str | None, turn_id: str | None,
-                      record_calls: bool, record_reasoning: bool, attestations: list[dict]) -> dict:
-    reasoning, calls, compactions = [], [], []
-    seen = set()
-    context_tokens, context_window, context_event_index = None, None, None
-    waiting_raw: list[dict] = []
-    waiting_last: list[dict] = []
+                      record_calls: bool, record_reasoning: bool, attestations: list[dict],
+                      record_compactions: bool = False) -> dict:
+    if not (record_calls or record_reasoning or record_compactions):
+        return {}
+    reasoning, calls, compactions, notifications = [], [], [], []
+    responses: dict[str, dict] = {}
+    seen_responses = set()
+    context_tokens, context_window, context_event_index, context_source = None, None, None, None
+    compaction_segment = 0
 
     def usage_fields(usage: dict | None) -> dict:
         return {key: usage.get(wire) if isinstance(usage, dict) else None
@@ -80,67 +94,95 @@ def attempt_recording(events: list[dict], *, thread_id: str | None, turn_id: str
         if method == "thread/tokenUsage/updated":
             token_usage = params.get("tokenUsage") or {}
             last = token_usage.get("last")
-            if isinstance(last, dict):
-                context_tokens = last.get("totalTokens")
+            if isinstance(last, dict) and last.get("inputTokens") is not None:
+                context_tokens = last.get("inputTokens")
                 context_event_index = index
+                context_source = "thread/tokenUsage/updated.last.inputTokens"
             context_window = token_usage.get("modelContextWindow", context_window)
-        elif method == "rawResponse/completed" and isinstance(params.get("usage"), dict):
-            context_tokens = params["usage"].get("totalTokens")
+        elif (method == "rawResponse/completed" and isinstance(params.get("usage"), dict)
+              and params["usage"].get("inputTokens") is not None):
+            context_tokens = params["usage"].get("inputTokens")
             context_event_index = index
+            context_source = "rawResponse/completed.usage.inputTokens"
         is_compaction = (method in {"thread/compacted", "context/compacted", "contextCompacted"}
                          or method in {"item/started", "item/completed"}
                          and item.get("type") == "contextCompaction")
         if is_compaction:
+            compaction_segment += 1
+            client_context, client_source = None, None
+            for source, payload in (("notification.contextTokens", params), ("notification.item.contextTokens", item)):
+                if payload.get("contextTokens") is not None:
+                    client_context, client_source = payload["contextTokens"], source
+                    break
             compactions.append({"raw_event_index": index, "method": method,
-                                "context_tokens": params.get("contextTokens", context_tokens),
-                                "context_usage_event_index": context_event_index,
-                                "context_size_source": ("notification.contextTokens" if "contextTokens" in params
-                                                        else "latest_tokenUsage.last.totalTokens"),
+                                "context_tokens": client_context if client_source else context_tokens,
+                                "context_usage_event_index": None if client_source else context_event_index,
+                                "context_size_source": client_source or "last_observed_input_tokens",
+                                "context_usage_source": None if client_source else context_source,
                                 "model_context_window": context_window, "raw": deepcopy(raw)})
         if not record_calls or method not in {"thread/tokenUsage/updated", "rawResponse/completed"}:
             continue
-        identity = _hash([method, params])
-        if identity in seen:
-            continue
-        seen.add(identity)
         if method == "rawResponse/completed":
-            response_id = params.get("responseId")
-            if any(call.get("response_id") == response_id for call in calls) and response_id is not None:
+            response_id = params.get("responseId") or (params.get("response") or {}).get("id")
+            if response_id is not None and response_id in seen_responses:
                 continue
-            call = waiting_last.pop(0) if waiting_last else None
-            if call is None:
-                call = {"call_index": len(calls) + 1, "usage_event_index": index,
-                        "usage_source": "rawResponse/completed", **usage_fields(params.get("usage"))}
-                calls.append(call)
-                waiting_raw.append(call)
-            elif isinstance(params.get("usage"), dict):
-                call.update(usage_event_index=index, usage_source="rawResponse/completed",
-                            **usage_fields(params["usage"]))
+            if response_id is not None:
+                seen_responses.add(response_id)
+            has_usage = isinstance(params.get("usage"), dict)
+            call = {"call_index": len(calls) + 1, "usage_event_index": index if has_usage else None,
+                    "usage_source": "rawResponse/completed" if has_usage else None,
+                    **usage_fields(params.get("usage")), "_segment": compaction_segment,
+                    "_total_tokens": params["usage"].get("totalTokens") if has_usage else None}
+            calls.append(call)
             metadata = (params.get("usageMetadata") or {}).get("metadata") or {}
             served = params.get("model") or (params.get("response") or {}).get("model")
             if not served and isinstance(metadata, dict):
                 served = metadata.get("model")
             call.update(response_id=response_id, response_event_index=index,
                         served_model=served if isinstance(served, str) else None)
+            if response_id is not None:
+                responses[response_id] = call
         else:
             last = (params.get("tokenUsage") or {}).get("last")
             if not isinstance(last, dict):
                 continue
-            if waiting_raw:
-                call = waiting_raw.pop(0)
-                if all(call[key] is None for key in usage_fields(None)):
-                    call.update(usage_event_index=index, usage_source="thread/tokenUsage/updated.last",
-                                **usage_fields(last))
-            else:
-                call = {"call_index": len(calls) + 1, "usage_event_index": index,
-                        "usage_source": "thread/tokenUsage/updated.last", "response_id": None,
-                        "served_model": None, **usage_fields(last)}
-                calls.append(call)
-                waiting_last.append(call)
+            notifications.append({"raw_event_index": index, "response_id": params.get("responseId"),
+                                  "context_total_tokens": last.get("totalTokens"),
+                                  "model_context_window": token_usage.get("modelContextWindow"),
+                                  **usage_fields(last), "_segment": compaction_segment})
+
+    # Only completions create calls. A notification without a response ID can
+    # confirm identical usage of a preceding completion in the same compaction
+    # segment. It cannot supply missing usage or pair with a future response.
+    estimates = []
+    for notification in notifications:
+        call = responses.get(notification["response_id"])
+        if call is None and notification["response_id"] is None:
+            matches = [candidate for candidate in calls
+                       if candidate["_segment"] == notification["_segment"]
+                       and candidate["response_event_index"] < notification["raw_event_index"]
+                       and candidate["usage_source"] == "rawResponse/completed"
+                       and "usage_notification_event_index" not in candidate
+                       and candidate["_total_tokens"] == notification["context_total_tokens"]
+                       and all(candidate[key] == notification[key] for key in usage_fields(None))]
+            if matches:
+                call = min(matches, key=lambda candidate: abs(
+                    candidate["response_event_index"] - notification["raw_event_index"]))
+        if call is None:
+            estimates.append({key: value for key, value in notification.items() if key != "_segment"})
+            continue
+        call["usage_notification_event_index"] = notification["raw_event_index"]
+        if call["usage_source"] is None:
+            call.update(usage_event_index=notification["raw_event_index"],
+                        usage_source="thread/tokenUsage/updated.last",
+                        **{key: notification[key] for key in usage_fields(None)})
+    for call in calls:
+        call.pop("_segment")
+        call.pop("_total_tokens")
     result = {"reasoning_items": reasoning} if record_reasoning and reasoning else {}
-    if record_calls or compactions:
+    if record_calls or record_reasoning or record_compactions:
         result["runtime_recording"] = {"compaction_events": compactions}
     if record_calls:
-        result["runtime_recording"].update(model_calls=calls, manifest_probes=[
+        result["runtime_recording"].update(model_calls=calls, context_estimates=estimates, manifest_probes=[
             deepcopy(proof["request_recording"]) for proof in attestations if "request_recording" in proof])
     return result

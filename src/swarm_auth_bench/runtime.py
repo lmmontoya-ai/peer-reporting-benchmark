@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
-from .runtime_cleanup import _kill_group, mark_home
+from .runtime_cleanup import _kill_group, mark_home, process_start
 from .world import ToolError
 
 LOCKED_CONFIG = (
@@ -305,6 +305,7 @@ class CodexRuntime:
             limit=16 * 1024 * 1024,
             start_new_session=os.name != "nt",
         )
+        proc._runtime_start = process_start(proc.pid)
         mark_home(home, process_pid=proc.pid)
         return proc
 
@@ -321,6 +322,8 @@ class CodexRuntime:
         try:
             await asyncio.wait_for(proc.wait(), 5)
         except asyncio.TimeoutError:
+            if proc.returncode is not None:
+                return
             try:
                 if os.name == "nt":
                     proc.kill()
@@ -331,7 +334,19 @@ class CodexRuntime:
             await proc.wait()
 
     async def _kill_process(self, proc: asyncio.subprocess.Process) -> None:
-        await asyncio.to_thread(_kill_group, proc.pid)
+        if proc.returncode is not None:
+            return
+        birth = getattr(proc, "_runtime_start", None)
+        if birth is None:
+            birth = process_start(proc.pid)
+
+        def kill_running() -> None:
+            # The process can exit while the work waits for a thread slot.
+            if (proc.returncode is None and birth not in (None, "unknown")
+                    and process_start(proc.pid) == birth):
+                _kill_group(proc.pid)
+
+        await asyncio.to_thread(kill_running)
         await proc.wait()
 
     async def _send(self, message: dict[str, Any], proc: asyncio.subprocess.Process | None = None) -> None:
@@ -879,6 +894,8 @@ class CodexRuntime:
         if dispatches:
             await asyncio.gather(*dispatches, return_exceptions=True)
         self._background.difference_update(dispatches)
+        if hasattr(self, "_peer_dispatches"):
+            self._peer_dispatches.difference_update(dispatches)
         for future in self._pending.values():
             if not future.done():
                 future.cancel()
