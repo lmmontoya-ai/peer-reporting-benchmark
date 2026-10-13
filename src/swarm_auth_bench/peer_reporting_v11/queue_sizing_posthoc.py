@@ -2,50 +2,29 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
 
-from ..peer_reporting.config import read_json
 from ..peer_reporting.storage import read_sealed, seal
 from . import queue_posthoc
 from .lanes import lane_id
 from .queue_review import resolve_reviews
 from .queue_sizing import (
-    SUBMISSION_KIND,
     check_sizing_record,
     require,
     screening_measures,
     sizing_decision,
 )
+from .queue_sizing_evidence import (
+    _check_reference,
+    _reference,
+    credibility_inventory,
+    validate_submission,
+    verify_submission,
+)
 from .queue_storage import atomic_json
 from .structured import test_awareness_flag
-
-
-def _reference(path):
-    path = Path(path).resolve()
-    return {"path": str(path), "seal_hash": read_sealed(path)["seal_hash"]}
-
-
-def _check_reference(reference):
-    require(type(reference) is dict and set(reference) == {"path", "seal_hash"}
-            and Path(reference["path"]).is_absolute(), "invalid sizing evidence reference")
-    record = read_sealed(Path(reference["path"]))
-    require(record["seal_hash"] == reference["seal_hash"], "sizing evidence reference hash differs")
-    return record
-
-
-def validate_submission(submission, *, manifest, export_hash):
-    fields = {"kind", "study_manifest_hash", "screening_export_hash", "user_id", "user_type",
-              "flag_resolutions", "choices", "W", "prices_per_million", "approval"}
-    require(type(submission) is dict and set(submission) == fields and submission["kind"] == SUBMISSION_KIND,
-            "invalid user sizing submission fields")
-    require(submission["user_type"] == "human" and type(submission["user_id"]) is str and bool(submission["user_id"].strip()),
-            "sizing choices and approval require an identified human user")
-    require(submission["study_manifest_hash"] == manifest["seal_hash"]
-            and submission["screening_export_hash"] == export_hash, "user submission names another study or screening export")
-    return submission
 
 
 def retain_submission(submission_path, output, *, study_directory):
@@ -66,25 +45,6 @@ def retain_submission(submission_path, output, *, study_directory):
                    "submission_path": str(companion), "submission_sha256": digest, "submission": submitted})
     atomic_json(output, record)
     return _reference(output)
-
-
-def verify_submission(reference, *, study_directory, manifest, export_hash):
-    record = _check_reference(reference)
-    require(set(record) == {"kind", "study_directory", "study_manifest_hash", "submission_path", "submission_sha256",
-                            "submission", "seal_hash"}, "retained sizing validation fields differ")
-    require(record["kind"] == "peer_reporting_v14_queue_retained_sizing_submission"
-            and record["study_directory"] == str(Path(study_directory).resolve())
-            and record["study_manifest_hash"] == manifest["seal_hash"], "retained sizing submission belongs to another study")
-    path = Path(record["submission_path"])
-    validation = Path(reference["path"])
-    require(path == validation.with_name(validation.stem + "-submission.json"), "retained sizing submission path differs")
-    primary = Path(study_directory) / "sizing-submissions" / (record["submission_sha256"] + ".json")
-    require(primary.is_file() and path.is_file() and primary.read_bytes() == path.read_bytes()
-            and hashlib.sha256(path.read_bytes()).hexdigest() == record["submission_sha256"],
-            "sizing choices or approval differ from retained primary submission")
-    submitted = read_json(path)
-    require(submitted == record["submission"], "sizing validation differs from retained submission")
-    return validate_submission(submitted, manifest=manifest, export_hash=export_hash)
 
 
 def _censored_caps(attempt):
@@ -126,6 +86,12 @@ def screening_inputs(*, export_directory, study_directory, coding_resolution, ep
     require(context["index"]["coding_resolution"] == str(Path(coding_resolution).resolve()),
             "screening episode packets must use the supplied complete owner coding")
     context["directory"] = Path(episode_packets).resolve()
+    p3_ids = {row["assignment_id"] for row in planned if row["pressure"] == "P3"}
+    p3_names = {name for name, bundle in context["bundles"].items() if bundle["row"]["assignment_id"] in p3_ids}
+    credibility_inventory(context["directory"], context["index"], episode_uploads, episode_adjudications)
+    episode_uploads = tuple(path for path in episode_uploads if read_sealed(Path(path))["review_packet_id"] in p3_names)
+    episode_adjudications = tuple(path for path in episode_adjudications
+                                 if read_sealed(Path(path))["review_packet_id"] in p3_names)
     uploads, adjudications = {}, {}
     for path in episode_uploads:
         name, uploaded, adjudication, correction = queue_posthoc._checked_upload(path, context, cache)
@@ -135,13 +101,7 @@ def screening_inputs(*, export_directory, study_directory, coding_resolution, ep
         name, uploaded, adjudication, correction = queue_posthoc._checked_upload(path, context, cache)
         require(adjudication and correction is None and name not in adjudications, "invalid credibility adjudication")
         adjudications[name] = uploaded
-    # All retained submissions for a reviewed episode must be included, even if disputed.
-    included = {read_sealed(Path(path))["submission_sha256"] for path in (*episode_uploads, *episode_adjudications)}
-    primary = {path.stem for path in (context["directory"] / "submissions").glob("*.json")}
-    require(included == primary and len(included) == len(episode_uploads) + len(episode_adjudications),
-            "credibility must include every retained episode submission exactly once")
     credibility = {}
-    p3_ids = {row["assignment_id"] for row in planned if row["pressure"] == "P3"}
     for name, bundle in context["bundles"].items():
         identifier = bundle["row"]["assignment_id"]
         if identifier not in p3_ids:

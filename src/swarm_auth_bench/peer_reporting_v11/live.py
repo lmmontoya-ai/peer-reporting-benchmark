@@ -611,6 +611,7 @@ def _entry(row: dict, fixture: dict, instructions: str) -> dict:
         **({key: row[key] for key in ("difficulty", "block", "prevalence_k", "post_condition", "visibility", "pressure")}
            if row["level"] == "P" else {}),
         **({**{key: row[key] for key in QUEUE_FIELDS}, "phase": row["phase"],
+            **({"max_tool_requests": row["max_tool_requests"]} if "max_tool_requests" in row else {}),
             **({"arm_memberships": row["arm_memberships"]} if "arm_memberships" in row else {}),
             "candidate_arm_memberships": list(row.get("candidate_arm_memberships", row.get("arm_memberships", [row["arm"]]))),
             "executed_arm_memberships": list(row.get("executed_arm_memberships", [row["arm"]]))}
@@ -3037,6 +3038,19 @@ async def run_live_phase(
         if changes:
             raise LivePhaseError(f"code, catalog, schema, template, or protocol files changed after sealing: "
                                  f"{changes}; a change requires a new plan revision")
+        if plan["tool_schema_version"] == TOOL_SCHEMA_VERSION_Q and plan["phase"] in ("gate", "main"):
+            from .queue_sizing_evidence import verify_execution_sizing
+
+            verify_execution_sizing(plan["sizing_record"], study_directory=study_directory,
+                                    receipt_directory=receipt_directory,
+                                    compatibility_directories=compatibility_directories,
+                                    repair_evidence_directory=repair_evidence_directory)
+            if plan["phase"] == "main":
+                from .queue_plans import gate_prerequisites
+
+                gate_prerequisites(study_directory, receipt_directory=receipt_directory, require_execution=True,
+                                   compatibility_directories=compatibility_directories,
+                                   repair_evidence_directory=repair_evidence_directory)
         registration = (root_registration(study_directory, plan, directory=directory, require_finalized=True)
                         if behavioral else None)
         verification = verify_live_root(directory, bundle=bundle, prior_roots=prior_roots,

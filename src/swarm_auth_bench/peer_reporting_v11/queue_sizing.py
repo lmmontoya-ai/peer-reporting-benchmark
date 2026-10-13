@@ -310,4 +310,5 @@ def execution_population(manifest, phase, record, caps):
     rows = execution_rows(manifest, phase, record)
     for row in rows:
         row["instructions"] = build_instructions(load_template(row["template_id"]), caps["trial"])
+        row["max_tool_requests"] = caps["trial"]["max_tool_requests_per_trial"]
     return rows
