@@ -9,7 +9,8 @@ from .queue_sizing import check_sizing_record, execution_population, require, si
 from .schemas import TOOL_SCHEMA_VERSION_Q
 
 
-def gate_prerequisites(study_directory, *, receipt_directory):
+def gate_prerequisites(study_directory, *, receipt_directory, require_execution=False,
+                       compatibility_directories=(), repair_evidence_directory=None):
     from . import live
     from .receipts import check_receipt
 
@@ -22,6 +23,24 @@ def gate_prerequisites(study_directory, *, receipt_directory):
         plan = live.read_live_plan(root)
         live.check_root_assignment_binding(root, plan, study_directory)
         check_receipt(root, receipt_directory, study_directory=study_directory)
+        if require_execution:
+            report = live.verify_live_root(root, study_directory=study_directory, receipt_directory=receipt_directory,
+                                           compatibility_directories=compatibility_directories,
+                                           repair_evidence_directory=repair_evidence_directory)
+            require(not report["unreconciled_starts"], "main requires finished or deliberately stopped gate execution")
+            journals = live.lane_journals(root, plan)
+            for lane, records in journals.items():
+                lifecycle = [row for row in records if row["kind"] in ("run_opened", "run_closed")]
+                require(bool(lifecycle) and len(lifecycle) % 2 == 0 and all(
+                        row["kind"] == ("run_opened" if index % 2 == 0 else "run_closed")
+                        for index, row in enumerate(lifecycle)),
+                        "main requires receipt-verified finished or deliberately stopped gate execution")
+                pending = any(row["status"] in live.UNSTARTED for row in report["lanes"][lane]["entries"])
+                halted = lifecycle[-1]["data"].get("halted") or {}
+                deliberate = set(halted.get("holds", [])) & {
+                    "soft_stop", "hard_stop", "admission_cutoff", "forced_stop_deadline"}
+                require(not pending or halted.get("reason") == "global_admission_hold" and bool(deliberate),
+                        "main requires receipt-verified finished or deliberately stopped gate execution")
         result.append({"plan_hash": plan["seal_hash"], "sizing_record_hash": plan["sizing_record_hash"]})
     return sorted(result, key=lambda row: row["plan_hash"])
 

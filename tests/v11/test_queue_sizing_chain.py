@@ -289,6 +289,8 @@ async def study_roots(chain):
             "study_directory", "compatibility_directories", "smoke_directory", "receipt_directory")}
         status = await run_phase(root, top, harness, bundle=chain["bundle"], auth=authorization(top, deadline=12000), **run_options)
         assert 1 <= status["status_counts"]["archived"] <= 4, status
+        assert all(row["check_passed"] is True for report in status["verification"]["lanes"].values()
+                   for row in report["entries"] if row["status"] == "archived"), status
         commit_receipt(root, chain["receipts"], study_directory=chain["study"])
         export, scores = chain["tmp"] / (phase + "-export"), chain["tmp"] / (phase + "-scores.json")
         review_options = {"receipt_directory": chain["receipts"], "study_directory": chain["study"]}
@@ -369,11 +371,17 @@ def open_without_posthoc(path, *args, **kwargs):
 builtins.open = open_without_posthoc
 check_sizing_record(plan["sizing_record"], study_manifest_hash=plan["source"]["study_manifest_hash"])
 live.check_plan_assignment_binding(plan, payload["lanes"], payload["manifest"], payload["fixtures"])
+builtins.open = original_open
+from swarm_auth_bench.peer_reporting_v11.queue_sizing_evidence import verify_execution_sizing
+verify_execution_sizing(plan["sizing_record"],
+    study_directory=plan["sizing_record"]["sources"]["study_directory"], receipt_directory=Path(sys.argv[2]),
+    compatibility_directories=[Path(sys.argv[3])])
 for name in phase.POST_HOC_MODULES:
     module = "swarm_auth_bench." + name.removesuffix(".py").replace("/", ".")
     assert module not in sys.modules, module
 """
-    subprocess.run([sys.executable, "-c", code, str(path)], check=True, capture_output=True, text=True)
+    subprocess.run([sys.executable, "-c", code, str(path), str(chain["receipts"]), str(chain["compat"])],
+                   check=True, capture_output=True, text=True)
 
 
 def test_projection_discards_P3_outcomes_at_verified_route(chain, monkeypatch):
