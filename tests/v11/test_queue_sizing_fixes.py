@@ -12,6 +12,7 @@ from swarm_auth_bench.peer_reporting_v11.queue_sizing import (
     check_sizing_record,
     screening_measures,
     sizing_decision,
+    sizing_record_hash,
 )
 from swarm_auth_bench.peer_reporting_v11.queue_sizing_evidence import verify_execution_sizing
 from swarm_auth_bench.peer_reporting_v11.queue_sizing_posthoc import (
@@ -53,6 +54,19 @@ def run_options(options):
         "study_directory", "compatibility_directories", "smoke_directory", "receipt_directory", "bundle")}
 
 
+def resealed_record(original, *, inputs=None, sources=None, submission=None):
+    """Consistently reseal copied inputs and approval while keeping primary bytes intact."""
+    submitted = deepcopy(submission or original["submission"])
+    submitted["approval"]["status"] = "pending"
+    copied = sizing_decision(inputs=inputs or original["screening_inputs"], provisional_caps=original["provisional_caps"],
+                            submission=submitted, sources=sources or original["sources"],
+                            retained_submission=original["retained_submission"])
+    copied["decision"] = copied["measures"]["decision"]
+    submitted["approval"].update(status="approved", sizing_record_hash=sizing_record_hash(copied))
+    return sizing_decision(inputs=copied["screening_inputs"], provisional_caps=copied["provisional_caps"],
+                           submission=submitted, sources=copied["sources"], retained_submission=copied["retained_submission"])
+
+
 async def test_resealed_counts_choices_and_approval_refused_before_runtime(chain):
     check_execution_boundary(chain)
     original = chain["record"]
@@ -62,10 +76,9 @@ async def test_resealed_counts_choices_and_approval_refused_before_runtime(chain
     row = next(row for row in coded if row["pressure"] == "neutral" and row["owner_codes"].get("labels"))
     codes = next(iter(row["owner_codes"]["labels"].values()))
     codes["owner_informed"] = not codes["owner_informed"]
-    copied_codes = sizing_decision(inputs=coded, provisional_caps=original["provisional_caps"],
-        submission=original["submission"], sources=original["sources"], retained_submission=original["retained_submission"])
+    copied_codes = resealed_record(original, inputs=coded)
     assert copied_codes["measures"] == original["measures"]
-    with pytest.raises(ValueError, match="codes differ from retained owner coding"):
+    with pytest.raises(ValueError, match="retained human approval"):
         verify_execution_sizing(copied_codes, **verification)
     export_path = Path(original["sources"]["screening_export"]["path"])
     attempt = next(row["attempt_path"] for row in read_sealed(export_path)["rows"] if row.get("attempt_path"))
@@ -81,9 +94,7 @@ async def test_resealed_counts_choices_and_approval_refused_before_runtime(chain
     submitted["choices"]["ceiling"] = "a"
     measures = screening_measures(inputs, original["provisional_caps"], submitted)
     assert measures["study_lanes"] == original["study_lanes"]
-    submitted["approval"]["measures_hash"] = measures["seal_hash"]
-    forged = sizing_decision(inputs=inputs, provisional_caps=original["provisional_caps"], submission=submitted,
-                            sources=original["sources"], retained_submission=original["retained_submission"])
+    forged = resealed_record(original, inputs=inputs, submission=submitted)
     assert check_sizing_record(forged, study_manifest_hash=original["study_manifest_hash"]) == forged
     with pytest.raises(ValueError, match="receipt-bound|retained"):
         validate_sizing_record(forged, study_manifest_hash=original["study_manifest_hash"],

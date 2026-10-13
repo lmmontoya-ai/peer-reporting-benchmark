@@ -7,6 +7,7 @@ from copy import deepcopy
 from fractions import Fraction
 from statistics import median
 
+from ..events import content_hash
 from ..peer_reporting.storage import check_seal, seal
 from .lanes import lane_id, validate_caps_record
 from .queue_protocol import QUEUE_LANES
@@ -214,24 +215,9 @@ def screening_measures(rows, provisional_caps, submission):
                  "live_model_calls": 0})
 
 
-def sizing_decision(*, inputs, provisional_caps, submission, sources, retained_submission):
+def sizing_proposal(*, inputs, provisional_caps, submission, sources):
+    """Derive every sizing field before adding the user's approval and its retention."""
     measures = screening_measures(inputs, provisional_caps, submission)
-    approval = submission["approval"]
-    require(type(approval) is dict and set(approval) == {"status", "text", "measures_hash"}
-            and approval["status"] in ("approved", "pending", "rejected") and type(approval["text"]) is str,
-            "invalid user sizing approval")
-    if approval["status"] != "pending":
-        require(bool(approval["text"].strip()) and approval["measures_hash"] == measures["seal_hash"],
-                "approval must name the exact screening measures, caps and cost estimate")
-    decision = measures["decision"]
-    if approval["status"] == "rejected":
-        decision = "stop"
-    elif decision == "proceed" and approval["status"] != "approved":
-        decision = "pending"
-    if decision == "proceed":
-        require(measures["cost_estimate"]["cost"] is not None
-                and measures["cost_estimate"]["totals"]["generation_seconds"] is not None,
-                "approval requires known token cost and generation-time estimates")
     return seal({"kind": SIZING_KIND, "specification_revision": 7, "sources": deepcopy(sources),
                  "study_manifest_hash": submission["study_manifest_hash"], "screening_export_hash": submission["screening_export_hash"],
                  "screening_inputs": deepcopy(inputs), "provisional_caps": deepcopy(provisional_caps),
@@ -240,9 +226,39 @@ def sizing_decision(*, inputs, provisional_caps, submission, sources, retained_s
                  "measures": measures, "study_lanes": measures["study_lanes"], "caps": measures["study_caps"],
                  "W": measures["W"], "cost_estimate": measures["cost_estimate"],
                  "flag_resolutions": deepcopy(submission["flag_resolutions"]), "credibility_count": measures["credibility_count"],
-                 "choices": deepcopy(submission["choices"]), "approval": deepcopy(approval),
-                 "submission": deepcopy(submission), "retained_submission": deepcopy(retained_submission),
-                 "decision": decision, "live_model_calls": 0})
+                 "choices": deepcopy(submission["choices"]), "decision": measures["decision"], "live_model_calls": 0})
+
+
+def sizing_record_hash(record):
+    """Hash the whole derived record, excluding only the user's submission and its copies.
+
+    Approval and retained_submission are the approval bytes and their retention reference;
+    including them would make the approval hash depend on itself. seal_hash is the envelope.
+    """
+    return content_hash({key: value for key, value in record.items()
+                         if key not in {"approval", "submission", "retained_submission", "seal_hash"}})
+
+
+def sizing_decision(*, inputs, provisional_caps, submission, sources, retained_submission):
+    proposal = sizing_proposal(inputs=inputs, provisional_caps=provisional_caps, submission=submission, sources=sources)
+    record = {key: value for key, value in proposal.items() if key != "seal_hash"}
+    approval = submission["approval"]
+    require(type(approval) is dict and set(approval) == {"status", "text", "sizing_record_hash"}
+            and approval["status"] in ("approved", "pending", "rejected") and type(approval["text"]) is str,
+            "invalid user sizing approval")
+    if approval["status"] == "rejected":
+        record["decision"] = "stop"
+    elif record["decision"] == "proceed" and approval["status"] != "approved":
+        record["decision"] = "pending"
+    if approval["status"] != "pending":
+        require(bool(approval["text"].strip()) and approval["sizing_record_hash"] == sizing_record_hash(record),
+                "approval differs from the exact derived sizing record")
+    if record["decision"] == "proceed":
+        require(record["cost_estimate"]["cost"] is not None
+                and record["cost_estimate"]["totals"]["generation_seconds"] is not None,
+                "approval requires known token cost and generation-time estimates")
+    return seal({**record, "approval": deepcopy(approval), "submission": deepcopy(submission),
+                 "retained_submission": deepcopy(retained_submission)})
 
 
 def check_sizing_record(record, *, study_manifest_hash):

@@ -140,7 +140,7 @@ async def chain(tmp_path_factory):
     measured = build_screening_measures(submission=submitted, **sizing_options)
     assert measured["study_lanes"] == [LANES[0], ATTENTION_LANE]
     submitted["approval"] = {"status": "approved", "text": "Approve these caps, W and cost inputs for the offline test.",
-                             "measures_hash": measured["seal_hash"]}
+                             "sizing_record_hash": measured["sizing_record_hash"]}
     user_path = tmp / "user.json"
     atomic_json(user_path, submitted)
     reference = retain_submission(user_path, tmp / "retained-user.json", study_directory=study)
