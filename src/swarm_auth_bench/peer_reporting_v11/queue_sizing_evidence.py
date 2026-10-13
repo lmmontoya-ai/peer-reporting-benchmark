@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..events import content_hash
 from ..peer_reporting.storage import read_sealed, safe_child
-from .queue_sizing import SUBMISSION_KIND, check_sizing_record, require
+from .queue_sizing import SUBMISSION_KIND, check_sizing_record, require, sizing_record_hash
 
 
 def _reference(path):
@@ -130,20 +130,20 @@ def verify_execution_sizing(record, *, study_directory, receipt_directory, compa
     """Bind approved arithmetic to retained human bytes and receipt-bound primary evidence.
 
     Offline builders rederive scores. Execution authenticates that frozen result through
-    the exact measures hash in the primary approval and checks its cited source bindings.
+    the whole derived record hash in the primary approval and checks its cited source bindings.
     """
     from . import live
     from .receipts import check_receipt
 
     manifest = live.read_study_manifest(study_directory)
-    check_sizing_record(record, study_manifest_hash=manifest["seal_hash"])
     sources = record["sources"]
     require(sources["study_directory"] == str(Path(study_directory).resolve()),
             "sizing evidence belongs to another study")
     submitted = verify_submission(record["retained_submission"], study_directory=study_directory,
                                   manifest=manifest, export_hash=record["screening_export_hash"])
-    require(submitted == record["submission"] and submitted["approval"]["measures_hash"] == record["measures"]["seal_hash"],
-            "sizing measures, choices or approval differ from retained human approval")
+    require(submitted == record["submission"] and submitted["approval"]["sizing_record_hash"] == sizing_record_hash(record),
+            "sizing record or submission differ from retained human approval")
+    check_sizing_record(record, study_manifest_hash=manifest["seal_hash"])
     export = _check_reference(sources["screening_export"])
     resolution = _check_reference(sources["coding_resolution"])
     packets = _check_reference(sources["episode_packets"])

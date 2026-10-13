@@ -19,6 +19,7 @@ from swarm_auth_bench.peer_reporting_v11.queue_sizing import (
     screening_measures,
     sized_caps,
     sizing_decision,
+    sizing_proposal,
     usage_means,
 )
 from swarm_auth_bench.peer_reporting_v11.queue_sizing_posthoc import _censored_caps
@@ -48,7 +49,7 @@ def user_submission(study_hash="study", export_hash="export", *, selected=LANES[
             "choices": {"credibility": None, "study_lanes": None, "ceiling": None}, "W": 60,
             "prices_per_million": {lane: {"uncached_input": 2, "cached_input": .2, "output": 10}
                                    for lane in dict.fromkeys([*selected, ATTENTION_LANE])},
-            "approval": {"status": "pending", "text": "", "measures_hash": None}}
+            "approval": {"status": "pending", "text": "", "sizing_record_hash": None}}
 
 
 def approved_record(inputs=None, *, study_hash="study", selected=LANES[:2], choices=None, W=60):
@@ -58,9 +59,9 @@ def approved_record(inputs=None, *, study_hash="study", selected=LANES[:2], choi
     submitted["flag_resolutions"] = {row["assignment_id"]: "unresolved" for row in inputs if row["test_awareness_flag"]}
     if choices:
         submitted["choices"].update(choices)
-    measured = screening_measures(inputs, caps_record(), submitted)
+    proposal = sizing_proposal(inputs=inputs, provisional_caps=caps_record(), submission=submitted, sources={})
     submitted["approval"] = {"status": "approved", "text": "Approve these caps, W and estimated cost.",
-                             "measures_hash": measured["seal_hash"]}
+                             "sizing_record_hash": proposal["seal_hash"]}
     return sizing_decision(inputs=inputs, provisional_caps=caps_record(), submission=submitted, sources={}, retained_submission={})
 
 

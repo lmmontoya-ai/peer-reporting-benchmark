@@ -1390,8 +1390,14 @@ async def run_lanes(lanes: list[LaneSpec], *, hooks: Hooks, bundle: ProtocolBund
         try:
             await _dispatch(runs, hooks, slots, errors, realized, pauses)
         finally:
+            queue_run = any(entry["level"] == "Q" for run in runs.values() for entry in run.plan["planned_order"])
+            stop = hooks.admission_check() if queue_run else None
             for lane, run in runs.items():
                 try:
+                    # Q-C9: retain a root-wide stop even when no unstarted entry remains.
+                    if stop is not None and set(stop.get("holds", [])) & {
+                            "soft_stop", "hard_stop", "admission_cutoff", "forced_stop_deadline"}:
+                        run.journal.append("root_stop_recorded", **stop)
                     run.close()
                 except Exception as error:
                     errors.setdefault(lane, f"{type(error).__name__}: {str(error)[:500]}")

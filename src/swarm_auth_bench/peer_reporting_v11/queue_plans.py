@@ -29,18 +29,26 @@ def gate_prerequisites(study_directory, *, receipt_directory, require_execution=
                                            repair_evidence_directory=repair_evidence_directory)
             require(not report["unreconciled_starts"], "main requires finished or deliberately stopped gate execution")
             journals = live.lane_journals(root, plan)
+            finished = True
+            deliberate = False
             for lane, records in journals.items():
                 lifecycle = [row for row in records if row["kind"] in ("run_opened", "run_closed")]
                 require(bool(lifecycle) and len(lifecycle) % 2 == 0 and all(
                         row["kind"] == ("run_opened" if index % 2 == 0 else "run_closed")
                         for index, row in enumerate(lifecycle)),
                         "main requires receipt-verified finished or deliberately stopped gate execution")
-                pending = any(row["status"] in live.UNSTARTED for row in report["lanes"][lane]["entries"])
-                halted = lifecycle[-1]["data"].get("halted") or {}
-                deliberate = set(halted.get("holds", [])) & {
-                    "soft_stop", "hard_stop", "admission_cutoff", "forced_stop_deadline"}
-                require(not pending or halted.get("reason") == "global_admission_hold" and bool(deliberate),
-                        "main requires receipt-verified finished or deliberately stopped gate execution")
+                finished = finished and all(row["status"] == "archived" for row in report["lanes"][lane]["entries"])
+                for row in records:
+                    if row["kind"] not in {"admission_held", "collection_stop_requested", "run_closed", "root_stop_recorded"}:
+                        continue
+                    halted = (row["data"].get("halted") or {}) if row["kind"] == "run_closed" else row["data"]
+                    reasons = {halted.get("reason"), *halted.get("holds", [])}
+                    deliberate = deliberate or bool(reasons & {
+                        "soft_stop", "hard_stop", "admission_cutoff", "forced_stop_deadline",
+                        "collection_token_limit", "collection_wall_limit", "collection_token_capacity_exhausted",
+                        "maximum_live_calls_reached"})
+            require(finished or deliberate,
+                    "main requires receipt-verified finished or deliberately stopped gate execution")
         result.append({"plan_hash": plan["seal_hash"], "sizing_record_hash": plan["sizing_record_hash"]})
     return sorted(result, key=lambda row: row["plan_hash"])
 

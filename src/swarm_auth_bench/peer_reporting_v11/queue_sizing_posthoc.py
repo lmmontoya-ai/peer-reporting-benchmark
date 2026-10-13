@@ -13,8 +13,9 @@ from .queue_review import resolve_reviews
 from .queue_sizing import (
     check_sizing_record,
     require,
-    screening_measures,
     sizing_decision,
+    sizing_proposal,
+    sizing_record_hash,
 )
 from .queue_sizing_evidence import (
     _check_reference,
@@ -150,9 +151,13 @@ def screening_inputs(*, export_directory, study_directory, coding_resolution, ep
 
 
 def build_screening_measures(*, submission, **options):
-    rows, manifest, _ = screening_inputs(**options)
+    rows, manifest, sources = screening_inputs(**options)
     validate_submission(submission, manifest=manifest, export_hash=rows_export_hash(options["export_directory"]))
-    return screening_measures(rows, manifest["caps"], submission)
+    proposal = sizing_proposal(inputs=rows, provisional_caps=manifest["caps"], submission=submission, sources=sources)
+    if submission["approval"]["status"] == "rejected":
+        proposal["decision"] = "stop"
+    return seal({**{key: value for key, value in proposal["measures"].items() if key != "seal_hash"},
+                 "sizing_record_hash": sizing_record_hash(proposal)})
 
 
 def rows_export_hash(directory):
