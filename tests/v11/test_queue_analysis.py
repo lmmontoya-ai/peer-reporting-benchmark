@@ -5,15 +5,16 @@ import itertools
 import json
 import math
 import os
+import shutil
+import stat
 from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
 from swarm_auth_bench.peer_reporting.storage import read_sealed
-from swarm_auth_bench.peer_reporting_v11 import live
-from swarm_auth_bench.peer_reporting_v11.bundle import load_bundle
-from swarm_auth_bench.peer_reporting_v11.collection import build_study
+from swarm_auth_bench.peer_reporting_v11 import live, queue_plans, queue_sizing
+from swarm_auth_bench.peer_reporting_v11.queue_plans import build_gate_plan, build_main_plan
 from swarm_auth_bench.peer_reporting_v11.queue_posthoc import (
     export_review,
     retain_upload,
@@ -21,7 +22,6 @@ from swarm_auth_bench.peer_reporting_v11.queue_posthoc import (
     write_packets,
     write_scores,
 )
-from swarm_auth_bench.peer_reporting_v11.queue_protocol import caps_record, load_protocol
 from swarm_auth_bench.peer_reporting_v11.queue_review import (
     adjudicated_endpoints,
     agreement,
@@ -31,14 +31,16 @@ from swarm_auth_bench.peer_reporting_v11.queue_review import (
 )
 from swarm_auth_bench.peer_reporting_v11.queue_score import score_trial
 from swarm_auth_bench.peer_reporting_v11.queue_storage import atomic_json
-from swarm_auth_bench.peer_reporting_v11.queue_templates import TEMPLATES
-from swarm_auth_bench.peer_reporting_v11.schemas import TOOL_SCHEMA_VERSION_Q
+from swarm_auth_bench.peer_reporting_v11.queue_study import order_rows
 
-from .live_fakes import authorization, run_phase
+from .live_fakes import run_phase
 from .queue_score_helpers import attempt, upload
 from .receipt_helpers import commit_receipt
-from .test_queue_live import QueueHarness, response, steps
+from .test_queue_live import QueueHarness, response
 from .test_queue_posthoc import altered
+from .test_queue_sizing_chain import builder_options
+from .test_queue_sizing_fix2 import screening_snapshot as screening_snapshot
+from .test_queue_sizing_fixes import prepare_options, run_options
 
 SCRIPT = Path(__file__).resolve().parents[2] / "docs/v14/analysis/queue_analyze.py"
 spec = importlib.util.spec_from_file_location("queue_analysis", SCRIPT)
@@ -374,51 +376,37 @@ def test_secondary_attention_json_and_text_keep_p_values_without_decisions(monke
 
 
 @pytest.fixture(scope="module")
-async def transport(tmp_path_factory, request):
+async def transport(tmp_path_factory, request, screening_snapshot):
     tmp = tmp_path_factory.mktemp("q3-transport")
     empty_twin = getattr(request, "param", False)
     patch = pytest.MonkeyPatch()
-    study, receipts, compat = tmp / "study", tmp / "receipts", tmp / "compat"
-    caps, bundle = caps_record(), load_bundle()
-    build_study(study, protocol=load_protocol(), templates=TEMPLATES, caps_record=caps)
-    built = live.build_compatibility_plan(caps, revision="q3-fake-compat", tool_schema_version=TOOL_SCHEMA_VERSION_Q)
-    live.prepare_live_root(compat, built)
-    fixture = next(iter(built[2].values()))
-    status = await run_phase(compat, live.read_live_plan(compat), QueueHarness(tmp / "compat-homes", lambda *_: steps(fixture)),
-        bundle=bundle, auth=authorization(live.read_live_plan(compat), root=compat, deadline=12000))
-    assert status["status"] == "complete", status
-    commit_receipt(compat, receipts)
-    # Q2c is a parallel package absent at this base. Substitute only sizing's
-    # selected population; every archive/receipt/export/score/review check is real.
-    selected = {}
-    original_population = live.check_queue_population
-    def sized_population(rows, manifest, phase, ledger):
-        if phase not in selected:
-            return original_population(rows, manifest, phase, ledger)
-        assert sorted(row["assignment_id"] for row in rows) == sorted(selected[phase])
-    patch.setattr(live, "check_queue_population", sized_population)
-    phases = {}
-    try:
-        for phase in ("gate", "main"):
-            rows, fixtures, source = live.load_study(study, phase)
-            lanes = {( "gpt-6-sol", "low"), ("gpt-6-luna", "low")}
-            rows = [row for row in rows if (row["model"], row["effort"]) in lanes
+    screened, snapshot = screening_snapshot
+    study, receipts = screened["study"], screened["receipts"]
+    # Reuse Q2c compatibility, smoke, screening and verified sizing. The only
+    # substitution is this gate/main population filter, including empty_twin.
+    # Patch the builder's imported alias too; caps, binding, population checks,
+    # execution sizing, gate-end checks and all retained evidence stay real.
+    original_population = queue_sizing.execution_population
+    def sized_population(manifest, phase, record, caps):
+        rows = original_population(manifest, phase, record, caps)
+        lanes = {("gpt-6-sol", "low"), ("gpt-6-luna", "low")}
+        rows = [row for row in rows if (row["model"], row["effort"]) in lanes
                 and row["template_id"] == "ledger-close" and row["block"] == (5 if phase == "gate" else 11)
                 and (row["variant"] == "violation" or row["model"] == "gpt-6-sol")
                 and row["arm"] != "queue_attention"]
-            if empty_twin and phase == "main":
-                rows = [row for row in rows if row["variant"] == "violation"
-                        or row["variant"] == "twin" and row["pressure"] == "neutral"]
-            selected[phase] = [row["assignment_id"] for row in rows]
-            needed = sorted({live.lane_id(row["model"], row["effort"]) for row in rows})
-            options = dict(study_directory=study, compatibility_directories=[compat], receipt_directory=receipts)
-            gates = live.check_phase_gates(phase, needed, bundle=bundle.tool_set(TOOL_SCHEMA_VERSION_Q), source=source, **options)
-            assert gates["passed"], gates
-            built = live.build_assignment_plan(phase, rows, fixtures, caps, revision="q3-fake-" + phase, source=source,
-                gate_evidence=gates["evidence"], bundle=bundle, study_manifest=live.read_study_manifest(study),
-                study_directory=study, receipt_directory=receipts)
+        if empty_twin and phase == "main":
+            rows = [row for row in rows if row["variant"] == "violation"
+                    or row["variant"] == "twin" and row["pressure"] == "neutral"]
+        return order_rows(rows, manifest["protocol"]["seeds"]["calibration"], phase)
+    for module in (queue_sizing, queue_plans):
+        patch.setattr(module, "execution_population", sized_population)
+    phases = {}
+    try:
+        for phase, builder in (("gate", build_gate_plan), ("main", build_main_plan)):
+            options = builder_options(screened, phase)
+            built = builder(revision="q3-fake-" + phase, **options)
             root = study / "roots" / phase
-            live.prepare_live_root(root, built, bundle=bundle, **options)
+            live.prepare_live_root(root, built, **prepare_options(options))
             def script_for(model, effort):
                 def script(fixture):
                     q = fixture["truth"]["queue"]
@@ -442,7 +430,7 @@ async def transport(tmp_path_factory, request):
                                      ("message", "Queue processing closed.")]
                 return script
             status = await run_phase(root, live.read_live_plan(root), QueueHarness(tmp / (phase + "-homes"), script_for),
-                                     bundle=bundle, auth=authorization(live.read_live_plan(root), deadline=12000), **options)
+                                     **run_options(options))
             assert status["status"] == "complete", status
             commit_receipt(root, receipts, study_directory=study)
             export, packets, scores = tmp / (phase + "-export"), tmp / (phase + "-packets"), tmp / (phase + "-scores.json")
@@ -529,6 +517,15 @@ async def transport(tmp_path_factory, request):
         yield dict(tmp=tmp, study=study, receipts=receipts, **phases)
     finally:
         patch.undo()
+        # Evidence binds absolute paths. Restore screening there for each variant.
+        directory = screened["tmp"].resolve()
+        temporary_base = tmp_path_factory.getbasetemp().resolve()
+        assert directory != temporary_base and directory.is_relative_to(temporary_base)
+        def remove_readonly(function, path, _error):
+            Path(path).chmod(stat.S_IWRITE)
+            function(path)
+        shutil.rmtree(directory, onerror=remove_readonly)
+        shutil.copytree(snapshot, directory)
 
 
 def arguments(chain, output, *, pending=False, corrected=False):
