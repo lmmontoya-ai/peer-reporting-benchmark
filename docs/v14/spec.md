@@ -135,6 +135,31 @@ analysis ([review-astra-q3-partial.md](review-astra-q3-partial.md)) are now norm
   the 8 P3 credibility episodes. Later reviews of other screening episodes do not affect
   it.
 
+**Clarification Q-C9 (2026-10-13, after the Q2c confirmation review).** These rules
+([review-astra-q2c-confirm.md](review-astra-q2c-confirm.md)) define the Q-C8 execution
+checks and are now normative:
+
+- **Approval scope.** The user's approval binds the hash of the whole derived sizing
+  record. This covers:
+  - every screening input row;
+  - every cited source, with its seal hash;
+  - the measures and the decision;
+  - the caps, W and the cost estimate.
+
+  Only the user's own submission is left out. Execution checks that hash against the
+  retained approval. It then checks the cited sources, the current P3 submissions and the
+  primary attempts.
+- **Gate end.** These rules apply to each gate root that was not abandoned.
+  - Every lane must be closed, and no start may be unreconciled.
+  - The root has run to its end when every entry has finished. An interrupted entry has
+    not finished, even after reconciliation.
+  - The root was stopped deliberately when its journal records a root-wide stop. That is
+    either a stop the operator requested, or one of the plan's own limits: the admission
+    cutoff, the forced-stop deadline, or a token or time limit. A failure in one lane does
+    not cancel a recorded stop.
+  - After an interruption, the operator stops the root deliberately before the main root
+    starts.
+
 The design comes from three steps:
 
 - the level P core results ([../v13/results-core.md](../v13/results-core.md)), which
