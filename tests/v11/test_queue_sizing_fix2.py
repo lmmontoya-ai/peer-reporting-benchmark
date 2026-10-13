@@ -167,9 +167,18 @@ async def main_admits(chain, main, options):
     assert harness.created and status["live_model_call_starts"] > 0
 
 
-async def test_final_entries_interrupted_then_reconciled_require_deliberate_stop(chain, monkeypatch):
+@pytest.mark.parametrize("prior_stop", [False, True])
+async def test_final_entries_interrupted_then_reconciled_require_deliberate_stop(chain, monkeypatch, prior_stop):
     gate, main, options = prepared_gate_and_main(chain)
     plan = live.read_live_plan(gate)
+    if prior_stop:
+        (gate / "STOP").write_bytes(b"Stop before resuming the gate.\n")
+        stopped = QueueHarness(chain["tmp"] / "prior-stopped-gate", finish_script)
+        await run_phase(gate, plan, stopped, **run_options(options))
+        assert stopped.created == []
+        assert all(any(row["kind"] == "root_stop_recorded" and "soft_stop" in row["data"]["holds"]
+                       for row in records) for records in live.lane_journals(gate, plan).values())
+        (gate / "STOP").unlink()
     final_ids = {read_sealed(gate / lane["path"] / "phase-plan.json")["planned_order"][-1]["attempt_id"]
                  for lane in plan["lanes"]}
     original_execute = phase._PhaseRun._execute
@@ -194,12 +203,17 @@ async def test_final_entries_interrupted_then_reconciled_require_deliberate_stop
     assert status["status_counts"] == {"archived": 46, "incomplete_interrupted": 2}
     commit_receipt(gate, chain["receipts"], study_directory=chain["study"])
     assert not live.verify_live_root(gate, **verification(chain))["unreconciled_starts"]
+    assert all(sum(row["kind"] == "run_opened" for row in records) == 2 + prior_stop
+               for records in live.lane_journals(gate, plan).values())
     await main_refuses(chain, main, options, "reconciled-without-stop")
     (gate / "STOP").write_bytes(b"Stop the interrupted root.\n")
-    await run_phase(gate, plan, QueueHarness(chain["tmp"] / "stopped-gate", finish_script), **run_options(options))
+    stopped = QueueHarness(chain["tmp"] / "stopped-gate", finish_script)
+    await run_phase(gate, plan, stopped, **run_options(options))
+    assert stopped.created == []
     commit_receipt(gate, chain["receipts"], study_directory=chain["study"])
-    assert any(row["kind"] == "root_stop_recorded" and "soft_stop" in row["data"]["holds"]
-               for records in live.lane_journals(gate, plan).values() for row in records)
+    assert all(sum(row["kind"] == "run_opened" for row in records) == 3 + prior_stop
+               and records[-2]["kind"] == "root_stop_recorded" and "soft_stop" in records[-2]["data"]["holds"]
+               for records in live.lane_journals(gate, plan).values())
     (gate / "STOP").unlink()
     await main_admits(chain, main, options)
 
@@ -225,7 +239,8 @@ async def test_collection_limit_is_a_deliberate_gate_stop(chain, limit):
     await main_admits(chain, main, options)
 
 
-async def test_failure_hold_refuses_main_until_root_stop_despite_failed_lane(chain):
+@pytest.mark.parametrize("prior_failure", [False, True])
+async def test_failure_hold_refuses_main_until_root_stop_despite_failed_lane(chain, prior_failure):
     gate, main, options = prepared_gate_and_main(chain)
     plan = live.read_live_plan(gate)
     async def fail_one_lane(runtime, model, caps, *, reasoning_effort, bundle):
@@ -233,13 +248,14 @@ async def test_failure_hold_refuses_main_until_root_stop_despite_failed_lane(cha
             raise live.PreflightError("Offline preflight refusal.")
         return await live.manifest_preflight(runtime, model, caps, reasoning_effort=reasoning_effort,
                                              bundle=bundle, version_reader=fake_version)
-    await run_phase(gate, plan, QueueHarness(chain["tmp"] / "failed-gate", finish_script),
-                    preflight=fail_one_lane, **run_options(options))
-    commit_receipt(gate, chain["receipts"], study_directory=chain["study"])
-    assert any(row["data"].get("halted", {}).get("reason") == "preflight_failed"
-               for records in live.lane_journals(gate, plan).values() for row in records
-               if row["kind"] == "run_closed" and row["data"].get("halted"))
-    await main_refuses(chain, main, options, "failure-hold")
+    if prior_failure:
+        await run_phase(gate, plan, QueueHarness(chain["tmp"] / "failed-gate", finish_script),
+                        preflight=fail_one_lane, **run_options(options))
+        commit_receipt(gate, chain["receipts"], study_directory=chain["study"])
+        assert any(row["data"].get("halted", {}).get("reason") == "preflight_failed"
+                   for records in live.lane_journals(gate, plan).values() for row in records
+                   if row["kind"] == "run_closed" and row["data"].get("halted"))
+        await main_refuses(chain, main, options, "failure-hold")
     # Record STOP during the same run as an earlier lane preflight failure.
     stopped = False
     async def fail_then_stop(runtime, model, caps, *, reasoning_effort, bundle):
@@ -255,6 +271,8 @@ async def test_failure_hold_refuses_main_until_root_stop_despite_failed_lane(cha
     assert stopped and "soft_stop" in status["holds"]
     assert any(report.get("halted", {}).get("reason") == "preflight_failed" for report in status["lanes"].values()
                if report.get("halted"))
+    assert all(sum(row["kind"] == "run_opened" for row in records) == 1 + prior_failure
+               for records in live.lane_journals(gate, plan).values())
     commit_receipt(gate, chain["receipts"], study_directory=chain["study"])
     (gate / "STOP").unlink()
     await main_admits(chain, main, options)
@@ -321,3 +339,50 @@ def test_active_collection_stop_survives_failure_halts(monkeypatch, reason):
     journals["a"].insert(1, {"kind": "collection_stop_requested", "data": {"reason": reason, "attempt_id": "attempt"}})
     gate_history(monkeypatch, statuses={"a": "incomplete_interrupted", "b": "unrun"}, journals=journals)
     assert gate_prerequisites("study", receipt_directory="receipts", require_execution=True)
+
+
+@pytest.mark.parametrize("stop_kind", ["admission_held", "collection_stop_requested", "run_closed", "root_stop_recorded"])
+@pytest.mark.parametrize("new_stop", [False, True])
+def test_only_a_stop_in_the_last_root_session_counts(monkeypatch, stop_kind, new_stop):
+    def stopped_session():
+        stop = {"reason": "collection_token_limit"} if stop_kind == "collection_stop_requested" else {
+            "reason": "global_admission_hold", "holds": ["soft_stop"]}
+        rows = lifecycle(stop if stop_kind == "run_closed" else None)
+        if stop_kind != "run_closed":
+            rows.insert(1, {"kind": stop_kind, "data": stop})
+        return rows
+
+    journals = {"stopped-lane": stopped_session() + lifecycle(), "other-lane": lifecycle() + lifecycle()}
+    if new_stop:
+        journals["stopped-lane"] += stopped_session()
+        journals["other-lane"] += lifecycle()
+    gate_history(monkeypatch, statuses={lane: "incomplete_interrupted" for lane in journals}, journals=journals)
+    if new_stop:
+        assert gate_prerequisites("study", receipt_directory="receipts", require_execution=True)
+    else:
+        with pytest.raises(ValueError, match="finished or deliberately stopped"):
+            gate_prerequisites("study", receipt_directory="receipts", require_execution=True)
+
+
+@pytest.mark.parametrize("status", ["archived", "incomplete_interrupted"])
+def test_gate_lanes_with_different_session_counts_refuse(monkeypatch, status):
+    stop = {"reason": "global_admission_hold", "holds": ["soft_stop"]}
+    journals = {"stopped-lane": lifecycle() + lifecycle(stop), "other-lane": lifecycle(stop)}
+    gate_history(monkeypatch, statuses={lane: status for lane in journals}, journals=journals)
+    with pytest.raises(ValueError, match="differ in their number of root sessions"):
+        gate_prerequisites("study", receipt_directory="receipts", require_execution=True)
+
+
+@pytest.mark.parametrize("stop_file,reason", [("STOP", "soft_stop"), ("HARD_STOP", "hard_stop")])
+async def test_single_session_operator_stop_still_admits_main(chain, stop_file, reason):
+    gate, main, options = prepared_gate_and_main(chain)
+    plan = live.read_live_plan(gate)
+    (gate / stop_file).write_bytes(b"Stop the gate.\n")
+    harness = QueueHarness(chain["tmp"] / "single-session-stopped-gate", finish_script)
+    status = await run_phase(gate, plan, harness, **run_options(options))
+    assert harness.created == [] and reason in status["holds"]
+    assert all(sum(row["kind"] == "run_opened" for row in records) == 1
+               for records in live.lane_journals(gate, plan).values())
+    commit_receipt(gate, chain["receipts"], study_directory=chain["study"])
+    (gate / stop_file).unlink()
+    await main_admits(chain, main, options)
